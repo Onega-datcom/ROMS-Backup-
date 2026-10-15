@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CostTrack — Restaurant Management System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark"><span></span><span></span><span></span></div>
+          <div><strong>Cost<span>Track</span></strong><small>Restaurant management</small></div>
+        </div>
+        <div class="workspace-switcher">
+          <div class="avatar restaurant-avatar">BA</div>
+          <div><span>Workspace</span><strong>Basil &amp; Ash</strong></div>
+          <span class="chevron">⌄</span>
+        </div>
+        <nav class="main-nav">
+          <div class="nav-label">Workspace</div>
+          <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span>Dashboard</button>
+          <button class="nav-item" data-view="pos"><span class="nav-icon">▣</span>POS &amp; orders</button>
+          <button class="nav-item" data-view="kitchen"><span class="nav-icon">♨</span>Kitchen monitor <b class="nav-badge order-badge">3</b></button>
+          <button class="nav-item" data-view="manager"><span class="nav-icon">◒</span>Manager insights</button>
+          <button class="nav-item" data-view="admin"><span class="nav-icon">⌘</span>Admin center</button>
+          <button class="nav-item" data-view="menu"><span class="nav-icon">▦</span>Menu management</button>
+          <button class="nav-item" data-view="recipes"><span class="nav-icon">♨</span>Recipes</button>
+          <button class="nav-item" data-view="inventory"><span class="nav-icon">▤</span>Ingredient inventory <b class="nav-badge">3</b></button>
+          <button class="nav-item" data-view="calculator"><span class="nav-icon">⌗</span>Food cost calculator</button>
+          <div class="nav-label">Insights</div>
+          <button class="nav-item" data-view="analysis"><span class="nav-icon">↗</span>Sales &amp; profit</button>
+          <button class="nav-item" data-view="reports"><span class="nav-icon">▥</span>Reports</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="help-card"><div class="help-icon">?</div><div><strong>Need a hand?</strong><span>Visit the help center</span></div><span class="arrow">→</span></div>
+          <button class="nav-item settings"><span class="nav-icon">⚙</span>Settings</button>
+          <div class="user-mini"><div class="avatar user-avatar">JD</div><div><strong>Jamie Dela Cruz</strong><span>Restaurant Owner</span></div><span class="dots">•••</span></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobileMenu">☰</button>
+          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="pageCrumb">Overview</strong></div>
+          <div class="top-actions">
+            <div class="date-pill"><span class="calendar-icon">□</span> Oct 01 – Oct 31, 2024 <span class="chevron">⌄</span></div>
+            <button class="icon-button notification" aria-label="Notifications">♢<i></i></button>
+            <div class="role-selector"><label for="roleSelect">CURRENT USER</label><select id="roleSelect"><option>Admin</option><option>Cashier</option><option>Kitchen Staff</option><option>Manager</option><option>Inventory Staff</option></select></div>
+          </div>
+        </header>
+        <section class="content" id="app"></section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
