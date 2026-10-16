@@ -38,6 +38,63 @@ const posProducts = [
   ['Soft Drinks', '🥤', 35, 'Drinks'], ['Halo-Halo', '🍧', 145, 'Desserts']
 ];
 
+const publicMenu = [
+  { name: 'Crispy Pata', category: 'Main Course', price: 680, description: 'Slow-roasted pork knuckle, crisped to perfection with our house soy-calamansi dip.', image: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=85' },
+  { name: 'Chicken Inasal', category: 'Main Course', price: 320, description: 'Char-grilled chicken marinated in lemongrass, calamansi, and annatto oil.', image: 'https://images.unsplash.com/photo-1532550907401-a500c9a57435?auto=format&fit=crop&w=800&q=85' },
+  { name: 'Beef Kare-Kare', category: 'Main Course', price: 495, description: 'Tender beef simmered in a rich peanut sauce with seasonal vegetables.', image: 'https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=800&q=85' },
+  { name: 'Grilled Seafood', category: 'Main Course', price: 790, description: 'A generous catch of prawns, squid, and fish finished over live fire.', image: 'https://images.unsplash.com/photo-1559339352-11d035aa65de?auto=format&fit=crop&w=800&q=85' },
+  { name: 'Halo-Halo', category: 'Desserts', price: 220, description: 'A playful tower of shaved ice, tropical fruits, leche flan, and ube cream.', image: 'https://images.unsplash.com/photo-1563805042-7684c019e1cb?auto=format&fit=crop&w=800&q=85' },
+  { name: 'Calamansi Spritz', category: 'Beverages', price: 180, description: 'Bright calamansi, sparkling water, and a hint of basil.', image: 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=85' }
+];
+const publicReservations = JSON.parse(localStorage.getItem('isobelReservations') || JSON.stringify([
+  { id: 'RES-2026-001', name: 'John Cruz', date: 'October 20, 2026', time: '7:00 PM', guests: 5, occasion: 'Birthday', status: 'Pending' }
+]));
+let publicReservationSequence = 2;
+
+function publicHeader(active) {
+  return `<header class="public-header"><a class="public-logo" href="#" data-public-view="public-home">ISOBEL <span>•</span></a><nav class="public-nav">${[
+    ['public-home','Home'],['public-about','Our story'],['public-menu','Menu'],['public-buffet','Buffet'],['public-gallery','Gallery'],['public-contact','Contact']
+  ].map(item => `<a href="#" class="${active === item[0] ? 'active' : ''}" data-public-view="${item[0]}">${item[1]}</a>`).join('')}</nav><div class="public-header-actions"><button class="public-manage" data-public-view="dashboard">Management dashboard</button><button class="public-book" data-public-view="public-reservation">Reserve a table</button><button class="public-menu-toggle" aria-label="Open menu">☰</button></div></header>`;
+}
+function publicFooter() {
+  return `<footer class="public-footer"><div><div class="public-logo">ISOBEL <span>•</span></div><p>Thoughtful food. Unhurried moments.<br>Made for your table.</p></div><div><strong>Visit us</strong><span>Sample Restaurant Address</span><span>(043) XXX-XXXX</span></div><div><strong>Hours</strong><span>Monday – Sunday</span><span>11:00 AM – 10:00 PM</span></div><div><strong>Follow along</strong><span>@isobelrestaurant</span><span>contact@isobelrestaurant.com</span></div></footer>`;
+}
+function publicShell(active, content) {
+  return `<div class="public-site">${publicHeader(active)}${content}${publicFooter()}<div class="public-toast" id="publicToast"></div></div>`;
+}
+function publicHome() {
+  return publicShell('public-home', `<section class="public-hero"><div class="hero-copy"><span class="public-kicker">A table worth gathering around</span><h1>Exceptional dining,<br><em>memorable moments.</em></h1><p>Welcome to ISOBEL, where Filipino soul meets modern hospitality. Come hungry, stay awhile.</p><div class="hero-actions"><button class="public-primary" data-public-view="public-menu">Explore our menu <span>↗</span></button><button class="public-outline" data-public-view="public-reservation">Reserve your table</button></div><div class="hero-note"><span>✦</span> Open daily · 11:00 AM – 10:00 PM</div></div><div class="hero-image"><img src="https://images.unsplash.com/photo-1515003197210-e0cd71810b5f?auto=format&fit=crop&w=1400&q=90" alt="Elegant restaurant dining room"><div class="hero-caption"><span>01</span><b>The ISOBEL experience</b><span>↗</span></div></div></section>
+  <section class="public-section intro-section"><div class="section-label">The ISOBEL table</div><div><h2>Food that feels like<br><em>coming home.</em></h2><p>From heirloom recipes to ingredients sourced at their peak, every plate tells a story of the islands. We create spaces for celebrations, conversations, and the simple joy of sharing a meal.</p><button class="text-link" data-public-view="public-about">Discover our story <span>→</span></button></div></section>
+  <section class="public-section featured-section"><div class="public-section-heading"><div><span class="section-label">From our kitchen</span><h2>House <em>favorites</em></h2></div><button class="text-link" data-public-view="public-menu">View full menu <span>→</span></button></div><div class="featured-grid">${publicMenu.slice(0,3).map((dish,i)=>`<article class="featured-card ${i===1?'featured-tall':''}"><img src="${dish.image}" alt="${dish.name}"><div><span>${dish.category}</span><h3>${dish.name}</h3><p>${dish.description}</p><b>${money(dish.price)}</b></div></article>`).join('')}</div></section>
+  <section class="quote-section"><span class="quote-mark">“</span><blockquote>There is no love more sincere than the love of food.</blockquote><span>— George Bernard Shaw</span></section>
+  <section class="public-section buffet-preview"><div class="buffet-image"><img src="https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1200&q=85" alt="Buffet spread"></div><div><span class="section-label">Gather generously</span><h2>The buffet,<br><em>reimagined.</em></h2><p>Whether it is an intimate dinner or a room full of your favorite people, our curated buffet packages make every gathering effortless.</p><button class="public-primary" data-public-view="public-buffet">Explore buffet packages <span>↗</span></button></div></section>
+  <section class="public-section testimonials"><span class="section-label">Kind words</span><h2>From our guests</h2><div class="testimonial-grid">${[['“','The kind of place you come to for dinner and leave with a new favorite memory. Every detail feels intentional.','Mika S. · Google review'],['“','ISOBEL made our anniversary feel truly special. The food was beautiful, but the warmth stayed with us.','Paolo & Ana · Guest'],['“','Our family gathering was seamless from start to finish. The buffet selection was incredible.','The Reyes family · Guest']].map(t=>`<div><span class="testimonial-mark">${t[0]}</span><p>${t[1]}</p><b>${t[2]}</b></div>`).join('')}</div></section>
+  <section class="reservation-banner"><div><span class="section-label">Your table awaits</span><h2>Make tonight<br><em>memorable.</em></h2></div><button class="public-outline light" data-public-view="public-reservation">Reserve your table <span>↗</span></button></section>`);
+}
+function publicAbout() {
+  return publicShell('public-about', `<section class="inner-hero"><span class="public-kicker">Our story</span><h1>Rooted in home.<br><em>Made for here.</em></h1><p>ISOBEL is a love letter to the flavors, people, and places that shaped us.</p></section><section class="public-section story-layout"><div><span class="section-label">The beginning</span><h2>A table set<br>with <em>intention.</em></h2><p>ISOBEL began with a simple belief: the best meals are the ones that bring people closer. Our kitchen takes the comfort of Filipino cooking and gives it a fresh, thoughtful point of view.</p><p>Every detail—from the produce we choose to the way we welcome you—is an invitation to slow down and stay awhile.</p></div><img src="https://images.unsplash.com/photo-1552566626-52f8b828add9?auto=format&fit=crop&w=1000&q=85" alt="ISOBEL dining space"></section><section class="values-section"><div class="section-label">What guides us</div><div class="values-grid">${[['01','Generosity','We believe a table should always have room for one more.'],['02','Integrity','We honor ingredients, traditions, and the hands behind them.'],['03','Joy','We make space for the little celebrations that make life delicious.']].map(v=>`<div><span>${v[0]}</span><h3>${v[1]}</h3><p>${v[2]}</p></div>`).join('')}</div></section><section class="public-section why-section"><div class="why-image"><img src="https://images.unsplash.com/photo-1600891964092-4316c288032e?auto=format&fit=crop&w=1000&q=85" alt="Guests dining at ISOBEL"></div><div><span class="section-label">Why ISOBEL</span><h2>Come as guests.<br>Leave as <em>family.</em></h2><p>Our dining room is designed for long lunches, spontaneous celebrations, and every meaningful moment in between.</p><ul><li>Seasonal ingredients, thoughtfully sourced</li><li>Warm service without the fuss</li><li>Private dining for your special occasions</li></ul></div></section>`);
+}
+function publicMenuView() {
+  return publicShell('public-menu', `<section class="inner-hero menu-hero"><span class="public-kicker">The menu</span><h1>Flavors with<br><em>a point of view.</em></h1><p>Filipino favorites, reimagined with seasonal ingredients and a little ISOBEL magic.</p></section><section class="public-section menu-page"><div class="menu-filter">${['All dishes','Main Course','Appetizers','Desserts','Beverages','Buffet Specials'].map((c,i)=>`<button class="${i===0?'active':''}" data-menu-filter="${c}">${c}</button>`).join('')}</div><div class="menu-grid">${publicMenu.map(d=>`<article class="public-dish" data-category="${d.category}"><img src="${d.image}" alt="${d.name}"><div><span>${d.category}</span><h3>${d.name}</h3><p>${d.description}</p><b>${money(d.price)}</b></div></article>`).join('')}</div></section>`);
+}
+function publicBuffet() {
+  const packages = [['Silver','499','A generous spread for easy, joyful gatherings.',['Main dishes','Desserts','Unlimited drinks']],['Gold','799','A little more of everything worth celebrating.',['Premium menu selection','Seafood options','Desserts','Unlimited drinks']],['Platinum','999','The complete ISOBEL experience, made unforgettable.',['Full buffet experience','Premium menu','VIP seating','Unlimited drinks']]];
+  return publicShell('public-buffet', `<section class="inner-hero buffet-hero"><span class="public-kicker">Gather generously</span><h1>There is always<br><em>room for more.</em></h1><p>Our buffet packages are made for birthdays, reunions, and the stories that happen around a full table.</p></section><section class="public-section packages-section"><div class="packages-intro"><span class="section-label">Choose your experience</span><h2>Made for<br><em>your gathering.</em></h2></div><div class="package-grid">${packages.map((p,i)=>`<article class="package-card ${i===1?'featured-package':''}"><span class="package-number">0${i+1}</span><span class="package-label">${p[0]} package</span><h3>₱${p[1]} <small>per person</small></h3><p>${p[2]}</p><ul>${p[3].map(f=>`<li>✓ ${f}</li>`).join('')}</ul><button class="${i===1?'public-primary':'public-outline'}" data-public-view="public-reservation">Choose ${p[0]} <span>↗</span></button></article>`).join('')}</div></section><section class="package-note"><span>✦</span><p>All buffet packages are available for groups of 10 or more. Talk to us about customizing your celebration.</p><button class="text-link" data-public-view="public-contact">Plan your event →</button></section>`);
+}
+function publicReservation() {
+  return publicShell('public-reservation', `<section class="form-hero"><div><span class="public-kicker">A seat at our table</span><h1>Reserve your<br><em>moment.</em></h1><p>Tell us a little about your visit and we will take care of the rest.</p></div><div class="form-hero-image"><img src="https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1000&q=85" alt="Set restaurant table"></div></section><section class="public-section reservation-layout"><form class="public-form" id="reservationForm"><div class="form-heading"><span class="section-label">Reservation details</span><h2>Let's make it <em>special.</em></h2></div><div class="form-row"><label>Full name<input name="name" required placeholder="Your full name"></label><label>Contact number<input name="phone" required placeholder="09XX XXX XXXX"></label></div><div class="form-row"><label>Email address<input name="email" type="email" required placeholder="you@email.com"></label><label>Number of guests<select name="guests"><option>2 guests</option><option>3 guests</option><option>4 guests</option><option>5 guests</option><option>6+ guests</option></select></label></div><div class="form-row"><label>Reservation date<input name="date" type="date" required></label><label>Reservation time<select name="time"><option>11:30 AM</option><option>1:00 PM</option><option>5:30 PM</option><option>7:00 PM</option><option>8:30 PM</option></select></label></div><label>Occasion<select name="occasion"><option>Birthday</option><option>Anniversary</option><option>Family gathering</option><option>Business meeting</option><option>Just because</option></select></label><label>Special requests<textarea name="requests" rows="4" placeholder="Dietary requirements, seating preferences, or a note for our team"></textarea></label><button class="public-primary form-submit">Request reservation <span>↗</span></button><p class="form-footnote">This is a presentation-only reservation request. No payment is required.</p></form><aside class="reservation-aside"><span class="section-label">Good to know</span><h3>We hold your table for 15 minutes.</h3><p>For parties of 8 or more, please contact us directly so we can make your gathering just right.</p><button class="text-link" data-public-view="public-status">Check reservation status →</button></aside></section>`);
+}
+function publicStatus() {
+  return publicShell('public-status', `<section class="inner-hero status-hero"><span class="public-kicker">Your reservation</span><h1>We saved you<br><em>a seat.</em></h1><p>Enter your reservation reference below to see the latest update.</p></section><section class="public-section status-section"><form class="status-form" id="statusForm"><label>Reservation number<input name="reference" value="RES-2026-001" placeholder="RES-2026-001"></label><button class="public-primary">Check status <span>↗</span></button></form><div id="statusResult"></div></section>`);
+}
+function publicGallery() {
+  const images = [['Dining area','https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1000&q=85'],['Private rooms','https://images.unsplash.com/photo-1550966871-3ed3cdb5ed0c?auto=format&fit=crop&w=1000&q=85'],['Signature dishes','https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=1000&q=85'],['The buffet','https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1000&q=85'],['Good company','https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1000&q=85'],['Little celebrations','https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?auto=format&fit=crop&w=1000&q=85']];
+  return publicShell('public-gallery', `<section class="inner-hero gallery-hero"><span class="public-kicker">A glimpse inside</span><h1>Gather beautifully.<br><em>Stay awhile.</em></h1></section><section class="public-section gallery-grid">${images.map((im,i)=>`<figure class="gallery-tile tile-${i+1}"><img src="${im[1]}" alt="${im[0]}"><figcaption><span>0${i+1}</span>${im[0]} <b>↗</b></figcaption></figure>`).join('')}</section>`);
+}
+function publicContact() {
+  return publicShell('public-contact', `<section class="inner-hero contact-hero"><span class="public-kicker">Come find us</span><h1>Let's make<br><em>plans.</em></h1><p>Questions, celebrations, or just a hello—we would love to hear from you.</p></section><section class="public-section contact-layout"><div class="contact-details"><span class="section-label">ISOBEL restaurant</span><h2>Good food is<br><em>better shared.</em></h2><div class="contact-lines"><div><b>Visit us</b><span>Sample Restaurant Address</span><span>Batangas, Philippines</span></div><div><b>Call or email</b><span>(043) XXX-XXXX</span><span>contact@isobelrestaurant.com</span></div><div><b>Hours</b><span>Monday – Sunday</span><span>11:00 AM – 10:00 PM</span></div></div></div><div class="contact-form-card"><span class="section-label">Send a note</span><form id="contactForm"><label>Name<input required placeholder="Your name"></label><label>Email<input type="email" required placeholder="you@email.com"></label><label>Message<textarea required rows="5" placeholder="How can we help?"></textarea></label><button class="public-primary">Send message <span>↗</span></button></form></div></section><section class="map-placeholder"><div><span>⌖</span><strong>ISOBEL, Batangas</strong><small>Map preview · Sample Restaurant Address</small></div></section>`);
+}
+
 function svgChart() {
   const points = [52, 43, 48, 35, 40, 29, 33, 25, 31, 20, 24, 17];
   const x = i => 35 + i * 45;
@@ -158,9 +215,15 @@ function adminView() {
     ${opsCards()}<div class="admin-grid"><div class="panel"><div class="panel-header"><div><div class="panel-title">Menu & categories</div><div class="panel-subtitle">6 products · 4 categories</div></div><button class="ghost-btn">Manage categories</button></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>Category</th><th>Price</th><th>Status</th><th>Action</th></tr></thead><tbody>${[['🍔','Burger','Main Course','₱220'],['🍗','Chicken Meal','Main Course','₱260'],['🍝','Spaghetti','Main Course','₱195'],['🍟','Fries','Snacks','₱70'],['🥤','Soft Drinks','Drinks','₱35'],['🍧','Halo-Halo','Desserts','₱145']].map(p=>`<tr><td><div class="dish-cell"><div class="mini-food">${p[0]}</div>${p[1]}</div></td><td>${p[2]}</td><td>${p[3]}</td><td><span class="pill green">Active</span></td><td><span class="view-link">Edit · Archive</span></td></tr>`).join('')}</tbody></table></div></div><div class="panel"><div class="panel-header"><div><div class="panel-title">System statistics</div><div class="panel-subtitle">Today at a glance</div></div></div><div class="kpi-list"><div><span>Active users</span><b>12</b></div><div><span>Kitchen tickets</span><b>${workflow.orders.length}</b></div><div><span>Low stock alerts</span><b class="down">3</b></div><div><span>System status</span><b class="good-text">Healthy</b></div></div><div class="admin-users"><strong>Team access</strong><span>Jamie Dela Cruz · Admin</span><span>Marco Santos · Cashier</span><span>Ana Reyes · Kitchen Staff</span><span>Rina Cruz · Inventory Staff</span></div></div></div>`;
 }
 
-const views = { dashboard, pos: posView, kitchen: kitchenView, manager: managerView, admin: adminView, menu: menuView, recipes: recipesView, inventory: inventoryView, calculator: calculatorView, analysis: analysisView, reports: reportsView };
+function reservationsView() {
+  const counts = ['Total Reservations','Pending Reservations','Confirmed Reservations','Completed Reservations'];
+  const values = [publicReservations.length, publicReservations.filter(r=>r.status==='Pending').length, publicReservations.filter(r=>r.status==='Confirmed').length, publicReservations.filter(r=>r.status==='Completed').length];
+  return `${header('Reservations', 'Keep every guest arrival thoughtful, organized, and on time.','＋ Add reservation')}<div class="metric-grid">${counts.map((c,i)=>`<div class="metric-card"><div class="metric-top"><span>${c}</span><i class="metric-icon ${i===0?'green-icon':i===1?'orange-icon':i===2?'purple-icon':'red-icon'}">${['◒','◷','✓','★'][i]}</i></div><div class="metric-value">${values[i]}</div><div class="metric-foot">${i===0?'Across the public website':i===1?'Needs your attention':i===2?'Ready for service':'Completed visits'}</div></div>`).join('')}</div><div class="panel"><div class="panel-header"><div><div class="panel-title">Recent reservations</div><div class="panel-subtitle">Public website requests · presentation-only data</div></div><span class="pill green">● Live simulation</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Reference</th><th>Guest</th><th>Date & time</th><th>Guests</th><th>Occasion</th><th>Status</th><th>Update</th></tr></thead><tbody>${publicReservations.map(r=>`<tr><td><b>${r.id}</b></td><td>${r.name}</td><td>${r.date}<small>${r.time}</small></td><td>${r.guests} guests</td><td>${r.occasion}</td><td><span class="pill ${r.status==='Confirmed'?'green':r.status==='Completed'?'purple':'orange'}">${r.status}</span></td><td><select class="reservation-status-select" data-reservation="${r.id}">${['Pending','Confirmed','Completed','Cancelled'].map(s=>`<option ${s===r.status?'selected':''}>${s}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table></div></div>`;
+}
+
+const views = { dashboard, pos: posView, kitchen: kitchenView, manager: managerView, admin: adminView, reservations: reservationsView, menu: menuView, recipes: recipesView, inventory: inventoryView, calculator: calculatorView, analysis: analysisView, reports: reportsView, 'public-home': publicHome, 'public-about': publicAbout, 'public-menu': publicMenuView, 'public-buffet': publicBuffet, 'public-reservation': publicReservation, 'public-status': publicStatus, 'public-gallery': publicGallery, 'public-contact': publicContact };
 const roleModules = {
-  Admin: ['dashboard', 'admin', 'pos', 'kitchen', 'manager', 'menu', 'recipes', 'inventory', 'calculator', 'analysis', 'reports'],
+  Admin: ['dashboard', 'admin', 'reservations', 'pos', 'kitchen', 'manager', 'menu', 'recipes', 'inventory', 'calculator', 'analysis', 'reports'],
   Cashier: ['dashboard', 'pos', 'menu', 'analysis'],
   'Kitchen Staff': ['dashboard', 'kitchen', 'recipes', 'inventory'],
   Manager: ['dashboard', 'manager', 'pos', 'kitchen', 'menu', 'inventory', 'analysis', 'reports'],
@@ -169,7 +232,7 @@ const roleModules = {
 function applyRoleAccess() {
   const allowed = roleModules[role];
   document.querySelectorAll('[data-view]').forEach(btn => {
-    btn.hidden = !allowed.includes(btn.dataset.view);
+    btn.hidden = btn.dataset.view.startsWith('public-') ? false : !allowed.includes(btn.dataset.view);
   });
   const sidebarRole = document.querySelector('.user-mini div:nth-child(2) span');
   if (sidebarRole) sidebarRole.textContent = role;
@@ -177,6 +240,38 @@ function applyRoleAccess() {
   if (badge) badge.textContent = workflow.orders.filter(order => order.status !== 'Completed').length;
 }
 function wireView() {
+  document.querySelectorAll('[data-public-view]').forEach(button => button.addEventListener('click', event => {
+    event.preventDefault();
+    render(button.dataset.publicView);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }));
+  document.querySelectorAll('[data-menu-filter]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('[data-menu-filter]').forEach(item => item.classList.toggle('active', item === button));
+    document.querySelectorAll('.public-dish').forEach(item => { item.hidden = button.dataset.menuFilter !== 'All dishes' && item.dataset.category !== button.dataset.menuFilter; });
+  }));
+  document.querySelector('#reservationForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const reference = `RES-2026-${String(publicReservationSequence++).padStart(3, '0')}`;
+    const date = new Date(form.get('date'));
+    const formattedDate = Number.isNaN(date.getTime()) ? 'October 20, 2026' : date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    publicReservations.unshift({ id: reference, name: form.get('name'), date: formattedDate, time: form.get('time'), guests: Number.parseInt(form.get('guests'), 10) || 2, occasion: form.get('occasion'), status: 'Pending' });
+    document.querySelector('#reservationForm').innerHTML = `<div class="success-card"><span>✦</span><span class="section-label">Request received</span><h2>Thank you, ${form.get('name').split(' ')[0]}.</h2><p>Your table request is with our team. We will confirm the details shortly.</p><strong>Your reference number</strong><b>${reference}</b><button type="button" class="text-link" data-public-view="public-status">Check reservation status →</button></div>`;
+    wireView();
+  });
+  document.querySelector('#statusForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    const reference = new FormData(event.currentTarget).get('reference').toString().trim().toUpperCase();
+    const reservation = publicReservations.find(item => item.id === reference);
+    document.querySelector('#statusResult').innerHTML = reservation ? `<div class="status-card"><div><span class="section-label">Reservation found</span><h2>${reservation.name}, your table is <em>waiting.</em></h2></div><span class="status-badge ${reservation.status.toLowerCase()}">● ${reservation.status}</span><div class="status-details"><div><small>Reference</small><b>${reservation.id}</b></div><div><small>Date & time</small><b>${reservation.date}<br>${reservation.time}</b></div><div><small>Guests</small><b>${reservation.guests} persons</b></div></div></div>` : `<div class="status-empty"><span>⌕</span><h3>We couldn't find that reservation.</h3><p>Check the reference number and try again, or contact our team.</p></div>`;
+  });
+  document.querySelector('#contactForm')?.addEventListener('submit', event => { event.preventDefault(); event.currentTarget.innerHTML = `<div class="success-card compact"><span>✦</span><h2>Message received.</h2><p>Thank you for reaching out. Our team will be in touch soon.</p></div>`; });
+  document.querySelectorAll('.reservation-status-select').forEach(select => select.addEventListener('change', () => {
+    const reservation = publicReservations.find(item => item.id === select.dataset.reservation);
+    if (reservation) reservation.status = select.value;
+    localStorage.setItem('isobelReservations', JSON.stringify(publicReservations));
+    render('reservations');
+  }));
   document.querySelectorAll('[data-add-product]').forEach(button => button.addEventListener('click', () => {
     const product = posProducts.find(item => item[0] === button.dataset.addProduct);
     const existing = workflow.cart.find(item => item.name === product[0]);
@@ -215,6 +310,10 @@ function wireView() {
   }));
 }
 function render(view = 'dashboard') {
+  const publicMode = view.startsWith('public-');
+  document.body.classList.toggle('public-mode', publicMode);
+  document.querySelector('.sidebar').hidden = publicMode;
+  document.querySelector('.topbar').hidden = publicMode;
   app.innerHTML = views[view]();
   pageCrumb.textContent = view === 'dashboard' ? 'Overview' : view[0].toUpperCase()+view.slice(1);
   document.querySelectorAll('[data-view]').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
