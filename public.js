@@ -14,7 +14,7 @@ const money = value => `₱${value.toLocaleString('en-PH')}`;
 
 function header(active) {
   const links = [['home','Home'],['about','Our story'],['menu','Menu'],['buffet','Buffet'],['gallery','Gallery'],['contact','Contact']];
-  return `<header><a class="logo" href="#home" data-page="home">ISOBEL <span>•</span></a><nav>${links.map(([id,label]) => `<a class="${active === id ? 'active' : ''}" href="#${id}" data-page="${id}">${label}</a>`).join('')}</nav><div class="header-actions"><a class="dashboard-link" href="index.html">Management dashboard</a><button class="book" data-page="reservation">Reserve a table</button><button class="menu-toggle">☰</button></div></header>`;
+  return `<header><a class="logo" href="#home" data-page="home">ISOBEL <span>•</span></a><nav>${links.map(([id,label]) => `<a class="${active === id ? 'active' : ''}" href="#${id}" data-page="${id}">${label}</a>`).join('')}</nav><div class="header-actions"><a class="dashboard-link" href="index.html#revenue">Management dashboard</a><button class="book" data-page="reservation">Reserve a table</button><button class="menu-toggle">☰</button></div></header>`;
 }
 function footer() { return `<footer><div><div class="logo">ISOBEL <span>•</span></div><p>Thoughtful food. Unhurried moments.<br>Made for your table.</p></div><div><b>Visit us</b><span>Sample Restaurant Address</span><span>(043) XXX-XXXX</span></div><div><b>Hours</b><span>Monday – Sunday</span><span>11:00 AM – 10:00 PM</span></div><div><b>Contact</b><span>contact@isobelrestaurant.com</span></div></footer>`; }
 function shell(active, content) { return `${header(active)}${content}${footer()}`; }
