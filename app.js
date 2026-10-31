@@ -41,6 +41,7 @@ const seed = {
   ]
 };
 const state = { view: window.location.hash.slice(1) || 'dashboard', role: 'Administrator', query: '' };
+let supabaseSyncEnabled = false;
 state.ingredientStatus = 'All';
 state.ingredientCategory = 'All';
 state.ingredientUnit = 'All';
@@ -63,7 +64,15 @@ const app = document.querySelector('#app');
 const money = value => `₱${Number(value || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const read = key => JSON.parse(localStorage.getItem(`costtrack_${key}`) || 'null') || seed[key] || [];
-const save = (key, value) => localStorage.setItem(`costtrack_${key}`, JSON.stringify(value));
+const save = (key, value) => {
+  localStorage.setItem(`costtrack_${key}`, JSON.stringify(value));
+  if (supabaseSyncEnabled && window.supabaseRecord) {
+    window.supabaseRecord.replace(key, value).catch(error => {
+      console.error(`Supabase could not save ${key}.`, error);
+      toast('Cloud save failed. Your local data is still available.', 'error');
+    });
+  }
+};
 const all = key => read(key);
 const ingredient = id => all('ingredients').find(item => item.id === id);
 const recipe = id => all('recipes').find(item => item.id === id);
@@ -381,7 +390,27 @@ document.addEventListener('input', event => { if (event.target.id === 'tableSear
 document.addEventListener('change', event => { const filter = event.target.dataset.filter; if (!filter) return; state[filter] = event.target.value.startsWith('All ') ? 'All' : event.target.value; render(); });
 document.querySelector('#roleSelect').addEventListener('change', event => { state.role = event.target.value; state.view = window.location.hash.slice(1) || 'dashboard'; state.query = ''; render(); toast(`Switched to ${state.role}`); });
 document.querySelector('#mobileMenu').addEventListener('click', () => document.querySelector('#sidebar').classList.toggle('open'));
-hydrate(); login();
+async function syncWithSupabase() {
+  if (!window.supabaseRecord) return;
+  for (const key of KEYS) {
+    try {
+      const remoteRows = await window.supabaseRecord.load(key);
+      const remoteRecords = remoteRows.map(row => row.data);
+      if (remoteRecords.length) {
+        localStorage.setItem(`costtrack_${key}`, JSON.stringify(remoteRecords));
+      } else {
+        await window.supabaseRecord.save(key, all(key));
+      }
+    } catch (error) {
+      console.error(`Supabase could not sync ${key}.`, error);
+    }
+  }
+  supabaseSyncEnabled = true;
+}
+
+hydrate();
+login();
+syncWithSupabase().then(() => render());
 
 /* Accessible UI refinements kept in this layer so the existing local data model remains unchanged. */
 function modal(title, content, submit = 'Save record') {
