@@ -1,5 +1,4 @@
 const app = document.querySelector('#publicApp');
-const storageKey = 'isobelReservations';
 const menu = [
   ['Crispy Pata', 'Main Course', 680, 'Slow-roasted pork knuckle with our house soy-calamansi dip.', 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=800&q=85'],
   ['Chicken Inasal', 'Main Course', 320, 'Char-grilled chicken marinated in lemongrass, calamansi, and annatto oil.', 'https://images.unsplash.com/photo-1532550907401-a500c9a57435?auto=format&fit=crop&w=800&q=85'],
@@ -8,9 +7,8 @@ const menu = [
   ['Halo-Halo', 'Desserts', 220, 'Shaved ice, tropical fruits, leche flan, and ube cream.', 'https://images.unsplash.com/photo-1563805042-7684c019e1cb?auto=format&fit=crop&w=800&q=85'],
   ['Calamansi Spritz', 'Beverages', 180, 'Bright calamansi, sparkling water, and a hint of basil.', 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=85']
 ];
-const getReservations = () => JSON.parse(localStorage.getItem(storageKey) || JSON.stringify([{ id: 'RES-2026-001', name: 'John Cruz', date: 'October 20, 2026', time: '7:00 PM', guests: 5, occasion: 'Birthday', status: 'Pending' }]));
-const saveReservations = reservations => localStorage.setItem(storageKey, JSON.stringify(reservations));
 const money = value => `₱${value.toLocaleString('en-PH')}`;
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
 
 function header(active) {
   const links = [['home','Home'],['about','Our story'],['menu','Menu'],['buffet','Buffet'],['gallery','Gallery'],['contact','Contact']];
@@ -30,12 +28,76 @@ function status() { return shell('status', `<section class="inner-hero status-he
 function gallery() { const pics = [['Dining area','https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1000&q=85'],['Private rooms','https://images.unsplash.com/photo-1550966871-3ed3cdb5ed0c?auto=format&fit=crop&w=1000&q=85'],['Signature dishes','https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=1000&q=85'],['The buffet','https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1000&q=85'],['Good company','https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1000&q=85'],['Little celebrations','https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?auto=format&fit=crop&w=1000&q=85']]; return shell('gallery', `<section class="inner-hero gallery-hero"><small>A glimpse inside</small><h1>Gather beautifully.<br><em>Stay awhile.</em></h1></section><section class="gallery">${pics.map(p=>`<figure><img src="${p[1]}" alt="${p[0]}"><figcaption>${p[0]} <b>↗</b></figcaption></figure>`).join('')}</section>`); }
 function contact() { return shell('contact', `<section class="inner-hero"><small>Come find us</small><h1>Let's make<br><em>plans.</em></h1><p>Questions, celebrations, or just a hello—we would love to hear from you.</p></section><section class="contact"><div><small>ISOBEL restaurant</small><h2>Good food is<br><em>better shared.</em></h2><div class="contact-lines"><div><b>Visit us</b><span>Sample Restaurant Address</span><span>Batangas, Philippines</span></div><div><b>Call or email</b><span>(043) XXX-XXXX</span><span>contact@isobelrestaurant.com</span></div><div><b>Hours</b><span>Monday – Sunday</span><span>11:00 AM – 10:00 PM</span></div></div></div><form id="contactForm"><small>Send a note</small><label>Name<input required placeholder="Your name"></label><label>Email<input type="email" required placeholder="you@email.com"></label><label>Message<textarea required rows="5" placeholder="How can we help?"></textarea></label><button class="primary">Send message ↗</button></form></section>`); }
 const pages = { home, about, menu: menuPage, buffet, reservation, status, gallery, contact };
-function render(page = location.hash.slice(1) || 'home') { app.innerHTML = pages[page] ? pages[page]() : pages.home(); bind(); window.scrollTo(0, 0); }
+function render(page = location.hash.slice(1) || 'home') {
+  app.innerHTML = pages[page] ? pages[page]() : pages.home();
+  const date = document.querySelector('#reservationForm [name="date"]');
+  if (date) date.min = new Date().toISOString().slice(0, 10);
+  const statusForm = document.querySelector('#statusForm');
+  if (statusForm) {
+    statusForm.querySelector('input[name="reference"]').value = '';
+    const contact = document.createElement('label');
+    contact.innerHTML = 'Email or contact number<input name="contact" required autocomplete="email" placeholder="Contact used for the reservation">';
+    statusForm.insertBefore(contact, statusForm.querySelector('button'));
+  }
+  bind();
+  window.scrollTo(0, 0);
+}
 function bind() {
   document.querySelectorAll('[data-page]').forEach(el => el.addEventListener('click', event => { event.preventDefault(); location.hash = el.dataset.page; }));
   document.querySelectorAll('[data-filter]').forEach(el => el.addEventListener('click', () => { document.querySelectorAll('[data-filter]').forEach(item => item.classList.toggle('active', item === el)); document.querySelectorAll('.menu-grid article').forEach(item => item.hidden = el.dataset.filter !== 'All dishes' && !item.querySelector('small').textContent.includes(el.dataset.filter)); }));
-  document.querySelector('#reservationForm')?.addEventListener('submit', event => { event.preventDefault(); const form = new FormData(event.currentTarget); const reservations = getReservations(); const id = `RES-2026-${String(reservations.length + 1).padStart(3, '0')}`; const date = new Date(form.get('date')); reservations.unshift({ id, name: form.get('name'), date: date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }), time: form.get('time'), guests: form.get('guests'), occasion: form.get('occasion'), status: 'Pending' }); saveReservations(reservations); event.currentTarget.innerHTML = `<div class="success"><span>✦</span><small>Reservation submitted successfully</small><h2>Thank you, ${form.get('name').split(' ')[0]}.</h2><p>Your table request is with our team.</p><b>${id}</b><button class="link" data-page="status">Check reservation status →</button></div>`; bind(); });
-  document.querySelector('#statusForm')?.addEventListener('submit', event => { event.preventDefault(); const id = new FormData(event.currentTarget).get('reference').toString().trim().toUpperCase(); const r = getReservations().find(item => item.id === id); document.querySelector('#statusResult').innerHTML = r ? `<div class="status-card"><div><small>Reservation found</small><h2>${r.name}, your table is <em>waiting.</em></h2></div><strong class="badge ${r.status.toLowerCase()}">● ${r.status}</strong><div class="status-details"><span>Reference<b>${r.id}</b></span><span>Date & time<b>${r.date}<br>${r.time}</b></span><span>Guests<b>${r.guests} persons</b></span></div></div>` : '<div class="empty"><h3>We could not find that reservation.</h3><p>Check the reference number and try again.</p></div>'; });
+  document.querySelector('#reservationForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const submit = formElement.querySelector('button[type="submit"],button:not([type])');
+    submit.disabled = true;
+    submit.setAttribute('aria-busy', 'true');
+    try {
+      const reservation = await window.supabaseRecord.submitPublicReservation({
+        name: String(form.get('name')).trim(),
+        email: String(form.get('email')).trim(),
+        phone: String(form.get('phone')).trim(),
+        date: form.get('date'),
+        time: form.get('time'),
+        guests: Number(form.get('guests')),
+        occasion: form.get('occasion'),
+        request: form.get('requests')
+      });
+      const reference = typeof reservation === 'string' ? reservation : reservation.id || reservation.reference;
+      if (!reference) throw new Error('The reservation was submitted but no reference was returned.');
+      formElement.innerHTML = `<div class="success"><span aria-hidden="true">✦</span><small>Reservation submitted successfully</small><h2>Thank you, ${escapeHTML(String(form.get('name')).trim().split(' ')[0])}.</h2><p>Your table request is with our team.</p><b>${escapeHTML(reference)}</b><button class="link" data-page="status">Check reservation status →</button></div>`;
+      bind();
+    } catch (error) {
+      console.error('Public reservation could not be submitted.', error);
+      let message = formElement.querySelector('.form-error');
+      if (!message) {
+        message = document.createElement('p');
+        message.className = 'form-error';
+        message.setAttribute('role', 'alert');
+        formElement.prepend(message);
+      }
+      message.textContent = error.message || 'Reservation failed. Please try again.';
+      submit.disabled = false;
+      submit.removeAttribute('aria-busy');
+    }
+  });
+  document.querySelector('#statusForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const result = document.querySelector('#statusResult');
+    result.textContent = 'Checking reservation…';
+    try {
+      const response = await window.supabaseRecord.getPublicReservationStatus(
+        String(form.get('reference')).trim().toUpperCase(),
+        String(form.get('contact')).trim()
+      );
+      const reservation = Array.isArray(response) ? response[0] : response;
+      result.innerHTML = reservation ? `<div class="status-card"><div><small>Reservation found</small><h2>Your reservation is <em>on file.</em></h2></div><strong class="badge ${escapeHTML(String(reservation.status).toLowerCase())}">● ${escapeHTML(reservation.status)}</strong><div class="status-details"><span>Reference<b>${escapeHTML(reservation.id || reservation.reference)}</b></span><span>Date & time<b>${escapeHTML(reservation.date || reservation.reservation_date)}<br>${escapeHTML(reservation.time || reservation.reservation_time)}</b></span><span>Guests<b>${escapeHTML(reservation.guests)} persons</b></span></div></div>` : '<div class="empty"><h3>We could not find that reservation.</h3><p>Check the reference and contact details, then try again.</p></div>';
+    } catch (error) {
+      console.error('Reservation status lookup failed.', error);
+      result.innerHTML = '<div class="empty" role="alert"><h3>We could not check that reservation.</h3><p>Please try again when your connection is available.</p></div>';
+    }
+  });
   document.querySelector('#contactForm')?.addEventListener('submit', event => { event.preventDefault(); event.currentTarget.innerHTML = '<div class="success"><span>✦</span><h2>Message received.</h2><p>Our team will be in touch soon.</p></div>'; });
 }
 window.addEventListener('hashchange', () => render());

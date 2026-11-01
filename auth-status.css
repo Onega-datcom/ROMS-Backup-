@@ -1,0 +1,107 @@
+.sync-status {
+  border: 1px solid var(--line);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #43534d;
+  background: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sync-status::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8b9691;
+  content: '';
+}
+
+.sync-status[data-state="connected"]::before { background: #168277; }
+.sync-status[data-state="syncing"]::before { background: #e99751; }
+.sync-status[data-state="error"]::before,
+.sync-status[data-state="offline"]::before { background: #d96660; }
+
+.discard-sync {
+  border: 0;
+  padding: 0;
+  color: #a44c48;
+  background: transparent;
+  font-size: 10px;
+  text-decoration: underline;
+}
+
+.current-user {
+  display: grid;
+  gap: 3px;
+  border-left: 1px solid var(--line);
+  padding-left: 13px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.current-user button,
+.link-button {
+  width: fit-content;
+  border: 0;
+  padding: 0;
+  color: var(--teal-dark);
+  background: transparent;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.loading-state {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--ink);
+  background: #f6faf8;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.loading-state::before {
+  width: 22px;
+  height: 22px;
+  margin-bottom: 12px;
+  border: 3px solid #dceee8;
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  content: '';
+  animation: session-loading-spin .7s linear infinite;
+}
+
+.loading-state {
+  grid-template-rows: auto auto;
+  align-content: center;
+  justify-items: center;
+}
+
+@keyframes session-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+.auth-message { color: #a44c48 !important; }
+
+:focus-visible {
+  outline: 3px solid #168277;
+  outline-offset: 3px;
+}
+
+@media (max-width: 720px) {
+  .sync-status { font-size: 0; padding: 8px; }
+  .sync-status::before { width: 9px; height: 9px; }
+  .current-user { font-size: 10px; }
+}

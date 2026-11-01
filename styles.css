@@ -228,3 +228,41 @@ th:first-child {
     grid-template-columns: 1fr;
   }
 }
+
+.reservation-card.reservation-card {
+  align-items: stretch;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.reservation-card-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  width: 100%;
+  border: 0;
+  padding: 10px 12px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reservation-confirm-btn {
+  align-self: flex-start;
+  margin: 0 12px 10px;
+  border: 1px solid #b7d8ce;
+  border-radius: 999px;
+  padding: 6px 11px;
+  color: var(--teal-dark);
+  background: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reservation-confirm-btn:hover {
+  background: var(--mint);
+}
