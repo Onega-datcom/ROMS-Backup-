@@ -56,14 +56,30 @@ create table if not exists public.ingredients (
   updated_at timestamptz not null default now()
 );
 
+-- PHASE 1: recipes.price is now recipes.menu_price.
 create table if not exists public.recipes (
   id text primary key,
   name text not null,
   category text not null default '',
-  price numeric not null default 0 check (price >= 0),
+  menu_price numeric not null default 0 check (menu_price >= 0),
   wastage numeric not null default 0 check (wastage >= 0),
   updated_at timestamptz not null default now()
 );
+
+-- PHASE 1: retain rerun support for databases created before menu_price.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'recipes' and column_name = 'price'
+  ) and not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'recipes' and column_name = 'menu_price'
+  ) then
+    alter table public.recipes rename column price to menu_price;
+  end if;
+end;
+$$;
 
 create table if not exists public.recipe_ingredients (
   recipe_id text not null references public.recipes (id) on delete cascade,
@@ -99,6 +115,9 @@ create table if not exists public.waste_logs (
   quantity numeric not null check (quantity > 0),
   reason text not null default '',
   waste_date date not null default current_date,
+  recorded_at timestamptz default now(),
+  recorded_by uuid references auth.users (id) on delete set null,
+  notes text not null default '',
   updated_at timestamptz not null default now()
 );
 
@@ -111,6 +130,7 @@ create table if not exists public.physical_counts (
   updated_at timestamptz not null default now()
 );
 
+-- PHASE 1: revenue status retains Voided alongside Draft and Confirmed.
 create table if not exists public.revenue_records (
   id text primary key,
   business_date date not null,
@@ -121,7 +141,7 @@ create table if not exists public.revenue_records (
   child_rate numeric not null default 0 check (child_rate >= 0),
   senior_pwd_customers integer not null default 0 check (senior_pwd_customers >= 0),
   senior_pwd_rate numeric not null default 0 check (senior_pwd_rate >= 0),
-  status text not null default 'Active' check (status in ('Active', 'Voided')),
+  status text not null default 'Confirmed' check (status in ('Draft', 'Confirmed', 'Voided')),
   remarks text not null default '',
   recorded_by text not null default '',
   recorded_at timestamptz not null default now(),
@@ -134,6 +154,7 @@ create table if not exists public.revenue_records (
   updated_at timestamptz not null default now()
 );
 
+-- PHASE 1: reservation type and lifecycle timestamps/covers.
 create table if not exists public.reservations (
   id text primary key,
   name text not null,
@@ -142,14 +163,17 @@ create table if not exists public.reservations (
   reservation_date date not null,
   reservation_time text not null,
   guests integer not null check (guests > 0),
+  type text not null default 'Reservation',
   adults integer not null default 0 check (adults >= 0),
   children integer not null default 0 check (children >= 0),
   occasion text not null default '',
-  status text not null default 'Pending',
+  status text not null default 'Pending' check (status in ('Pending', 'Confirmed', 'Cancelled', 'Seated', 'Completed', 'No-show')),
+  seated_at timestamptz,
+  completed_at timestamptz,
+  actual_covers integer check (actual_covers is null or actual_covers >= 0),
   preference text not null default '',
   request text not null default '',
   table_id text,
-  estimated_revenue numeric check (estimated_revenue is null or estimated_revenue >= 0),
   created_by uuid references auth.users (id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -158,6 +182,101 @@ create table if not exists public.reservations (
     or nullif(btrim(coalesce(phone, '')), '') is not null
   )
 );
+
+-- PHASE 1: buffet pricing structure.
+create table if not exists public.buffet_rates (
+  id text primary key,
+  meal_period text not null,
+  day_type text not null,
+  adult_rate numeric not null check (adult_rate >= 0),
+  child_rate numeric not null check (child_rate >= 0),
+  senior_pwd_rate numeric not null check (senior_pwd_rate >= 0),
+  effective_from date not null,
+  effective_to date,
+  is_active boolean not null default true,
+  constraint buffet_rates_effective_range_check
+    check (effective_to is null or effective_to >= effective_from)
+);
+
+-- PHASE 3: private rate-limit ledger for public reservation submissions.
+create table if not exists public.public_reservation_attempts (
+  id bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  contact_key text not null,
+  ip text not null default 'unknown'
+);
+alter table public.public_reservation_attempts enable row level security;
+revoke all on table public.public_reservation_attempts from public, anon, authenticated;
+
+create unique index if not exists buffet_rates_active_range_uidx
+  on public.buffet_rates (meal_period, day_type, effective_from)
+  where is_active;
+
+create extension if not exists btree_gist;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conrelid = 'public.buffet_rates'::regclass
+      and conname = 'buffet_rates_active_no_overlap'
+  ) then
+    alter table public.buffet_rates
+      add constraint buffet_rates_active_no_overlap
+      exclude using gist (
+        meal_period with =,
+        day_type with =,
+        daterange(effective_from, coalesce(effective_to + 1, 'infinity'::date), '[)') with &&
+      )
+      where (is_active);
+  end if;
+end;
+$$;
+
+insert into public.buffet_rates (
+  id, meal_period, day_type, adult_rate, child_rate, senior_pwd_rate,
+  effective_from, effective_to, is_active
+) values
+  ('RATE-ALL-DAY-WEEKDAY-20260101', 'All Day', 'weekday', 499, 299, 399, '2026-01-01', null, true),
+  ('RATE-ALL-DAY-WEEKEND-20260101', 'All Day', 'weekend', 499, 299, 399, '2026-01-01', null, true),
+  ('RATE-ALL-DAY-HOLIDAY-20260101', 'All Day', 'holiday', 499, 299, 399, '2026-01-01', null, true)
+on conflict (id) do nothing;
+
+-- PHASE 1: batch quantity remains quantity; covers are tracked separately.
+alter table public.production_logs
+  add column if not exists covers_produced integer
+  constraint production_logs_covers_produced_check
+  check (covers_produced is null or covers_produced >= 0);
+
+alter table public.waste_logs
+  add column if not exists production_log_id text
+  references public.production_logs (id) on delete set null;
+
+-- PHASE 1: link revenue to reservations and buffet rate snapshots.
+alter table public.revenue_records
+  add column if not exists reservation_id text
+  references public.reservations (id) on delete set null,
+  add column if not exists rate_id text
+  references public.buffet_rates (id) on delete set null;
+
+create index if not exists revenue_records_reservation_id_idx
+  on public.revenue_records (reservation_id);
+create index if not exists revenue_records_rate_id_idx
+  on public.revenue_records (rate_id);
+create index if not exists waste_logs_production_log_id_idx
+  on public.waste_logs (production_log_id);
+create index if not exists waste_logs_recorded_at_idx
+  on public.waste_logs (recorded_at desc)
+  where recorded_at is not null;
+create index if not exists waste_logs_recorded_by_idx
+  on public.waste_logs (recorded_by);
+create index if not exists reservations_date_time_idx
+  on public.reservations (reservation_date, reservation_time);
+
+comment on column public.production_logs.quantity is
+  'Number of recipe batches produced.';
+comment on column public.production_logs.covers_produced is
+  'Nullable number of buffet covers produced by the batches.';
 -- Older iterations enforced a split count equal to guests; legacy records may
 -- intentionally have only the total, so retain independent nonnegative counts.
 alter table public.reservations
@@ -204,6 +323,16 @@ create table if not exists public.restaurant_tables (
   guest text not null default '',
   updated_at timestamptz not null default now()
 );
+
+-- PHASE 3: normalize table status values used by lifecycle automation.
+update public.restaurant_tables
+set status = case lower(status)
+  when 'available' then 'Available'
+  when 'occupied' then 'Occupied'
+  when 'reserved' then 'Reserved'
+  else status
+end
+where lower(status) in ('available', 'occupied', 'reserved');
 
 do $$
 begin
@@ -261,9 +390,11 @@ create index if not exists revenue_records_business_date_idx
   on public.revenue_records (business_date desc);
 create unique index if not exists revenue_records_active_period_uidx
   on public.revenue_records (business_date, meal_period)
-  where status = 'Active';
+  where status in ('Draft', 'Confirmed');
 create index if not exists reservations_date_status_idx
   on public.reservations (reservation_date, status);
+create index if not exists reservations_table_id_idx
+  on public.reservations (table_id);
 create index if not exists reservations_created_by_idx
   on public.reservations (created_by);
 create unique index if not exists reservations_active_assigned_table_uidx
@@ -362,7 +493,7 @@ begin
       if exists (select 1 from public.recipes where id = source_row.record_id) then
         raise exception 'typed recipes id already exists; resolve the collision before backfill';
       end if;
-      insert into public.recipes (id, name, category, price, wastage)
+      insert into public.recipes (id, name, category, menu_price, wastage)
       values (
         source_row.record_id, source_row.data ->> 'name', source_row.data ->> 'category',
         (source_row.data ->> 'price')::numeric, (source_row.data ->> 'wastage')::numeric
@@ -468,11 +599,13 @@ begin
       if exists (select 1 from public.waste_logs where id = source_row.record_id) then
         raise exception 'typed waste_logs id already exists; resolve the collision before backfill';
       end if;
-      insert into public.waste_logs (id, ingredient_id, quantity, reason, waste_date)
+      insert into public.waste_logs (
+        id, ingredient_id, quantity, reason, waste_date, recorded_at
+      )
       values (
         source_row.record_id, source_row.data ->> 'ingredientId',
         (source_row.data ->> 'quantity')::numeric, source_row.data ->> 'reason',
-        (source_row.data ->> 'date')::date
+        (source_row.data ->> 'date')::date, null
       );
     exception when others then
       raise exception 'Cannot backfill app_records wasteLogs/%: %', source_row.record_id, sqlerrm;
@@ -543,7 +676,9 @@ begin
         source_row.data ->> 'meal_period', (source_row.data ->> 'adult_customers')::integer,
         (source_row.data ->> 'adult_rate')::numeric, (source_row.data ->> 'child_customers')::integer,
         (source_row.data ->> 'child_rate')::numeric, (source_row.data ->> 'senior_pwd_customers')::integer,
-        (source_row.data ->> 'senior_pwd_rate')::numeric, source_row.data ->> 'status',
+        (source_row.data ->> 'senior_pwd_rate')::numeric,
+        case when source_row.data ->> 'status' = 'Active' then 'Confirmed'
+             else source_row.data ->> 'status' end,
         coalesce(source_row.data ->> 'remarks', ''), coalesce(source_row.data ->> 'recorded_by', ''),
         coalesce((source_row.data ->> 'recorded_at')::timestamptz, now()),
         coalesce(source_row.data ->> 'last_edited_by', ''),
@@ -608,7 +743,7 @@ begin
       insert into public.reservations (
         id, name, email, phone, reservation_date, reservation_time, guests,
         adults, children, occasion, status, preference, request, table_id,
-        estimated_revenue, created_by, created_at
+        created_by, created_at
       ) values (
         source_row.record_id, source_row.data ->> 'name',
         nullif(source_row.data ->> 'email', ''), nullif(source_row.data ->> 'phone', ''),
@@ -620,7 +755,6 @@ begin
         coalesce(source_row.data ->> 'preference', ''),
         coalesce(source_row.data ->> 'request', source_row.data ->> 'requests', ''),
         nullif(coalesce(source_row.data ->> 'table', source_row.data ->> 'table_id'), ''),
-        coalesce(nullif(source_row.data ->> 'estimatedRevenue', '')::numeric, 0),
         null,
         coalesce((source_row.data ->> 'created_at')::timestamptz, now())
       );
@@ -773,7 +907,12 @@ begin
   perform set_config('costtrack.stock_movement', 'on', true);
   update public.ingredients
   set stock = stock + new.quantity,
-      cost = case when new.quantity > 0 then new.unit_cost else cost end
+      cost = case
+        when new.transaction_type = 'Receiving'
+             and new.unit_cost > 0
+          then new.unit_cost
+        else cost
+      end
   where id = new.ingredient_id
     and stock + new.quantity >= 0;
   stock_updated := found;
@@ -781,6 +920,123 @@ begin
   if not stock_updated then
     raise exception 'Inventory movement would make stock negative or ingredient is missing'
       using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+-- PHASE 3: revenue rows cannot contain positive rates with zero covers.
+create or replace function public.validate_revenue_record()
+returns trigger
+language plpgsql
+set search_path = pg_catalog
+as $$
+begin
+  if new.adult_customers = 0
+     and new.child_customers = 0
+     and new.senior_pwd_customers = 0
+     and (new.adult_rate > 0 or new.child_rate > 0 or new.senior_pwd_rate > 0) then
+    raise exception 'Revenue records require at least one customer when rates are positive'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+-- PHASE 3: only administrators may void revenue or edit void metadata.
+create or replace function public.prevent_unauthorized_revenue_void()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if not public.has_app_role(array['Administrator'])
+     and (
+       new.status = 'Voided'
+       or new.status is distinct from old.status
+          and old.status = 'Voided'
+       or new.voided_by is distinct from old.voided_by
+       or new.void_reason is distinct from old.void_reason
+       or new.voided_at is distinct from old.voided_at
+     ) then
+    raise exception 'Only an Administrator may void revenue records'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+-- PHASE 3: enforce reservation lifecycle, timestamps, and table occupancy.
+create or replace function public.enforce_reservation_lifecycle()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  table_is_held boolean;
+begin
+  if tg_op = 'INSERT' then
+    if new.type = 'Walk-in' then
+      if new.status not in ('Pending', 'Seated') then
+        raise exception 'Walk-ins may start only as Pending or Seated'
+          using errcode = '23514';
+      end if;
+    elsif new.status <> 'Pending' then
+      raise exception 'Reservations must start as Pending'
+        using errcode = '23514';
+    end if;
+  elsif new.status is distinct from old.status then
+    if not (
+      (old.status = 'Pending' and new.status in ('Confirmed', 'Cancelled', 'No-show'))
+      or (old.status = 'Confirmed' and new.status in ('Seated', 'Cancelled', 'No-show'))
+      or (old.status = 'Seated' and new.status = 'Completed')
+    ) then
+      raise exception 'Invalid reservation status transition from % to %',
+        old.status, new.status using errcode = '23514';
+    end if;
+  end if;
+
+  if new.status = 'Seated' then
+    if coalesce(new.actual_covers, 0) <= 0 then
+      raise exception 'actual_covers must be greater than zero when seated'
+        using errcode = '23514';
+    end if;
+    if new.seated_at is null then
+      new.seated_at := clock_timestamp();
+    end if;
+  end if;
+  if new.status = 'Completed' and new.completed_at is null then
+    new.completed_at := clock_timestamp();
+  end if;
+
+  if new.table_id is not null and new.status = 'Seated' then
+    update public.restaurant_tables
+    set status = 'Occupied',
+        guest = new.name
+    where id = new.table_id;
+  elsif new.table_id is not null
+        and new.status in ('Completed', 'Cancelled', 'No-show') then
+    select exists (
+      select 1
+      from public.reservations as r
+      where r.id <> new.id
+        and r.table_id = new.table_id
+        and r.reservation_date = new.reservation_date
+        and r.reservation_time = new.reservation_time
+        and r.status in ('Pending', 'Confirmed', 'Seated')
+    ) into table_is_held;
+    if table_is_held then
+      update public.restaurant_tables
+      set status = 'Reserved'
+      where id = new.table_id;
+    else
+      update public.restaurant_tables
+      set status = 'Available',
+          guest = ''
+      where id = new.table_id;
+    end if;
   end if;
   return new;
 end;
@@ -837,6 +1093,11 @@ begin
   if tg_op <> 'INSERT' then
     raise exception 'Waste logs are append-only' using errcode = '55000';
   end if;
+
+  if new.recorded_at is null and auth.uid() is not null then
+    new.recorded_at := now();
+  end if;
+  new.recorded_by := auth.uid();
 
   prior_stock_permission := current_setting('costtrack.stock_movement', true);
   perform set_config('costtrack.stock_movement', 'on', true);
@@ -946,6 +1207,22 @@ create trigger enforce_reservation_date
   before insert or update on public.reservations
   for each row execute function public.enforce_reservation_date();
 
+-- PHASE 3: lifecycle runs after date validation and before audit logging.
+drop trigger if exists enforce_reservation_lifecycle on public.reservations;
+create trigger enforce_reservation_lifecycle
+  before insert or update on public.reservations
+  for each row execute function public.enforce_reservation_lifecycle();
+
+drop trigger if exists validate_revenue_record on public.revenue_records;
+create trigger validate_revenue_record
+  before insert or update on public.revenue_records
+  for each row execute function public.validate_revenue_record();
+
+drop trigger if exists prevent_unauthorized_revenue_void on public.revenue_records;
+create trigger prevent_unauthorized_revenue_void
+  before update on public.revenue_records
+  for each row execute function public.prevent_unauthorized_revenue_void();
+
 drop trigger if exists apply_inventory_transaction_stock on public.inventory_transactions;
 create trigger apply_inventory_transaction_stock
   before insert or update or delete on public.inventory_transactions
@@ -1044,10 +1321,12 @@ alter table public.waste_logs enable row level security;
 alter table public.physical_counts enable row level security;
 alter table public.revenue_records enable row level security;
 alter table public.reservations enable row level security;
+-- PHASE 2: finalize the Phase 1 temporary buffet-rate policies.
+alter table public.buffet_rates enable row level security;
 alter table public.restaurant_tables enable row level security;
 alter table public.audit_logs enable row level security;
 
--- Remove old policies on these tables before defining the restrictive policy set.
+-- PHASE 2: remove old policies before defining the final restrictive role set.
 do $$
 declare
   policy_row record;
@@ -1067,6 +1346,7 @@ begin
         'physical_counts',
         'revenue_records',
         'reservations',
+        'buffet_rates',
         'restaurant_tables',
         'audit_logs'
       ])
@@ -1101,7 +1381,7 @@ create policy profiles_admin_delete
 create policy ingredients_read
   on public.ingredients for select to authenticated
   using (public.has_app_role(array[
-    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Receptionist', 'Inventory Clerk'
+    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk'
   ]));
 create policy ingredients_insert
   on public.ingredients for insert to authenticated
@@ -1112,13 +1392,20 @@ create policy ingredients_update
   with check (public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk']));
 create policy ingredients_delete
   on public.ingredients for delete to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk']));
+  using (public.has_app_role(array['Administrator', 'Manager']));
 
 create policy recipes_read
   on public.recipes for select to authenticated
   using (public.has_app_role(array[
-    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Receptionist', 'Inventory Clerk'
+    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk'
   ]));
+create policy recipes_insert
+  on public.recipes for insert to authenticated
+  with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
+create policy recipes_update
+  on public.recipes for update to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']))
+  with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
 create policy recipes_delete
   on public.recipes for delete to authenticated
   using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
@@ -1126,8 +1413,18 @@ create policy recipes_delete
 create policy recipe_ingredients_read
   on public.recipe_ingredients for select to authenticated
   using (public.has_app_role(array[
-    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Receptionist', 'Inventory Clerk'
+    'Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk'
   ]));
+create policy recipe_ingredients_insert
+  on public.recipe_ingredients for insert to authenticated
+  with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
+create policy recipe_ingredients_update
+  on public.recipe_ingredients for update to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']))
+  with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
+create policy recipe_ingredients_delete
+  on public.recipe_ingredients for delete to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
 
 create policy inventory_transactions_read
   on public.inventory_transactions for select to authenticated
@@ -1138,21 +1435,21 @@ create policy inventory_transactions_insert
 
 create policy production_logs_read
   on public.production_logs for select to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Receptionist']));
+  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
 create policy production_logs_insert
   on public.production_logs for insert to authenticated
   with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']));
 
 create policy waste_logs_read
   on public.waste_logs for select to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk', 'Receptionist']));
+  using (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk']));
 create policy waste_logs_insert
   on public.waste_logs for insert to authenticated
   with check (public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk']));
 
 create policy physical_counts_read
   on public.physical_counts for select to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk', 'Receptionist']));
+  using (public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk']));
 create policy physical_counts_insert
   on public.physical_counts for insert to authenticated
   with check (public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk']));
@@ -1169,7 +1466,7 @@ create policy revenue_records_update
   with check (public.has_app_role(array['Administrator', 'Manager']));
 create policy revenue_records_delete
   on public.revenue_records for delete to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager']));
+  using (public.has_app_role(array['Administrator']));
 
 create policy reservations_read
   on public.reservations for select to authenticated
@@ -1203,11 +1500,31 @@ create policy audit_logs_admin_read
   on public.audit_logs for select to authenticated
   using (public.has_app_role(array['Administrator']));
 
+-- PHASE 2: buffet rates are visible to front-of-house roles only; managers
+-- and administrators maintain the catalog. These replace the Phase 1 policies.
+drop policy if exists buffet_rates_phase1_read on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_insert on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_update on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_delete on public.buffet_rates;
+create policy buffet_rates_read
+  on public.buffet_rates for select to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']));
+create policy buffet_rates_insert
+  on public.buffet_rates for insert to authenticated
+  with check (public.has_app_role(array['Administrator', 'Manager']));
+create policy buffet_rates_update
+  on public.buffet_rates for update to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager']))
+  with check (public.has_app_role(array['Administrator', 'Manager']));
+create policy buffet_rates_delete
+  on public.buffet_rates for delete to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager']));
+
 -- Atomically save a recipe and replace its ingredients.
--- Payload shape: {id,name,category,price,wastage,ingredients:[{ingredient_id,quantity}]}.
+-- PHASE 1: Payload shape: {id,name,category,menu_price,wastage,ingredients:[{ingredient_id,quantity}]}.
 -- The adapter must pass null expected_updated_at for inserts and the selected
 -- row's exact updated_at for edits; direct recipe saves are intentionally denied.
-drop function if exists public.save_recipe(jsonb);
+drop function if exists public.save_recipe(jsonb, timestamptz);
 create or replace function public.save_recipe(
   payload jsonb,
   expected_updated_at timestamptz default null
@@ -1236,9 +1553,9 @@ begin
   if recipe_id_value is null
      or nullif(btrim(payload ->> 'name'), '') is null
      or nullif(btrim(payload ->> 'category'), '') is null
-     or payload ->> 'price' is null
+     or payload ->> 'menu_price' is null
      or payload ->> 'wastage' is null then
-    raise exception 'Recipe id, name, category, price, and wastage are required';
+    raise exception 'Recipe id, name, category, menu_price, and wastage are required';
   end if;
 
   for ingredient_item in
@@ -1283,7 +1600,7 @@ begin
     update public.recipes
     set name = btrim(payload ->> 'name'),
         category = btrim(payload ->> 'category'),
-        price = (payload ->> 'price')::numeric,
+        menu_price = (payload ->> 'menu_price')::numeric,
         wastage = (payload ->> 'wastage')::numeric
     where id = recipe_id_value
     returning * into saved_recipe;
@@ -1293,12 +1610,12 @@ begin
         using errcode = '40001';
     end if;
     begin
-      insert into public.recipes (id, name, category, price, wastage)
+      insert into public.recipes (id, name, category, menu_price, wastage)
       values (
         recipe_id_value,
         btrim(payload ->> 'name'),
         btrim(payload ->> 'category'),
-        (payload ->> 'price')::numeric,
+        (payload ->> 'menu_price')::numeric,
         (payload ->> 'wastage')::numeric
       )
       returning * into saved_recipe;
@@ -1341,9 +1658,20 @@ declare
   occasion_value text;
   preference_value text;
   request_value text;
+  contact_key_value text;
+  ip_value text;
+  contact_attempts integer;
+  ip_attempts integer;
+  contact_limit constant integer := 3;
+  contact_window constant interval := interval '10 minutes';
+  ip_limit constant integer := 10;
+  ip_window constant interval := interval '1 hour';
 begin
   if payload is null or jsonb_typeof(payload) is distinct from 'object' then
     raise exception 'Reservation payload must be a JSON object';
+  end if;
+  if nullif(btrim(payload ->> 'website'), '') is not null then
+    raise exception 'Unable to process reservation request';
   end if;
 
   reservation_name := nullif(btrim(payload ->> 'name'), '');
@@ -1396,14 +1724,48 @@ begin
     raise exception 'Reservation details exceed the allowed length';
   end if;
 
+  contact_key_value := md5(coalesce(
+    nullif(regexp_replace(reservation_phone, '[^0-9]', '', 'g'), ''),
+    lower(reservation_email)
+  ));
+  ip_value := coalesce(
+    nullif(split_part(
+      coalesce(nullif(current_setting('request.headers', true), ''), '{}')::jsonb
+        ->> 'x-forwarded-for',
+      ',', 1
+    ), ''),
+    nullif(
+      coalesce(nullif(current_setting('request.headers', true), ''), '{}')::jsonb
+        ->> 'x-real-ip',
+      ''
+    ),
+    'unknown'
+  );
+  delete from public.public_reservation_attempts
+  where created_at < clock_timestamp() - ip_window;
+  select count(*) into contact_attempts
+  from public.public_reservation_attempts
+  where contact_key = contact_key_value
+    and created_at >= clock_timestamp() - contact_window;
+  select count(*) into ip_attempts
+  from public.public_reservation_attempts
+  where ip = ip_value
+    and created_at >= clock_timestamp() - ip_window;
+  if contact_attempts >= contact_limit or ip_attempts >= ip_limit then
+    raise exception 'Unable to process reservation request';
+  end if;
+  insert into public.public_reservation_attempts (contact_key, ip)
+  values (contact_key_value, ip_value);
+
   new_reference := 'RSV-' || upper(replace(gen_random_uuid()::text, '-', ''));
   begin
     insert into public.reservations (
       id, name, email, phone, reservation_date, reservation_time,
-      guests, adults, children, occasion, status, preference, request, created_by
+      guests, type, adults, children, occasion, status, preference, request, created_by
     ) values (
       new_reference, reservation_name, reservation_email, reservation_phone,
-      reservation_day, reservation_time_value, guest_count, adult_count, child_count,
+      reservation_day, reservation_time_value, guest_count, 'Reservation',
+      adult_count, child_count,
       occasion_value, 'Pending', preference_value, request_value, auth.uid()
     );
   exception when unique_violation then
@@ -1446,6 +1808,146 @@ as $$
     )
 $$;
 
+-- PHASE 3: create one revenue draft from seated covers without exposing
+-- revenue amounts to the Receptionist.
+create or replace function public.create_revenue_draft(reservation_id_value text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  reservation_row public.reservations%rowtype;
+  rate_row public.buffet_rates%rowtype;
+  revenue_id_value text;
+  day_type_value text;
+begin
+  if not public.has_app_role(array['Administrator', 'Manager', 'Receptionist']) then
+    raise exception 'Not authorized to create revenue drafts' using errcode = '42501';
+  end if;
+  if nullif(btrim(reservation_id_value), '') is null then
+    raise exception 'A reservation id is required';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext(reservation_id_value));
+  select * into reservation_row
+  from public.reservations
+  where id = btrim(reservation_id_value);
+  if not found then
+    raise exception 'Reservation not found';
+  end if;
+  if reservation_row.status <> 'Seated' then
+    raise exception 'Revenue drafts require a Seated reservation';
+  end if;
+  if coalesce(reservation_row.actual_covers, 0) <= 0 then
+    raise exception 'A Seated reservation must have actual_covers greater than zero';
+  end if;
+
+  select id into revenue_id_value
+  from public.revenue_records
+  where reservation_id = reservation_row.id
+    and status = 'Draft'
+  order by recorded_at
+  limit 1;
+  if revenue_id_value is not null then
+    return jsonb_build_object('id', revenue_id_value, 'status', 'Draft');
+  end if;
+
+  day_type_value := case
+    when extract(isodow from reservation_row.reservation_date) between 1 and 5
+      then 'weekday'
+    else 'weekend'
+  end;
+  select * into rate_row
+  from public.buffet_rates
+  where meal_period = 'All Day'
+    and day_type = day_type_value
+    and is_active
+    and effective_from <= reservation_row.reservation_date
+    and (effective_to is null or effective_to >= reservation_row.reservation_date)
+  order by effective_from desc
+  limit 1;
+  if not found then
+    raise exception 'No active buffet rate exists for All Day/% on %',
+      day_type_value, reservation_row.reservation_date;
+  end if;
+
+  revenue_id_value := 'REV-' || upper(replace(gen_random_uuid()::text, '-', ''));
+  insert into public.revenue_records (
+    id, business_date, meal_period, adult_customers, adult_rate,
+    child_customers, child_rate, senior_pwd_customers, senior_pwd_rate,
+    status, reservation_id, rate_id, recorded_by
+  ) values (
+    revenue_id_value, reservation_row.reservation_date, 'All Day',
+    reservation_row.adults, rate_row.adult_rate,
+    reservation_row.children, rate_row.child_rate, 0, rate_row.senior_pwd_rate,
+    'Draft', reservation_row.id, rate_row.id, coalesce(auth.uid()::text, '')
+  );
+  return jsonb_build_object('id', revenue_id_value, 'status', 'Draft');
+end;
+$$;
+
+-- PHASE 3: managers and administrators confirm drafts and may correct counts.
+create or replace function public.confirm_revenue(
+  revenue_id_value text,
+  adjustments jsonb default '{}'::jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  adult_count_value integer;
+  child_count_value integer;
+  senior_count_value integer;
+begin
+  if not public.has_app_role(array['Administrator', 'Manager']) then
+    raise exception 'Not authorized to confirm revenue' using errcode = '42501';
+  end if;
+  if nullif(btrim(revenue_id_value), '') is null then
+    raise exception 'A revenue id is required';
+  end if;
+  if adjustments is null or jsonb_typeof(adjustments) is distinct from 'object' then
+    raise exception 'Revenue adjustments must be a JSON object';
+  end if;
+
+  select adult_customers, child_customers, senior_pwd_customers
+  into adult_count_value, child_count_value, senior_count_value
+  from public.revenue_records
+  where id = btrim(revenue_id_value)
+    and status = 'Draft'
+  for update;
+  if not found then
+    raise exception 'Draft revenue record not found';
+  end if;
+
+  if adjustments ? 'adult_customers' then
+    adult_count_value := (adjustments ->> 'adult_customers')::integer;
+  end if;
+  if adjustments ? 'child_customers' then
+    child_count_value := (adjustments ->> 'child_customers')::integer;
+  end if;
+  if adjustments ? 'senior_pwd_customers' then
+    senior_count_value := (adjustments ->> 'senior_pwd_customers')::integer;
+  end if;
+  if adult_count_value < 0 or child_count_value < 0 or senior_count_value < 0 then
+    raise exception 'Customer counts must be non-negative';
+  end if;
+
+  update public.revenue_records
+  set adult_customers = adult_count_value,
+      child_customers = child_count_value,
+      senior_pwd_customers = senior_count_value,
+      status = 'Confirmed',
+      last_edited_by = coalesce(auth.uid()::text, ''),
+      last_edited_at = clock_timestamp(),
+      edit_reason = 'Confirmed revenue draft'
+  where id = btrim(revenue_id_value);
+  return jsonb_build_object('id', btrim(revenue_id_value), 'status', 'Confirmed');
+end;
+$$;
+
 -- Keep app_records as a locked archive after backfill. Demo users and unknown
 -- collections remain there for explicit review; they are not exposed through
 -- the API or copied into Auth profiles.
@@ -1481,7 +1983,9 @@ revoke all on table
   public.physical_counts,
   public.revenue_records,
   public.reservations,
+  public.buffet_rates,
   public.restaurant_tables,
+  public.public_reservation_attempts,
   public.audit_logs,
   public.app_records_migrations,
   public.app_records_migration_errors
@@ -1498,6 +2002,7 @@ grant select, insert, update, delete on table
   public.physical_counts,
   public.revenue_records,
   public.reservations,
+  public.buffet_rates,
   public.restaurant_tables
 to authenticated;
 revoke update, delete on table
@@ -1521,6 +2026,57 @@ revoke all on function public.apply_waste_stock() from public, anon, authenticat
 revoke all on function public.apply_physical_count_stock() from public, anon, authenticated;
 revoke all on function public.prevent_direct_stock_change() from public, anon, authenticated;
 revoke all on function public.enforce_reservation_date() from public, anon, authenticated;
+
+-- PHASE 2: finalize buffet-rate access. Receptionist can read rates for
+-- reservation workflows; kitchen and inventory roles do not need this table.
+alter table public.buffet_rates enable row level security;
+drop policy if exists buffet_rates_phase1_read on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_insert on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_update on public.buffet_rates;
+drop policy if exists buffet_rates_phase1_delete on public.buffet_rates;
+drop policy if exists buffet_rates_read on public.buffet_rates;
+drop policy if exists buffet_rates_insert on public.buffet_rates;
+drop policy if exists buffet_rates_update on public.buffet_rates;
+drop policy if exists buffet_rates_delete on public.buffet_rates;
+create policy buffet_rates_read
+  on public.buffet_rates for select to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']));
+create policy buffet_rates_insert
+  on public.buffet_rates for insert to authenticated
+  with check (public.has_app_role(array['Administrator', 'Manager']));
+create policy buffet_rates_update
+  on public.buffet_rates for update to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager']))
+  with check (public.has_app_role(array['Administrator', 'Manager']));
+create policy buffet_rates_delete
+  on public.buffet_rates for delete to authenticated
+  using (public.has_app_role(array['Administrator', 'Manager']));
+
+-- PHASE 2: direct table privileges remain deny-by-default; recipe writes use
+-- save_recipe, and append-only ledgers cannot be updated or deleted directly.
+
+-- PHASE 2: security-definer functions are executable only by their intended
+-- callers. All security-definer functions retain an explicit pg_catalog path.
+revoke all on function public.current_app_role() from public, anon;
+revoke all on function public.has_app_role(text[]) from public, anon;
+grant execute on function public.current_app_role() to authenticated;
+grant execute on function public.has_app_role(text[]) to authenticated;
+revoke all on function public.save_recipe(jsonb, timestamptz) from public, anon;
+grant execute on function public.save_recipe(jsonb, timestamptz) to authenticated;
+revoke all on function public.public_create_reservation(jsonb) from public;
+grant execute on function public.public_create_reservation(jsonb) to anon, authenticated;
+revoke all on function public.public_get_reservation_status(text, text) from public;
+grant execute on function public.public_get_reservation_status(text, text) to anon, authenticated;
+-- PHASE 3: RPC callers are checked inside the security-definer functions.
+revoke all on function public.create_revenue_draft(text) from public, anon;
+grant execute on function public.create_revenue_draft(text) to authenticated;
+revoke all on function public.confirm_revenue(text, jsonb) from public, anon;
+grant execute on function public.confirm_revenue(text, jsonb) to authenticated;
+
+comment on table public.buffet_rates is
+  'PHASE 2; rates are readable by Administrator, Manager, and Receptionist; maintenance is Administrator/Manager only.';
+comment on table public.ingredients is
+  'PHASE 2; ingredient costs are visible to Administrator, Manager, Chef / Kitchen Staff, and Inventory Clerk. Receptionist has no access.';
 revoke all on function public.prevent_self_role_change() from public, anon, authenticated;
 revoke all on function public.write_audit_log() from public, anon, authenticated;
 
@@ -1547,6 +2103,12 @@ comment on function public.public_create_reservation(jsonb) is
   'Validated public reservation entry point; direct public table access is not granted.';
 comment on function public.public_get_reservation_status(text, text) is
   'Returns minimal status fields only when reservation reference and email or phone match.';
+comment on function public.create_revenue_draft(text) is
+  'Creates an idempotent All Day buffet revenue draft from a Seated reservation; returns only id and status.';
+comment on function public.confirm_revenue(text, jsonb) is
+  'Confirms a revenue draft for Administrator or Manager and optionally corrects customer counts.';
+comment on table public.public_reservation_attempts is
+  'Private Phase 3 rate-limit ledger for public reservation submissions.';
 comment on table public.app_records_migrations is
   'Private completion marker for the atomic typed app_records backfill.';
 comment on table public.app_records_migration_errors is
@@ -1561,3 +2123,222 @@ comment on table public.physical_counts is
   'Append-only physical count ledger; inserts atomically set ingredient stock to actual.';
 comment on column public.ingredients.stock is
   'Nonnegative on-hand balance maintained by stock ledger insert triggers; direct stock updates are rejected.';
+
+-- PHASE 5: read-only report views and aggregate RPC.
+create or replace view public.report_confirmed_revenue_v
+with (security_invoker = true)
+as
+select business_date, meal_period, adult_customers, child_customers,
+  senior_pwd_customers,
+  adult_customers + child_customers + senior_pwd_customers as covers,
+  adult_customers * adult_rate + child_customers * child_rate
+    + senior_pwd_customers * senior_pwd_rate as revenue
+from public.revenue_records
+where status = 'Confirmed';
+
+create or replace view public.report_inventory_valuation_v
+with (security_invoker = true)
+as
+select i.id as ingredient_id, i.name, i.category, i.unit, i.stock, i.cost,
+  i.stock * i.cost as valuation, i.minimum, i.stock <= i.minimum as is_low_stock
+from public.ingredients as i;
+
+create or replace function public.report_analytics(
+  report_key text, start_date date, end_date date,
+  group_by text default 'day', include_waste boolean default true
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog
+as $$
+declare result jsonb;
+begin
+  if start_date is null or end_date is null or end_date < start_date then
+    raise exception 'Invalid report date range';
+  end if;
+  if end_date - start_date > 366 then
+    raise exception 'Report date range cannot exceed 366 days';
+  end if;
+  if group_by not in ('day', 'week', 'month') then
+    raise exception 'Invalid report grouping';
+  end if;
+  if report_key = 'food_cost' then
+    if not public.has_app_role(array['Administrator', 'Manager']) then raise exception 'permission denied'; end if;
+    with periods as (
+      select generate_series(start_date, end_date, interval '1 day')::date as day
+    ), revenue as (
+      select date_trunc(group_by, business_date)::date as period, sum(revenue) as revenue
+      from public.report_confirmed_revenue_v where business_date between start_date and end_date group by 1
+    ), production as (
+      select date_trunc(group_by, p.production_date)::date as period,
+        sum(p.quantity * ri.quantity * i.cost * (1 + r.wastage / 100.0)) as production_cost
+      from public.production_logs p join public.recipes r on r.id = p.recipe_id
+      join public.recipe_ingredients ri on ri.recipe_id = r.id
+      join public.ingredients i on i.id = ri.ingredient_id
+      where p.production_date between start_date and end_date group by 1
+    ), waste as (
+      select date_trunc(group_by, w.waste_date)::date as period, sum(w.quantity * i.cost) as waste_cost
+      from public.waste_logs w join public.ingredients i on i.id = w.ingredient_id
+      where include_waste and w.waste_date between start_date and end_date group by 1
+    ), rows as (
+      select p.day as period, coalesce(rv.revenue, 0) as revenue,
+        coalesce(pr.production_cost, 0) as production_cost, coalesce(wa.waste_cost, 0) as waste_cost,
+        coalesce(pr.production_cost, 0) + coalesce(wa.waste_cost, 0) as food_cost,
+        case when coalesce(rv.revenue, 0) = 0 then null
+          else (coalesce(pr.production_cost, 0) + coalesce(wa.waste_cost, 0)) / rv.revenue * 100 end as food_cost_pct
+      from (select distinct date_trunc(group_by, day)::date as day from periods) p
+      left join revenue rv on rv.period = p.day left join production pr on pr.period = p.day
+      left join waste wa on wa.period = p.day order by p.day
+    )
+    select jsonb_build_object('rows', coalesce((select jsonb_agg(to_jsonb(rows)) from rows), '[]'::jsonb),
+      'target_pct', 32, 'includes_waste', include_waste) into result;
+  elsif report_key = 'revenue' then
+    if not public.has_app_role(array['Administrator', 'Manager']) then raise exception 'permission denied'; end if;
+    with rows as (
+      select business_date as period, meal_period, sum(adult_customers) as adults,
+        sum(child_customers) as children, sum(senior_pwd_customers) as senior_pwd,
+        sum(covers) as covers, sum(revenue) as revenue,
+        coalesce((select sum(p.quantity * ri.quantity * i.cost * (1 + r.wastage / 100.0))
+          from public.production_logs p join public.recipes r on r.id = p.recipe_id
+          join public.recipe_ingredients ri on ri.recipe_id = r.id
+          join public.ingredients i on i.id = ri.ingredient_id
+          where p.production_date = business_date), 0) as production_cost,
+        coalesce((select sum(w.quantity * i.cost) from public.waste_logs w
+          join public.ingredients i on i.id = w.ingredient_id where w.waste_date = business_date), 0) as waste_cost
+      from public.report_confirmed_revenue_v where business_date between start_date and end_date
+      group by business_date, meal_period order by business_date, meal_period
+    )
+    select jsonb_build_object('rows', coalesce((select jsonb_agg(to_jsonb(rows)) from rows), '[]'::jsonb),
+      'no_show_count', (select count(*) from public.reservations where reservation_date between start_date and end_date and status = 'No-show'),
+      'reservation_covers', (select coalesce(sum(coalesce(actual_covers, guests)), 0) from public.reservations where reservation_date between start_date and end_date and type = 'Reservation' and status in ('Seated', 'Completed')),
+      'walk_in_covers', (select coalesce(sum(coalesce(actual_covers, guests)), 0) from public.reservations where reservation_date between start_date and end_date and type = 'Walk-in' and status in ('Seated', 'Completed'))) into result;
+  elsif report_key = 'waste' then
+    if not public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk']) then raise exception 'permission denied'; end if;
+    select jsonb_build_object(
+      'by_ingredient', coalesce((select jsonb_agg(to_jsonb(x) order by x.waste_cost desc) from (
+        select i.id as ingredient_id, i.name, i.unit, sum(w.quantity) as quantity, sum(w.quantity * i.cost) as waste_cost
+        from public.waste_logs w join public.ingredients i on i.id = w.ingredient_id
+        where w.waste_date between start_date and end_date group by i.id, i.name, i.unit
+        order by sum(w.quantity * i.cost) desc limit 10) x), '[]'::jsonb),
+      'by_reason', coalesce((select jsonb_agg(to_jsonb(x) order by x.waste_cost desc) from (
+        select w.reason, sum(w.quantity) as quantity, sum(w.quantity * i.cost) as waste_cost
+        from public.waste_logs w join public.ingredients i on i.id = w.ingredient_id
+        where w.waste_date between start_date and end_date group by w.reason
+        order by sum(w.quantity * i.cost) desc) x), '[]'::jsonb),
+      'by_day', coalesce((select jsonb_agg(to_jsonb(x) order by x.period) from (
+        select w.waste_date as period, sum(w.quantity * i.cost) as waste_cost, sum(w.quantity) as quantity
+        from public.waste_logs w join public.ingredients i on i.id = w.ingredient_id
+        where w.waste_date between start_date and end_date group by w.waste_date) x), '[]'::jsonb),
+      'linked_count', (select count(*) from public.waste_logs where waste_date between start_date and end_date and production_log_id is not null),
+      'unlinked_count', (select count(*) from public.waste_logs where waste_date between start_date and end_date and production_log_id is null),
+      'revenue_allowed', public.has_app_role(array['Administrator', 'Manager'])) into result;
+  elsif report_key = 'inventory' then
+    if not public.has_app_role(array['Administrator', 'Manager', 'Inventory Clerk']) then raise exception 'permission denied'; end if;
+    select jsonb_build_object(
+      'valuation_by_category', coalesce((select jsonb_agg(to_jsonb(x) order by x.valuation desc) from (
+        select category, sum(stock * cost) as valuation, count(*) as ingredients
+        from public.ingredients group by category order by sum(stock * cost) desc) x), '[]'::jsonb),
+      'low_stock', coalesce((select jsonb_agg(to_jsonb(x) order by x.name) from (
+        select id as ingredient_id, name, category, stock, minimum, unit from public.ingredients
+        where stock <= minimum order by name) x), '[]'::jsonb),
+      'movements', coalesce((select jsonb_agg(to_jsonb(x) order by x.transaction_type) from (
+        select transaction_type, sum(quantity) as quantity, count(*) as entries
+        from public.inventory_transactions where transaction_date between start_date and end_date
+        group by transaction_type) x), '[]'::jsonb),
+      'variance', coalesce((select jsonb_agg(to_jsonb(x) order by x.count_date desc) from (
+        select c.count_date, i.name, i.unit, c.expected, c.actual, c.actual - c.expected as variance,
+          (c.actual - c.expected) * i.cost as variance_cost
+        from public.physical_counts c join public.ingredients i on i.id = c.ingredient_id
+        where c.count_date between start_date and end_date order by c.count_date desc) x), '[]'::jsonb)) into result;
+  elsif report_key = 'production' then
+    if not public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']) then raise exception 'permission denied'; end if;
+    select jsonb_build_object('rows', coalesce((select jsonb_agg(to_jsonb(x) order by x.batches desc) from (
+      select r.name as recipe, sum(p.quantity) as batches,
+        sum(p.quantity * coalesce((select sum(ri.quantity * i.cost) * (1 + r.wastage / 100.0)
+          from public.recipe_ingredients ri join public.ingredients i on i.id = ri.ingredient_id
+          where ri.recipe_id = r.id), 0)) as production_cost,
+        sum(p.covers_produced) filter (where p.covers_produced is not null) as covers_produced
+      from public.production_logs p join public.recipes r on r.id = p.recipe_id
+      where p.production_date between start_date and end_date
+      group by r.id, r.name, r.wastage order by sum(p.quantity) desc) x), '[]'::jsonb)) into result;
+  else raise exception 'Unknown report';
+  end if;
+  return result;
+end;
+$$;
+
+revoke all on function public.report_analytics(text, date, date, text, boolean) from public, anon;
+grant execute on function public.report_analytics(text, date, date, text, boolean) to authenticated;
+comment on function public.report_analytics(text, date, date, text, boolean) is
+  'PHASE 5 read-only aggregate reports; role checks are enforced inside the security-definer function and only confirmed revenue is included.';
+
+-- PHASE 6: realtime publication additions and read-only production planning.
+do $$
+declare
+  table_name text;
+begin
+  foreach table_name in array array[
+    'ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions',
+    'production_logs', 'waste_logs', 'physical_counts', 'reservations',
+    'restaurant_tables', 'revenue_records', 'buffet_rates'
+  ] loop
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = table_name
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', table_name);
+    end if;
+  end loop;
+end;
+$$;
+
+create or replace function public.get_expected_covers(
+  service_date date,
+  meal_period text default null
+)
+returns table (
+  expected_covers integer,
+  average_completed_covers numeric,
+  sample_days integer
+)
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if not public.has_app_role(array['Administrator', 'Manager', 'Chef / Kitchen Staff']) then
+    raise exception 'permission denied';
+  end if;
+  return query
+  with expected as (
+    select coalesce(sum(coalesce(actual_covers, guests)), 0)::integer as covers
+    from public.reservations
+    where reservation_date = service_date
+      and status in ('Pending', 'Confirmed', 'Seated')
+  ),
+  weekday_days as (
+    select reservation_date,
+      sum(coalesce(actual_covers, guests))::numeric as covers
+    from public.reservations
+    where reservation_date < service_date
+      and extract(dow from reservation_date) = extract(dow from service_date)
+      and status in ('Completed')
+    group by reservation_date
+    order by reservation_date desc
+    limit 4
+  )
+  select expected.covers,
+    coalesce((select avg(covers) from weekday_days), 0)::numeric,
+    (select count(*)::integer from weekday_days);
+end;
+$$;
+
+revoke all on function public.get_expected_covers(date, text) from public, anon;
+grant execute on function public.get_expected_covers(date, text) to authenticated;
+comment on function public.get_expected_covers(date, text) is
+  'PHASE 6 read-only planning suggestion; returns expected covers and the average of the last four same-weekday completed days, never revenue or cost.';

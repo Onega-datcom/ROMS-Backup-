@@ -25,8 +25,9 @@
   content: '';
 }
 
-.sync-status[data-state="connected"]::before { background: #168277; }
+.sync-status[data-state="live"]::before { background: #168277; }
 .sync-status[data-state="syncing"]::before { background: #e99751; }
+.sync-status[data-state="reconnecting"]::before { background: #e99751; }
 .sync-status[data-state="error"]::before,
 .sync-status[data-state="offline"]::before { background: #d96660; }
 
