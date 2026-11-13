@@ -14,26 +14,38 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="module-styles.css">
     <link rel="stylesheet" href="auth-status.css">
+    <link rel="stylesheet" href="shell.css">
   </head>
   <body>
+    <a class="skip-link" href="#app">Skip to main content</a>
     <div id="loginScreen" class="login-screen is-hidden"></div>
     <div id="appShell" class="app-shell is-hidden">
-      <aside class="sidebar" id="sidebar"></aside>
+      <button class="drawer-overlay" id="drawerOverlay" type="button" aria-label="Close navigation" tabindex="-1" hidden></button>
+      <aside class="sidebar" id="sidebar" aria-label="Primary sidebar"></aside>
       <main class="main-content">
         <header class="topbar">
-          <button class="mobile-menu" id="mobileMenu" aria-label="Open navigation" aria-expanded="false">☰</button>
-          <div class="breadcrumb"><span>CostTrack</span><b>/</b><strong id="pageCrumb">Dashboard</strong></div>
+          <button class="mobile-menu" id="mobileMenu" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+          </button>
+          <nav class="breadcrumb" aria-label="Breadcrumb"><span>Overview</span><strong id="pageCrumb">Dashboard</strong></nav>
+          <button class="search-launcher" id="searchLauncher" type="button" aria-label="Search or jump to a page (Control K)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 4.2 4.2"></path></svg>
+            <span class="search-launcher-label">Search or jump to…</span>
+            <kbd>Ctrl K</kbd>
+          </button>
           <div class="top-actions">
-            <span class="date-pill" id="reportingPeriod">◷ Reporting period</span>
+            <div class="shell-slot" id="createActionRoot"></div>
+            <span class="date-pill" id="reportingPeriod" aria-label="Reporting period (display only)">Reporting period</span>
             <button type="button" class="sync-status" id="syncStatus" aria-live="polite" data-state="offline">Offline</button>
             <button type="button" id="discardSyncButton" class="discard-sync is-hidden">Discard failed change</button>
-            <button class="icon-button" id="notificationButton" aria-label="Notifications">♢<i></i></button>
-            <div class="current-user"><span id="currentUser"></span><button id="signOutButton" type="button">Sign out</button></div>
+            <div class="shell-slot" id="notificationRoot"></div>
+            <div class="shell-slot" id="headerUserMenuSlot"></div>
           </div>
         </header>
         <section class="content" id="app"></section>
       </main>
     </div>
+    <div id="commandPaletteRoot"></div>
     <div id="modalRoot"></div>
     <div id="toastRoot" aria-live="polite"></div>
     <div id="loadingState" class="loading-state" role="status" aria-live="polite">Checking your secure session…</div>

@@ -5,7 +5,16 @@ function clearDataStorage() {
   Object.keys(localStorage).filter(key => key.startsWith('costtrack_pending_sync_')).forEach(key => localStorage.removeItem(key));
 }
 clearDataStorage();
-const state = { view: window.location.hash.slice(1) || 'dashboard', role: null, user: null, query: '' };
+const state = {
+  view: window.location.hash.slice(1) || 'dashboard',
+  role: null,
+  user: null,
+  query: '',
+  sidebarFlyoutGroup: null,
+  paletteItems: [],
+  paletteSelection: 0,
+  focusPageAfterNavigation: false
+};
 let modalOpener = null;
 let passwordRecoveryMode = new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
 let supabaseSyncEnabled = false;
@@ -16,6 +25,7 @@ let realtimeConnected = false;
 let realtimeConfigPromise = null;
 let realtimeRequestedKey = '';
 let reservationCalendar = null;
+let lastSavedAt = null;
 const recentLocalChanges = new Set();
 const collectionState = Object.fromEntries(KEYS.map(key => [key, []]));
 state.ingredientStatus = 'All';
@@ -311,27 +321,33 @@ function lowStock() { return all('ingredients').filter(item => item.stock <= ite
 function esc(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char])); }
 function toast(message, type = 'success') { const root = document.querySelector('#toastRoot'); root.innerHTML = `<div class="toast ${type}">${type === 'success' ? '✓' : '!'} ${esc(message)}</div>`; setTimeout(() => root.innerHTML = '', 3200); }
 const syncStates = {
-  live: { label: 'Live', color: 'live' },
-  syncing: { label: 'Syncing', color: 'syncing' },
-  reconnecting: { label: 'Reconnecting', color: 'reconnecting' },
-  offline: { label: 'Offline', color: 'offline' },
-  error: { label: 'Error', color: 'error' }
+  live: { label: 'Saved', color: 'live', icon: 'check' },
+  syncing: { label: 'Saving…', color: 'syncing', icon: 'refresh' },
+  reconnecting: { label: 'Reconnecting…', color: 'reconnecting', icon: 'refresh' },
+  offline: { label: 'Offline', color: 'offline', icon: 'cloud-off' },
+  error: { label: 'Error', color: 'error', icon: 'alert' }
 };
 function setSyncState(state, detail = '', labelOverride = '') {
   const badge = document.querySelector('#syncStatus');
   if (!badge) return;
   const definition = syncStates[state] || syncStates.error;
   badge.dataset.state = definition.color;
-  badge.textContent = labelOverride || definition.label;
-  badge.title = detail || definition.label;
+  const label = labelOverride || definition.label;
+  badge.innerHTML = `${shellIcon(definition.icon)}<span>${esc(label)}</span><i class="sync-dot" aria-hidden="true"></i>`;
+  const lastSaveLabel = lastSavedAt
+    ? `Last saved to the cloud at ${lastSavedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`
+    : '';
+  badge.title = detail || (state === 'live' && lastSaveLabel) || label;
   badge.setAttribute('aria-label', badge.title);
   const discard = document.querySelector('#discardSyncButton');
   if (discard) discard.classList.add('is-hidden');
 }
 function setPostSaveSyncState() {
   if (!navigator.onLine) return setSyncState('offline');
-  if (realtimeConnected) return setSyncState('live');
-  setSyncState('live', 'The latest save reached the cloud. Realtime is reconnecting.', 'Synced');
+  lastSavedAt = new Date();
+  const savedAt = lastSavedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (realtimeConnected) return setSyncState('live', `Saved to the cloud at ${savedAt}.`);
+  setSyncState('live', `Saved to the cloud at ${savedAt}. Realtime is reconnecting.`);
 }
 function rememberLocalChange(collection, recordId) {
   const key = `${collection}:${recordId}`;
@@ -388,6 +404,10 @@ async function refreshRealtimeCollection(table, payload) {
     await loadProductionBoard(true);
     if (state.productionHistoryOpen) await loadProductionHistory(true);
     return;
+  }
+  if (state.focusPageAfterNavigation) {
+    document.querySelector('#pageCrumb')?.focus({ preventScroll: true });
+    state.focusPageAfterNavigation = false;
   }
   const collection = realtimeCollectionName(table);
   if (!collection || !state.user) return;
@@ -468,42 +488,251 @@ function configureRealtimeSubscriptions() {
   return realtimeConfigPromise;
 }
 const sidebarGroups = [
-  { id: 'front-of-house', label: 'Front of House', icon: '▣', items: [['reservations', '▤', 'Reservations'], ['calendar', '▦', 'Tables / Calendar'], ['tables', '▦', 'Table Management']] },
-  { id: 'inventory', label: 'Inventory Management', icon: '◈', items: [['ingredients', '◈', 'Ingredients'], ['receiving', '↓', 'Ingredients + Receiving'], ['counts', '⌗', 'Physical Count']] },
-  { id: 'production', label: 'Kitchen Operations', icon: '♨', items: [['recipes', '◇', 'Recipes'], ['production', '♨', 'Production Board'], ['waste', '◌', 'Waste Logs']] },
-  { id: 'revenue-management', label: 'Revenue Management', icon: '₱', items: [['revenue', '₱', 'Revenue Tracking']] },
-  { id: 'analytics', label: 'Analytics & Reports', icon: '▥', items: [['reports', '▥', 'Reports & analytics']] },
-  { id: 'system', label: 'System Management', icon: '⚙', items: [['users', '♙', 'User Management'], ['users', '⌘', 'Role Management'], ['settings', '⚙', 'System Settings']] }
+  { id: 'front-of-house', label: 'Front of House', icon: 'calendar', items: [['reservations', 'calendar-plus', 'Reservations'], ['calendar', 'calendar-days', 'Tables / Calendar'], ['tables', 'table', 'Table Management']] },
+  { id: 'inventory', label: 'Inventory Management', icon: 'boxes', items: [['ingredients', 'package', 'Ingredients'], ['receiving', 'package-plus', 'Ingredients + Receiving'], ['counts', 'clipboard-check', 'Physical Count']] },
+  { id: 'production', label: 'Kitchen Operations', icon: 'chef-hat', items: [['recipes', 'book', 'Recipes'], ['production', 'chef-hat', 'Production Board'], ['waste', 'trash', 'Waste Logs']] },
+  { id: 'revenue-management', label: 'Revenue Management', icon: 'chart', items: [['revenue', 'chart', 'Revenue Tracking']] },
+  { id: 'analytics', label: 'Analytics & Reports', icon: 'chart', items: [['reports', 'chart', 'Reports & analytics']] },
+  { id: 'system', label: 'System Management', icon: 'settings', items: [['users', 'users', 'User Management'], ['roles', 'shield', 'Role Management'], ['settings', 'settings', 'System Settings']] }
 ];
+
+const shellIconPaths = {
+  dashboard: '<rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="11" width="7" height="10" rx="1.5"></rect><rect x="3" y="13" width="7" height="8" rx="1.5"></rect>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18"></path>',
+  'calendar-plus': '<rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18M12 13v5M9.5 15.5h5"></path>',
+  'calendar-days': '<rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01"></path>',
+  table: '<rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 10h18M9 10v10M15 10v10"></path>',
+  boxes: '<path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Z"></path><path d="m4 12 8 4.5 8-4.5M4 16.5l8 4.5 8-4.5M12 12v9"></path>',
+  package: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"></path><path d="m4.5 7.8 7.5 4.3 7.5-4.3M12 12v9"></path>',
+  'package-plus': '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"></path><path d="m4.5 7.8 7.5 4.3 7.5-4.3M12 12v9M12 6v4M10 8h4"></path>',
+  'clipboard-check': '<rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 4.5h6v3H9zM8.5 14l2.2 2.2 4.8-4.8"></path>',
+  book: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 0 4 22V5.5Z"></path><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H20M8 7h8"></path>',
+  'chef-hat': '<path d="M6 13a4 4 0 1 1 3.8-5.3A4.5 4.5 0 0 1 18 10a3.5 3.5 0 0 1-.7 7H6a4 4 0 0 1 0-8"></path><path d="M6 17v4h12v-4"></path>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 14h12l1-14M9 7V4h6v3"></path>',
+  chart: '<path d="M3 3v18h18"></path><path d="m7 14 4-4 3 3 6-7"></path>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>',
+  shield: '<path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"></path><path d="m9 12 2 2 4-4"></path>',
+  settings: '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"></path><path d="m19.4 15 .1.1 1.2 1-1.2 2.1-1.5-.5a7.8 7.8 0 0 1-1.4.8l-.3 1.6h-2.5l-.4-1.6a7.7 7.7 0 0 1-1.5-.8l-1.4.5-1.3-2.1 1.2-1a7 7 0 0 1 0-1.7l-1.2-1 1.3-2.1 1.4.5a7.7 7.7 0 0 1 1.5-.8l.4-1.6h2.5l.3 1.6a7.8 7.8 0 0 1 1.4.8l1.5-.5 1.2 2.1-1.2 1a7 7 0 0 1 0 1.6Z"></path>',
+  search: '<circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 4.2 4.2"></path>',
+  plus: '<path d="M12 5v14M5 12h14"></path>',
+  bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path>',
+  check: '<path d="m5 12 4 4L19 6"></path>',
+  refresh: '<path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.5 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.5-3"></path>',
+  'cloud-off': '<path d="m2 2 20 20M5.4 5.4A7 7 0 0 1 18.6 9M6 18h11a5 5 0 0 0 2.8-9.1M6 18a5 5 0 0 1-1.6-9.7"></path>',
+  chevron: '<path d="m7 10 5 5 5-5"></path>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"></path>',
+  panel: '<rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path>',
+  help: '<circle cx="12" cy="12" r="9"></circle><path d="M9.6 9a2.5 2.5 0 1 1 4.5 1.5c-1.2 1-2.1 1.5-2.1 3M12 17h.01"></path>',
+  more: '<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle>',
+  alert: '<path d="M12 3 2.8 19h18.4L12 3Z"></path><path d="M12 9v4M12 16h.01"></path>',
+  logout: '<path d="M10 17l5-5-5-5M15 12H3M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"></path>',
+  close: '<path d="m6 6 12 12M18 6 6 18"></path>',
+  restaurant: '<path d="M3 3v7a4 4 0 0 0 8 0V3M7 3v18M17 3v18M17 3c3 2 4 5 4 9h-4"></path>'
+};
+
+function shellIcon(name) {
+  return `<svg class="shell-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shellIconPaths[name] || shellIconPaths.dashboard}</svg>`;
+}
+
+function readShellPreference(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    console.warn('A sidebar preference could not be read.', error);
+    return null;
+  }
+}
+
+function writeShellPreference(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    console.warn('A sidebar preference could not be saved.', error);
+  }
+}
+
 function sidebarGroupState() {
-  const saved = localStorage.getItem(`costtrack_sidebar_groups_${state.role}`);
-  if (saved) {
+  const activeGroup = sidebarGroups.find(group => group.items.some(([view]) => view === state.view))?.id;
+  let groups = [];
+  const saved = readShellPreference(`costtrack_sidebar_groups_${state.role}`);
+  let hasPreference = saved !== null;
+  if (hasPreference) {
     try {
-      const groups = JSON.parse(saved);
-      if (Array.isArray(groups)) return groups;
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) groups = parsed.filter(id => sidebarGroups.some(group => group.id === id)).slice(0, 1);
+      else hasPreference = false;
     } catch (error) {
-      localStorage.removeItem(`costtrack_sidebar_groups_${state.role}`);
+      console.warn('Saved sidebar groups could not be restored.', error);
+      hasPreference = false;
     }
   }
-  const activeGroup = sidebarGroups.find(group => group.items.some(([view]) => view === state.view))?.id;
-  return activeGroup ? [activeGroup] : [];
+  return hasPreference ? groups : (activeGroup ? [activeGroup] : []);
 }
+
+function renderNavItem(view, icon, label, options = {}) {
+  const active = state.view === view;
+  let badge = '';
+  if (view === 'reservations') {
+    const pending = all('reservations').filter(item => item.status === 'Pending').length;
+    if (pending) badge = `<b class="nav-badge" title="${pending} pending reservations" aria-label="${pending} pending reservations">${pending > 9 ? '9+' : pending}</b>`;
+  } else if (view === 'ingredients') {
+    const count = lowStock().length;
+    if (count) badge = `<b class="nav-badge" title="${count} low-stock ingredients" aria-label="${count} low-stock ingredients">${count > 9 ? '9+' : count}</b>`;
+  }
+  return `<a class="nav-item ${options.single ? 'nav-single' : ''} ${active ? 'active' : ''}" href="#${view}" data-view="${view}" title="${esc(label)}" aria-label="${esc(label)}" ${active ? 'aria-current="page"' : ''} ${options.menuitem ? 'role="menuitem"' : ''}><span class="nav-icon">${shellIcon(icon)}</span><span class="nav-item-label">${esc(label)}</span>${badge}</a>`;
+}
+
+function userMenuMarkup(placement) {
+  const id = `user-menu-${placement}`;
+  const header = placement === 'header';
+  return `<div class="user-menu-wrap shell-popover-wrap">
+    <button class="user-menu-trigger ${header ? 'header-user-trigger' : 'sidebar-user-trigger'}" type="button" data-popover-trigger="user-${placement}" aria-controls="${id}" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu for ${esc(currentUserName())}">
+      <span class="avatar user-avatar">${esc(currentUserInitials())}</span>
+      <span class="user-copy"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></span>
+    ${header ? '' : shellIcon('more')}
+    </button>
+    <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
+      <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
+      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Help / CostTrack guide</span></button>
+      <div class="popover-divider"></div>
+      <button type="button" role="menuitem" class="danger-menu-item" data-shell-action="sign-out">${shellIcon('logout')}<span>Sign out</span></button>
+    </div>
+  </div>`;
+}
+
+function createActions() {
+  return [
+    { id: 'reservation', label: 'New reservation', icon: 'calendar-plus', view: 'reservations' },
+    { id: 'production', label: 'Log production', icon: 'chef-hat', view: 'production' },
+    { id: 'waste', label: 'Log waste', icon: 'trash', view: 'waste' },
+    { id: 'receiving', label: 'Receive supplies', icon: 'package-plus', view: 'receiving' },
+    { id: 'revenue', label: 'Record revenue', icon: 'chart', view: 'revenue' },
+    { id: 'count', label: 'Start physical count', icon: 'clipboard-check', view: 'counts' }
+  ].filter(action => canAccess(action.view));
+}
+
+function renderCreateMenu() {
+  const actions = createActions();
+  if (!actions.length) return '';
+  return `<div class="shell-popover-wrap">
+    <button type="button" class="new-button" data-popover-trigger="create" aria-controls="create-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Create new">${shellIcon('plus')}<span>New</span></button>
+    <div class="shell-popover create-popover" id="create-menu" data-popover-panel="create" role="menu" aria-label="Create new" hidden>
+      <div class="popover-heading">Quick create</div>
+      ${actions.map(action => `<button type="button" role="menuitem" data-create-action="${action.id}">${shellIcon(action.icon)}<span>${action.label}</span></button>`).join('')}
+    </div>
+  </div>`;
+}
+
+function reservationDateLabel(date) {
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return 'Date not set';
+  const days = Math.round((new Date(`${date}T12:00:00`) - new Date(`${today()}T12:00:00`)) / 86400000);
+  if (!Number.isFinite(days)) return 'Date not set';
+  if (days < 0) return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} past`;
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Tomorrow';
+  return `In ${days} days`;
+}
+
+function activeNotifications() {
+  const alerts = [];
+  if (canAccess('ingredients')) {
+    lowStock().forEach(item => alerts.push({
+      id: `stock-${item.id}`,
+      title: item.stock <= 0 ? `Out of stock: ${item.name}` : `Low stock: ${item.name}`,
+      message: `${Number(item.stock)} ${item.unit || ''} on hand · minimum ${Number(item.minimum)}`,
+      timing: 'Current',
+      view: 'ingredients',
+      icon: item.stock <= 0 ? 'alert' : 'package'
+    }));
+  }
+  if (canAccess('reservations')) {
+    all('reservations')
+      .filter(item => item.status === 'Pending')
+      .sort((left, right) => `${left.date || ''} ${left.time || ''}`.localeCompare(`${right.date || ''} ${right.time || ''}`))
+      .forEach(item => alerts.push({
+        id: `reservation-${item.id}`,
+        title: `Pending reservation: ${item.name || 'Guest'}`,
+        message: `${Number(item.guests || 0)} guests · ${item.date || 'Date not set'}${item.time ? ` at ${item.time}` : ''}`,
+        timing: reservationDateLabel(item.date),
+        view: 'reservations',
+        icon: 'calendar'
+      }));
+  }
+  return alerts;
+}
+
+function renderNotifications() {
+  const alerts = activeNotifications();
+  const count = alerts.length;
+  return `<div class="shell-popover-wrap">
+    <button class="notification-button" id="notificationButton" type="button" data-popover-trigger="notifications" aria-controls="notifications-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Notifications, ${count} active alerts">
+      ${shellIcon('bell')}
+      ${count ? `<span class="notification-count" aria-hidden="true">${count > 9 ? '9+' : count}</span>` : ''}
+    </button>
+    <div class="shell-popover notification-popover" id="notifications-menu" data-popover-panel="notifications" role="menu" aria-label="Active alerts" hidden>
+      <div class="popover-heading"><strong>Active alerts</strong><span>${count}</span></div>
+      ${count ? alerts.slice(0, 12).map(alert => `<button type="button" role="menuitem" class="notification-item" data-alert-view="${alert.view}">
+        <span class="notification-icon">${shellIcon(alert.icon)}</span>
+        <span class="notification-copy"><strong>${esc(alert.title)}</strong><span>${esc(alert.message)}</span><small>${esc(alert.timing)}</small></span>
+        ${shellIcon('arrow')}
+      </button>`).join('') : '<p class="notification-empty">You’re all caught up.</p>'}
+    </div>
+  </div>`;
+}
+
 function nav() {
-  const openGroups = sidebarGroupState();
-  const pending = all('reservations').filter(item => item.status === 'Pending').length;
-  const wasteAlerts = all('wasteLogs').filter(item => item.date === today()).length;
-  const renderBadge = view => view === 'reservations' && pending ? `<b class="nav-badge" title="${pending} pending reservations" aria-label="${pending} pending reservations">${pending}</b>` : view === 'ingredients' && lowStock().length ? `<b class="nav-badge" title="${lowStock().length} low stock ingredients" aria-label="${lowStock().length} low stock ingredients">${lowStock().length}</b>` : view === 'waste' && wasteAlerts ? `<b class="nav-badge warning-badge" title="${wasteAlerts} waste alerts" aria-label="${wasteAlerts} waste alerts">${wasteAlerts}</b>` : '';
+  const appShell = document.querySelector('#appShell');
+  const collapsed = appShell.classList.contains('sidebar-collapsed');
+  const savedOpenGroup = sidebarGroupState()[0];
+  const openGroup = collapsed ? state.sidebarFlyoutGroup : savedOpenGroup;
   const groups = sidebarGroups.map(group => {
-    const visible = group.items.filter(([view, , label]) => canAccess(view) && !(state.role === 'Receptionist' && group.id === 'analytics' && !['Reservation Reports', 'Table Utilization Reports'].includes(label)));
+    const visible = group.items.filter(([view]) => canAccess(view));
     if (!visible.length) return '';
-    const expanded = openGroups.includes(group.id);
-    return `<section class="nav-group ${expanded ? 'is-expanded' : ''}"><button class="nav-group-toggle" type="button" data-action="toggle-nav-group" data-group="${group.id}" aria-expanded="${expanded}" title="${group.label}"><span class="nav-group-icon">${group.icon}</span><span class="nav-group-label">${group.label}</span><span class="nav-group-chevron">⌄</span></button><div class="nav-group-items">${visible.map(([view, icon, label]) => `<button class="nav-item ${state.view === view ? 'active' : ''}" data-view="${view}" title="${label}"><span class="nav-icon">${icon}</span><span class="nav-item-label">${label}</span>${renderBadge(view)}</button>`).join('')}</div></section>`;
+    if (visible.length === 1) {
+      const [view, icon, label] = visible[0];
+      return `<div class="nav-single-wrap">${renderNavItem(view, icon, label, { single: true })}</div>`;
+    }
+    const expanded = openGroup === group.id;
+    const containsActive = visible.some(([view]) => state.view === view);
+    return `<section class="nav-group ${expanded ? 'is-expanded' : ''} ${containsActive ? 'has-active' : ''}" data-sidebar-group="${group.id}">
+      <button class="nav-group-toggle" type="button" data-action="toggle-nav-group" data-group="${group.id}" aria-controls="nav-group-${group.id}" aria-expanded="${expanded}" aria-label="${esc(group.label)}" title="${esc(group.label)}" ${collapsed ? 'aria-haspopup="menu"' : ''}>
+        <span class="nav-group-icon">${shellIcon(group.icon)}</span><span class="nav-group-label">${esc(group.label)}</span>${shellIcon('chevron')}
+      </button>
+      <div class="nav-group-items" id="nav-group-${group.id}" role="${collapsed ? 'menu' : 'group'}" aria-label="${esc(group.label)}" ${expanded ? '' : 'hidden'}>
+        ${visible.map(([view, icon, label]) => renderNavItem(view, icon, label, { menuitem: collapsed })).join('')}
+      </div>
+    </section>`;
   }).join('');
-  const overview = canAccess('dashboard') ? `<section class="nav-group overview-group is-expanded"><button class="nav-item overview-item ${state.view === 'dashboard' ? 'active' : ''}" data-view="dashboard" title="Dashboard"><span class="nav-icon">⌂</span><span class="nav-item-label">Dashboard</span></button></section>` : '';
-  return `<div class="brand"><div class="brand-mark">CT</div><div class="brand-copy"><strong>COST<span>TRACK</span></strong><small>BOH cost management</small></div><button class="sidebar-collapse" data-action="toggle-sidebar" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button></div><div class="workspace-switcher"><div class="avatar restaurant-avatar">CT</div><div class="workspace-copy"><span>Workspace</span><strong>Back-of-house</strong></div><span class="chevron">⌄</span></div><nav class="sidebar-nav">${overview}${groups}</nav><div class="sidebar-bottom"><div class="help-card"><div class="help-icon">?</div><div><strong>CostTrack guide</strong><span>Learn the workflow</span></div><span class="arrow">→</span></div><div class="user-mini"><div class="avatar user-avatar">${esc(currentUserInitials())}</div><div class="user-copy"><strong>${esc(currentUserName())}</strong><span>${esc(state.role)}</span></div></div></div>`;
+  const overview = canAccess('dashboard') ? `<div class="nav-single-wrap">${renderNavItem('dashboard', 'dashboard', 'Dashboard', { single: true })}</div>` : '';
+  const guideDismissed = readShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`) === 'true';
+  const shortScreen = window.matchMedia('(max-height: 700px)').matches;
+  const guideCollapsed = readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`) === 'true'
+    || collapsed
+    || shortScreen;
+  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="CostTrack guide">
+    <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="CostTrack guide" aria-expanded="${!guideCollapsed}">
+      <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>CostTrack guide</strong><span>Learn the workflow</span></span>
+    </button>
+    <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss CostTrack guide" title="Dismiss guide">${shellIcon('close')}</button>
+    <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
+  </section>`;
+  const collapseLabel = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  return `<div class="sidebar-top">
+      <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
+      <div class="brand">
+        <span class="brand-mark">CT</span><span class="brand-copy"><strong>COST<span>TRACK</span></strong><small>BOH cost management</small></span>
+        <button class="sidebar-collapse" type="button" data-shell-action="toggle-sidebar" aria-label="${collapseLabel}" title="${collapseLabel}">${shellIcon('panel')}</button>
+      </div>
+      <div class="workspace-switcher" aria-label="Restaurant workspace">
+        <span class="avatar restaurant-avatar">${shellIcon('restaurant')}</span><span class="workspace-copy"><span>Workspace</span><strong>Restaurant</strong></span>
+      </div>
+    </div>
+    <nav class="sidebar-nav" aria-label="Main">${overview}${groups}</nav>
+    <div class="sidebar-bottom">${guide}${userMenuMarkup('sidebar')}</div>`;
 }
 function saveSidebarGroups(groups) {
-  localStorage.setItem(`costtrack_sidebar_groups_${state.role}`, JSON.stringify(groups));
+  const next = Array.isArray(groups) ? groups.filter(id => sidebarGroups.some(group => group.id === id)).slice(0, 1) : [];
+  writeShellPreference(`costtrack_sidebar_groups_${state.role}`, JSON.stringify(next));
 }
 function setView(view) {
   if (!canAccess(view)) {
@@ -511,16 +740,201 @@ function setView(view) {
     return;
   }
   if (view === 'production' && state.view !== 'production') state.productionBoard.loaded = false;
+  state.focusPageAfterNavigation = state.view !== view;
   state.view = view;
   state.query = '';
+  state.sidebarFlyoutGroup = null;
   if (view === 'reservations') state.reservationMealPeriodFilter = 'All';
+  syncActiveSidebarGroup(view);
+  closeShellPopovers(false);
+  closeMobileDrawer(false);
   window.location.hash = view;
 }
+function syncActiveSidebarGroup(view) {
+  const activeGroup = sidebarGroups.find(group => group.items.some(([itemView]) => itemView === view))?.id;
+  if (activeGroup) saveSidebarGroups([activeGroup]);
+}
 function toggleSidebarGroup(groupId) {
-  const groups = sidebarGroupState();
-  const next = groups.includes(groupId) ? groups.filter(idValue => idValue !== groupId) : [...groups, groupId];
-  saveSidebarGroups(next);
-  render();
+  const sidebar = document.querySelector('#sidebar');
+  const wasCollapsed = document.querySelector('#appShell').classList.contains('sidebar-collapsed');
+  if (wasCollapsed) {
+    state.sidebarFlyoutGroup = state.sidebarFlyoutGroup === groupId ? null : groupId;
+  } else {
+    const open = sidebarGroupState()[0];
+    saveSidebarGroups(open === groupId ? [] : [groupId]);
+  }
+  sidebar.innerHTML = nav();
+  const toggle = sidebar.querySelector(`[data-group="${groupId}"]`);
+  if (wasCollapsed && state.sidebarFlyoutGroup === groupId && toggle) {
+    const rect = toggle.getBoundingClientRect();
+    const flyout = sidebar.querySelector(`#nav-group-${groupId}`);
+    const maxTop = Math.max(12, window.innerHeight - Math.min(flyout?.scrollHeight || 240, window.innerHeight - 24) - 12);
+    if (flyout) {
+      flyout.style.setProperty('--flyout-left', `${rect.right}px`);
+      flyout.style.setProperty('--flyout-top', `${Math.min(Math.max(12, rect.top), maxTop)}px`);
+    }
+  }
+  sidebar.querySelector(`[data-group="${groupId}"]`)?.focus();
+}
+function restoreShellPreferences() {
+  const shell = document.querySelector('#appShell');
+  const collapsed = readShellPreference(`costtrack_sidebar_collapsed_${state.role}`) === 'true';
+  shell.classList.toggle('sidebar-collapsed', collapsed && !window.matchMedia('(max-width: 1024px)').matches);
+}
+function renderShellChrome() {
+  const createRoot = document.querySelector('#createActionRoot');
+  const notificationRoot = document.querySelector('#notificationRoot');
+  const userRoot = document.querySelector('#headerUserMenuSlot');
+  const period = document.querySelector('#reportingPeriod');
+  if (createRoot) createRoot.innerHTML = renderCreateMenu();
+  if (notificationRoot) notificationRoot.innerHTML = renderNotifications();
+  if (userRoot) userRoot.innerHTML = userMenuMarkup('header');
+  if (period) {
+    const month = new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    period.innerHTML = `${shellIcon('calendar')}<span>${esc(month)}</span>`;
+    period.title = 'Current month display. Report filters use a separate date range.';
+    period.setAttribute('aria-label', `Current reporting month ${month}. Display only; reports use a separate date range.`);
+  }
+}
+function runCreateAction(actionId) {
+  const action = createActions().find(item => item.id === actionId);
+  if (!action) return toast('This action is not available for your role.', 'error');
+  closeShellPopovers(false);
+  if (actionId === 'reservation') return reservationForm();
+  if (actionId === 'revenue') return revenueForm();
+  if (actionId === 'production') return openForm('production');
+  if (actionId === 'waste') return openForm('waste');
+  if (actionId === 'receiving') return openForm('receiving');
+  if (actionId === 'count') return openForm('count');
+  return undefined;
+}
+function paletteItems() {
+  const pages = [];
+  if (canAccess('dashboard')) pages.push({ kind: 'page', label: 'Dashboard', detail: 'Overview', icon: 'dashboard', view: 'dashboard' });
+  sidebarGroups.forEach(group => {
+    group.items.filter(([view]) => canAccess(view)).forEach(([view, icon, label]) => {
+      pages.push({ kind: 'page', label, detail: group.label, icon, view });
+    });
+  });
+  const uniquePages = pages.filter((item, index) => pages.findIndex(candidate => candidate.view === item.view && candidate.label === item.label) === index);
+  const actions = createActions().map(action => ({
+    kind: 'action',
+    label: action.label,
+    detail: 'Quick create',
+    icon: action.icon,
+    action: action.id
+  }));
+  return [...uniquePages, ...actions];
+}
+function updatePaletteResults(query = '') {
+  const root = document.querySelector('#commandPaletteRoot');
+  const results = root?.querySelector('#paletteResults');
+  if (!results) return;
+  const normalized = query.trim().toLocaleLowerCase();
+  state.paletteItems = paletteItems().filter(item => (
+    !normalized || `${item.label} ${item.detail}`.toLocaleLowerCase().includes(normalized)
+  ));
+  state.paletteSelection = Math.min(state.paletteSelection, Math.max(0, state.paletteItems.length - 1));
+  results.innerHTML = state.paletteItems.length
+    ? state.paletteItems.map((item, index) => `<button type="button" class="palette-option" role="option" aria-selected="${index === state.paletteSelection}" id="palette-option-${index}" data-palette-index="${index}">
+        ${shellIcon(item.icon)}<span><strong>${esc(item.label)}</strong><small>${esc(item.detail)}</small></span><kbd>${item.kind === 'page' ? 'Open' : 'Create'}</kbd>
+      </button>`).join('')
+    : '<p class="palette-empty">No results</p>';
+  root.querySelector('#paletteSearch')?.setAttribute('aria-activedescendant', state.paletteItems.length ? `palette-option-${state.paletteSelection}` : '');
+}
+function openCommandPalette(trigger = document.querySelector('#searchLauncher')) {
+  if (!state.user || !state.role) return;
+  const root = document.querySelector('#commandPaletteRoot');
+  if (!root) return;
+  closeShellPopovers(false);
+  state.paletteTrigger = trigger;
+  state.paletteSelection = 0;
+  root.innerHTML = `<div class="palette-backdrop" data-palette-backdrop>
+    <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="paletteTitle">
+      <h2 id="paletteTitle" class="sr-only">Search or jump to</h2>
+      <div class="palette-search">${shellIcon('search')}<input id="paletteSearch" type="search" role="combobox" aria-expanded="true" aria-controls="paletteResults" aria-autocomplete="list" aria-activedescendant="" placeholder="Search pages and actions…" autocomplete="off"><kbd>Esc</kbd></div>
+      <div class="palette-results" id="paletteResults" role="listbox" aria-label="Pages and actions"></div>
+      <div class="palette-hint"><span>↑↓ to navigate</span><span>Enter to select</span><span>Esc to close</span></div>
+    </section>
+  </div>`;
+  updatePaletteResults();
+  root.querySelector('#paletteSearch')?.focus();
+}
+function closeCommandPalette(returnFocus = true) {
+  const root = document.querySelector('#commandPaletteRoot');
+  if (!root?.firstElementChild) return;
+  root.innerHTML = '';
+  if (returnFocus) state.paletteTrigger?.focus();
+  state.paletteTrigger = null;
+}
+function choosePaletteItem(index) {
+  const item = state.paletteItems[index];
+  if (!item) return;
+  closeCommandPalette(false);
+  if (item.kind === 'page') setView(item.view);
+  else runCreateAction(item.action);
+}
+function closeShellPopovers(returnFocus = false) {
+  document.querySelectorAll('[data-popover-panel]').forEach(panel => {
+    panel.hidden = true;
+    const trigger = document.querySelector(`[data-popover-trigger="${panel.dataset.popoverPanel}"]`);
+    trigger?.setAttribute('aria-expanded', 'false');
+  });
+  if (returnFocus) document.querySelector('[data-popover-trigger][data-was-open="true"]')?.focus();
+  document.querySelectorAll('[data-popover-trigger][data-was-open="true"]').forEach(trigger => trigger.removeAttribute('data-was-open'));
+}
+function toggleShellPopover(name, trigger) {
+  const panel = document.querySelector(`[data-popover-panel="${name}"]`);
+  if (!panel) return;
+  const wasOpen = !panel.hidden;
+  closeShellPopovers(false);
+  if (wasOpen) return;
+  panel.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  trigger.dataset.wasOpen = 'true';
+  const firstItem = panel.querySelector('[role="menuitem"]');
+  firstItem?.focus();
+}
+function closeMobileDrawer(returnFocus = true) {
+  const shell = document.querySelector('#appShell');
+  const sidebar = document.querySelector('#sidebar');
+  const overlay = document.querySelector('#drawerOverlay');
+  if (!shell || !sidebar) return;
+  if (!window.matchMedia('(max-width: 1024px)').matches && !state.forceCloseDrawer) return;
+  sidebar.classList.remove('open');
+  overlay.hidden = true;
+  document.body.classList.remove('drawer-open');
+  document.querySelector('.main-content')?.removeAttribute('aria-hidden');
+  document.querySelector('#mobileMenu')?.setAttribute('aria-expanded', 'false');
+  state.forceCloseDrawer = false;
+  if (returnFocus) document.querySelector('#mobileMenu')?.focus();
+}
+function openMobileDrawer() {
+  const sidebar = document.querySelector('#sidebar');
+  const overlay = document.querySelector('#drawerOverlay');
+  if (!sidebar || !overlay) return;
+  sidebar.classList.add('open');
+  overlay.hidden = false;
+  document.body.classList.add('drawer-open');
+  document.querySelector('.main-content')?.setAttribute('aria-hidden', 'true');
+  document.querySelector('#mobileMenu')?.setAttribute('aria-expanded', 'true');
+  sidebar.querySelector('.drawer-close')?.focus();
+}
+function showGuide() {
+  if (window.matchMedia('(max-height: 700px)').matches) {
+    toast('Use the sidebar for navigation. The New menu only shows actions allowed for your role.');
+    return;
+  }
+  writeShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`, 'false');
+  writeShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`, 'false');
+  if (window.matchMedia('(max-width: 1024px)').matches) openMobileDrawer();
+  else {
+    document.querySelector('#appShell').classList.remove('sidebar-collapsed');
+    writeShellPreference(`costtrack_sidebar_collapsed_${state.role}`, 'false');
+  }
+  const sidebar = document.querySelector('#sidebar');
+  sidebar.innerHTML = nav();
+  sidebar.querySelector('[data-shell-action="toggle-guide"]')?.focus();
 }
 function login(message = '') {
   document.querySelector('#appShell').classList.add('is-hidden');
@@ -2047,8 +2461,67 @@ document.addEventListener('click', async event => {
   }
 });
 document.addEventListener('click', event => {
- if (event.target.closest('[data-action="toggle-sidebar"]')) {
- const control = event.target.closest('[data-action="toggle-sidebar"]'); const shell = document.querySelector('#appShell'); shell.classList.toggle('sidebar-collapsed'); const collapsed = shell.classList.contains('sidebar-collapsed'); localStorage.setItem(`costtrack_sidebar_collapsed_${state.role}`, String(collapsed)); control.textContent = collapsed ? '›' : '‹'; control.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar'); control.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar'); return; } const groupToggle = event.target.closest('[data-action="toggle-nav-group"]'); if (groupToggle) { toggleSidebarGroup(groupToggle.dataset.group); return; } const view = event.target.closest('[data-view]')?.dataset.view; if (view) { const group = sidebarGroups.find(item => item.items.some(([itemView]) => itemView === view)); if (group && !sidebarGroupState().includes(group.id)) saveSidebarGroups([...sidebarGroupState(), group.id]); setView(view); document.querySelector('#sidebar').classList.remove('open'); return; } const category = event.target.closest('[data-recipe-category]')?.dataset.recipeCategory; if (category) { state.recipeCategory = category; render(); return; } const dashboardStatus = event.target.closest('[data-dashboard-status]')?.dataset.dashboardStatus; if (dashboardStatus) { state.ingredientStatus = dashboardStatus; setView('ingredients'); return; } const action = event.target.closest('[data-action]'); if (!action) return; const name = action.dataset.action; if (name === 'close-modal') closeModal(); else if (name === 'open-recipe') openRecipeForm(); else if (name === 'open-revenue') revenueForm(); else if (name === 'edit-revenue') { if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error'); const record = all('revenueRecords').find(x => x.id === action.dataset.id); if (record) revenueForm(record); } else if (name === 'void-revenue') { if (!canVoidRevenue()) return toast('Only Administrators can void revenue.', 'error'); if (!confirm('Void this revenue record? This action is recorded and cannot be undone.')) return; const reason = prompt('Why is this revenue record being voided?'); if (!reason?.trim()) return; save('revenueRecords', all('revenueRecords').map(x => x.id === action.dataset.id ? { ...x, status: 'Voided', voided_by: state.role, void_reason: reason.trim(), voided_at: new Date().toISOString() } : x)); toast('Revenue record voided'); render(); } else if (name === 'open-reservation') reservationForm(); else if (name === 'edit-reservation') { const record = all('reservations').find(x => x.id === action.dataset.id); if (record) reservationForm(record); } else if (name === 'toggle-recipe-picker') document.querySelector('.recipe-picker').classList.toggle('is-hidden'); else if (name === 'add-recipe-ingredient') { const form = document.querySelector('#modalForm'); const ingredientId = form.elements.draftIngredient.value; const quantity = Number(form.elements.draftQuantity.value); if (!quantity) return toast('Enter a quantity for the ingredient.', 'error'); state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id }; state.recipeDraft.push({ ingredientId, quantity }); renderRecipeModal(); } else if (name === 'remove-recipe-ingredient') { const form = document.querySelector('#modalForm'); state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id }; state.recipeDraft.splice(Number(action.dataset.index), 1); renderRecipeModal(); } else if (name.startsWith('view-')) { const type = name.replace('view-', ''); const map = { ingredient: 'ingredients', recipe: 'recipes' }; const record = all(map[type]).find(x => x.id === action.dataset.id); if (record) viewRecord(type, record); } else if (name.startsWith('open-')) openForm(name.replace('open-', '')); else if (name.startsWith('edit-')) { const type = name.replace('edit-', ''); const map = { ingredient: 'ingredients', recipe: 'recipes', user: 'users' }; const record = all(map[type]).find(x => x.id === action.dataset.id); if (record) type === 'recipe' ? openRecipeForm(record) : openForm(type, record); } else if (name.startsWith('delete-')) deleteRecord(name.replace('delete-', ''), action.dataset.id); });
+  const category = event.target.closest('[data-recipe-category]')?.dataset.recipeCategory;
+  if (category) {
+    state.recipeCategory = category;
+    render();
+    return;
+  }
+  const dashboardStatus = event.target.closest('[data-dashboard-status]')?.dataset.dashboardStatus;
+  if (dashboardStatus) {
+    state.ingredientStatus = dashboardStatus;
+    setView('ingredients');
+    return;
+  }
+  const action = event.target.closest('[data-action]');
+  if (!action) return;
+  const name = action.dataset.action;
+  if (name === 'close-modal') closeModal();
+  else if (name === 'open-recipe') openRecipeForm();
+  else if (name === 'open-revenue') revenueForm();
+  else if (name === 'edit-revenue') {
+    if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error');
+    const record = all('revenueRecords').find(item => item.id === action.dataset.id);
+    if (record) revenueForm(record);
+  } else if (name === 'void-revenue') {
+    if (!canVoidRevenue()) return toast('Only Administrators can void revenue.', 'error');
+    if (!confirm('Void this revenue record? This action is recorded and cannot be undone.')) return;
+    const reason = prompt('Why is this revenue record being voided?');
+    if (!reason?.trim()) return;
+    save('revenueRecords', all('revenueRecords').map(item => item.id === action.dataset.id ? { ...item, status: 'Voided', voided_by: state.role, void_reason: reason.trim(), voided_at: new Date().toISOString() } : item));
+    toast('Revenue record voided');
+    render();
+  } else if (name === 'open-reservation') reservationForm();
+  else if (name === 'edit-reservation') {
+    const record = all('reservations').find(item => item.id === action.dataset.id);
+    if (record) reservationForm(record);
+  } else if (name === 'toggle-recipe-picker') document.querySelector('.recipe-picker').classList.toggle('is-hidden');
+  else if (name === 'add-recipe-ingredient') {
+    const form = document.querySelector('#modalForm');
+    const ingredientId = form.elements.draftIngredient.value;
+    const quantity = Number(form.elements.draftQuantity.value);
+    if (!quantity) return toast('Enter a quantity for the ingredient.', 'error');
+    state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id };
+    state.recipeDraft.push({ ingredientId, quantity });
+    renderRecipeModal();
+  } else if (name === 'remove-recipe-ingredient') {
+    const form = document.querySelector('#modalForm');
+    state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id };
+    state.recipeDraft.splice(Number(action.dataset.index), 1);
+    renderRecipeModal();
+  } else if (name.startsWith('view-')) {
+    const type = name.replace('view-', '');
+    const map = { ingredient: 'ingredients', recipe: 'recipes' };
+    const record = all(map[type]).find(item => item.id === action.dataset.id);
+    if (record) viewRecord(type, record);
+  } else if (name.startsWith('open-')) openForm(name.replace('open-', ''));
+  else if (name.startsWith('edit-')) {
+    const type = name.replace('edit-', '');
+    const map = { ingredient: 'ingredients', recipe: 'recipes', user: 'users' };
+    const record = all(map[type]).find(item => item.id === action.dataset.id);
+    if (record) type === 'recipe' ? openRecipeForm(record) : openForm(type, record);
+  } else if (name.startsWith('delete-')) deleteRecord(name.replace('delete-', ''), action.dataset.id);
+});
 document.addEventListener('submit', async event => {
   const formId = event.target.getAttribute('id');
   if (formId === 'loginForm') {
@@ -2129,7 +2602,6 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; render(); }
   if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
 });
-document.querySelector('#mobileMenu').addEventListener('click', () => document.querySelector('#sidebar').classList.toggle('open'));
 document.addEventListener('change', event => {
   if (event.target.matches('[data-revenue-range]')) {
     state.revenueRange = event.target.value;
@@ -2172,7 +2644,7 @@ async function syncWithSupabase() {
     Receptionist: ['reservations', 'restaurantTables', 'buffetRates']
   };
   const collections = collectionsByRole[state.role] || [];
-  setSyncState('syncing');
+  setSyncState('syncing', 'Loading the latest restaurant data.', 'Syncing…');
   state.productionBoard = { date: '', rows: [], loading: false, loaded: false, error: '' };
   state.productionHistoryOpen = false;
   state.productionHistory = {
@@ -2186,6 +2658,7 @@ async function syncWithSupabase() {
   }
   supabaseSyncEnabled = true;
   invalidateReportData();
+  setPostSaveSyncState();
   render();
 }
 async function openAuthenticatedSession(session) {
@@ -2208,7 +2681,8 @@ async function openAuthenticatedSession(session) {
   if (state.view !== requestedView) window.history.replaceState(null, '', `#${state.view}`);
   document.querySelector('#loginScreen').classList.add('is-hidden');
   document.querySelector('#appShell').classList.remove('is-hidden');
-  if (window.matchMedia('(max-width: 1024px)').matches && !localStorage.getItem(`costtrack_sidebar_collapsed_${state.role}`)) document.querySelector('#appShell').classList.add('sidebar-collapsed');
+  restoreShellPreferences();
+  syncActiveSidebarGroup(state.view);
   document.querySelector('#loadingState').classList.remove('is-hidden');
   try {
     await syncWithSupabase();
@@ -2221,7 +2695,7 @@ async function openAuthenticatedSession(session) {
   }
   render();
 }
-document.querySelector('#signOutButton').addEventListener('click', async () => {
+async function signOutCurrentUser() {
   await stopRealtimeSubscriptions();
   const { error } = await window.supabaseClient.auth.signOut();
   if (error) {
@@ -2229,15 +2703,18 @@ document.querySelector('#signOutButton').addEventListener('click', async () => {
     console.error('Sign out failed.', error);
     return;
   }
+  closeMobileDrawer(false);
+  closeShellPopovers(false);
   state.user = null;
   state.role = null;
+  lastSavedAt = null;
   supabaseSyncEnabled = false;
   KEYS.forEach(key => { collectionState[key] = []; });
   clearDataStorage();
   document.querySelector('#appShell').classList.add('is-hidden');
   document.querySelector('#loginScreen').classList.remove('is-hidden');
   login();
-});
+}
 async function retryCloudSync(failureState = 'error') {
   if (!state.user) return;
   try {
@@ -2253,6 +2730,254 @@ document.querySelector('#syncStatus').addEventListener('click', () => {
   if (document.querySelector('#syncStatus').dataset.state === 'error') retryCloudSync();
 });
 document.querySelector('#discardSyncButton').classList.add('is-hidden');
+document.addEventListener('click', event => {
+  const target = event.target;
+  const popoverTrigger = target.closest('[data-popover-trigger]');
+  const viewLink = target.closest('#sidebar [data-view], .breadcrumb [data-view]');
+  const groupToggle = target.closest('#sidebar [data-action="toggle-nav-group"]');
+  const shellAction = target.closest('[data-shell-action]');
+  const createAction = target.closest('[data-create-action]');
+  const alertItem = target.closest('[data-alert-view]');
+  const paletteOption = target.closest('[data-palette-index]');
+
+  if (!target.closest('.shell-popover-wrap')) closeShellPopovers(false);
+
+  if (target.closest('#searchLauncher')) {
+    event.preventDefault();
+    openCommandPalette(target.closest('#searchLauncher'));
+    return;
+  }
+  if (target.closest('#mobileMenu')) {
+    event.preventDefault();
+    if (document.querySelector('#sidebar').classList.contains('open')) closeMobileDrawer();
+    else openMobileDrawer();
+    return;
+  }
+  if (target.closest('#drawerOverlay')) {
+    closeMobileDrawer();
+    return;
+  }
+  if (target.closest('[data-palette-backdrop]')) {
+    closeCommandPalette();
+    return;
+  }
+  if (paletteOption) {
+    event.preventDefault();
+    choosePaletteItem(Number(paletteOption.dataset.paletteIndex));
+    return;
+  }
+  if (createAction) {
+    event.preventDefault();
+    runCreateAction(createAction.dataset.createAction);
+    return;
+  }
+  if (alertItem) {
+    event.preventDefault();
+    setView(alertItem.dataset.alertView);
+    return;
+  }
+  if (popoverTrigger) {
+    event.preventDefault();
+    toggleShellPopover(popoverTrigger.dataset.popoverTrigger, popoverTrigger);
+    return;
+  }
+  if (viewLink) {
+    event.preventDefault();
+    setView(viewLink.dataset.view);
+    return;
+  }
+  if (groupToggle) {
+    event.preventDefault();
+    toggleSidebarGroup(groupToggle.dataset.group);
+    return;
+  }
+  if (shellAction) {
+    event.preventDefault();
+    const action = shellAction.dataset.shellAction;
+    if (action === 'toggle-sidebar') {
+      const shell = document.querySelector('#appShell');
+      const collapsed = !shell.classList.contains('sidebar-collapsed');
+      shell.classList.toggle('sidebar-collapsed', collapsed);
+      state.sidebarFlyoutGroup = null;
+      writeShellPreference(`costtrack_sidebar_collapsed_${state.role}`, String(collapsed));
+      document.querySelector('#sidebar').innerHTML = nav();
+      document.querySelector('[data-shell-action="toggle-sidebar"]')?.focus();
+    } else if (action === 'toggle-guide') {
+      if (window.matchMedia('(max-height: 700px)').matches) {
+        toast('Use the sidebar for navigation. The New menu only shows actions allowed for your role.');
+        return;
+      }
+      if (document.querySelector('#appShell').classList.contains('sidebar-collapsed')) {
+        showGuide();
+        return;
+      }
+      const collapsed = !readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`);
+      writeShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`, String(collapsed));
+      document.querySelector('#sidebar').innerHTML = nav();
+      document.querySelector('[data-shell-action="toggle-guide"]')?.focus();
+    } else if (action === 'dismiss-guide') {
+      writeShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`, 'true');
+      document.querySelector('#sidebar').innerHTML = nav();
+      document.querySelector('.sidebar-user-trigger')?.focus();
+    } else if (action === 'show-guide') {
+      closeShellPopovers(false);
+      showGuide();
+    } else if (action === 'close-drawer') {
+      closeMobileDrawer();
+    } else if (action === 'sign-out') {
+      closeShellPopovers(false);
+      signOutCurrentUser();
+    }
+    return;
+  }
+}, true);
+document.addEventListener('input', event => {
+  if (event.target.id !== 'paletteSearch') return;
+  state.paletteSelection = 0;
+  updatePaletteResults(event.target.value);
+});
+document.addEventListener('keydown', event => {
+  const palette = document.querySelector('#commandPaletteRoot .command-palette');
+  if (palette) {
+    const total = state.paletteItems.length;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCommandPalette();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (total) {
+        state.paletteSelection = (state.paletteSelection + (event.key === 'ArrowDown' ? 1 : total - 1)) % total;
+        updatePaletteResults(document.querySelector('#paletteSearch')?.value || '');
+      }
+      return;
+    }
+    if (event.key === 'Enter' && event.target.id === 'paletteSearch') {
+      event.preventDefault();
+      choosePaletteItem(state.paletteSelection);
+      return;
+    }
+    if (event.key === 'Tab') {
+      const focusable = [...palette.querySelectorAll('input,button:not([disabled])')];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+
+  const openPanel = document.querySelector('[data-popover-panel]:not([hidden])');
+  if (openPanel) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeShellPopovers(true);
+      return;
+    }
+    const wrapper = openPanel.closest('.shell-popover-wrap');
+    const menuItems = [...openPanel.querySelectorAll('[role="menuitem"]:not([disabled])')];
+    if (menuItems.length && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const current = menuItems.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? menuItems.length - 1
+          : (current + (event.key === 'ArrowDown' ? 1 : menuItems.length - 1)) % menuItems.length;
+      menuItems[next].focus();
+      return;
+    }
+    if (event.key === 'Tab' && wrapper) {
+      const focusable = [...wrapper.querySelectorAll('button:not([disabled]),a[href],input')]
+        .filter(element => !element.closest('[hidden]'));
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    return;
+  }
+
+  const sidebar = document.querySelector('#sidebar');
+  const drawerOpen = sidebar?.classList.contains('open') && window.matchMedia('(max-width: 1024px)').matches;
+  if (drawerOpen) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMobileDrawer();
+      return;
+    }
+    if (event.key === 'Tab') {
+      const focusable = [...sidebar.querySelectorAll('a[href],button:not([disabled])')]
+        .filter(element => !element.closest('[hidden]'));
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    return;
+  }
+
+  const collapsedFlyout = document.querySelector('#appShell.sidebar-collapsed #sidebar .nav-group.is-expanded [role="menu"]');
+  if (collapsedFlyout && ['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key)) {
+    const items = [...collapsedFlyout.querySelectorAll('[role="menuitem"]')];
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      const group = collapsedFlyout.closest('.nav-group');
+      state.sidebarFlyoutGroup = null;
+      document.querySelector('#sidebar').innerHTML = nav();
+      document.querySelector(`[data-group="${group?.dataset.sidebarGroup}"]`)?.focus();
+    } else if (items.length) {
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement);
+      const delta = event.key === 'ArrowDown' ? 1 : items.length - 1;
+      items[(current + delta) % items.length].focus();
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    openCommandPalette(document.querySelector('#searchLauncher'));
+  }
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('.shell-popover-wrap')) closeShellPopovers(false);
+});
+let previousShellMobileMode = window.matchMedia('(max-width: 1024px)').matches;
+window.addEventListener('resize', () => {
+  const mobileMode = window.matchMedia('(max-width: 1024px)').matches;
+  if (mobileMode === previousShellMobileMode) return;
+  previousShellMobileMode = mobileMode;
+  if (mobileMode) {
+    document.querySelector('#appShell').classList.remove('sidebar-collapsed');
+    state.sidebarFlyoutGroup = null;
+  } else {
+    if (document.querySelector('#sidebar')?.classList.contains('open')) {
+      state.forceCloseDrawer = true;
+      closeMobileDrawer(false);
+    }
+    restoreShellPreferences();
+  }
+  document.querySelector('#sidebar').innerHTML = nav();
+});
 document.querySelector('#loginScreen').addEventListener('click', async event => {
   if (event.target.id !== 'resetPasswordButton') return;
   const email = document.querySelector('#loginForm [name="email"]').value.trim();
@@ -2388,15 +3113,23 @@ function render() {
   if (!state.user || !state.role) return;
   if (state.view === 'revenue' && !canAccessRevenue()) {
     document.querySelector('#sidebar').innerHTML = nav();
+    renderShellChrome();
     document.querySelector('#pageCrumb').textContent = 'Access denied';
     app.innerHTML = revenueAccessDenied();
     return;
   }
-  if (!canAccess(state.view)) state.view = roleAccess[state.role][0];
+  if (!canAccess(state.view)) {
+    state.view = roleAccess[state.role][0];
+    syncActiveSidebarGroup(state.view);
+  }
   document.querySelector('#sidebar').innerHTML = nav();
+  renderShellChrome();
   const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management', roles: 'System Management', settings: 'System Management' };
   const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', users: 'User management', roles: 'Role management', settings: 'System settings', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management' };
-  document.querySelector('.breadcrumb').innerHTML = `<span>CostTrack</span><b>/</b><span>${moduleNames[state.view] || 'Workspace'}</span><b>/</b><strong id="pageCrumb">${pageNames[state.view] || state.view}</strong>`;
+  const activeGroup = sidebarGroups.find(group => group.items.some(([view]) => view === state.view));
+  const crumbLabel = state.view === 'dashboard' ? 'Overview' : (moduleNames[state.view] || 'Workspace');
+  const crumbTarget = activeGroup?.items.find(([view]) => canAccess(view))?.[0] || 'dashboard';
+  document.querySelector('.breadcrumb').innerHTML = `<a class="crumb-parent" href="#${crumbTarget}" data-view="${crumbTarget}">${esc(crumbLabel)}</a><span aria-hidden="true">›</span><strong id="pageCrumb" tabindex="-1">${esc(pageNames[state.view] || state.view)}</strong>`;
   const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), users: () => usersPage(), roles: () => usersPage(), settings: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
   const renderPage = pages[state.view];
   if (!renderPage) {
@@ -2421,10 +3154,6 @@ function render() {
   if (state.view === 'production') {
     loadProductionBoard();
   }
-  const identity = document.querySelector('#currentUser');
-  if (identity) identity.textContent = `${state.user.full_name || state.user.email} · ${state.role}`;
-  const period = document.querySelector('#reportingPeriod');
-  if (period) period.textContent = `◷ ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} reporting period`;
   const revenueRange = document.querySelector('[data-revenue-range]');
   if (revenueRange) revenueRange.value = state.revenueRange;
   normaliseRenderedStatuses();
@@ -2736,8 +3465,12 @@ window.addEventListener('hashchange', () => {
   const view = window.location.hash.slice(1);
   if (!view) return;
   state.view = canAccess(view) ? view : (roleAccess[state.role]?.[0] || 'dashboard');
+  state.focusPageAfterNavigation = true;
   if (state.view === 'reservations') state.reservationMealPeriodFilter = 'All';
   if (state.view !== view) window.history.replaceState(null, '', `#${state.view}`);
+  syncActiveSidebarGroup(state.view);
+  closeShellPopovers(false);
+  closeMobileDrawer(false);
   render();
 });
 
@@ -2770,8 +3503,6 @@ document.addEventListener('click', event => {
       }
     }
   }
-  const mobileMenu = event.target.closest('#mobileMenu');
-  if (mobileMenu) mobileMenu.setAttribute('aria-expanded', String(document.querySelector('#sidebar').classList.contains('open')));
   const toggleIngredients = event.target.closest('[data-action="toggle-ingredient-view"]');
   if (toggleIngredients) { state.ingredientView = state.ingredientView === 'cards' ? 'table' : 'cards'; localStorage.setItem('costtrack_ingredient_view', state.ingredientView); render(); return; }
   const sortIngredient = event.target.closest('[data-sort-ingredient]');
