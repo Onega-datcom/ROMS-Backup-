@@ -51,6 +51,48 @@ The waste form has searchable ingredient selection, one-tap common reasons, a st
 
 Only items actually being discarded belong in Waste Logs. Food stored safely or reused is not recorded as waste; if it is later discarded, log it then. This avoids counting retained food as a loss or deducting stock twice.
 
+## Phase 12 past reservation protection
+
+For an existing database using the current base schema, back up the project and run [`phase12_reservation_history_guard.sql`](./supabase/phase12_reservation_history_guard.sql) in the Supabase SQL Editor as the database owner before deploying the updated app. Fresh installations using the current `supabase-schema.sql` already include these protections.
+
+Past reservations remain visible but are read-only for Receptionists. Administrators and Managers can correct the guest name, contact details, occasion, seating preference, or special-request notes only; date, time, party size, table, status, and seating/completion outcomes are locked. Every such correction requires a new reason of 10–500 characters, which is stored on the reservation and included in the existing Administrator-readable audit log. Past reservations cannot be deleted or have their status changed. The database enforces these rules even if a client bypasses the UI.
+
+After applying the migration, test as Receptionist, Manager, and Administrator: view a past booking as Receptionist and confirm there is no save/status/delete action; make an allowed correction as Manager or Administrator with a reason; verify the audit row records the actor and old/new values; then confirm direct attempts to alter a past booking's status/date or delete it are rejected. Upcoming reservation behavior is unchanged.
+
+## Phase 13 restaurant reservation hours
+
+For an existing database, back up the project and run [`phase13_reservation_hours.sql`](./supabase/phase13_reservation_hours.sql) in the Supabase SQL Editor as the database owner before deploying the updated app. Fresh installations using the current `supabase-schema.sql` already include this rule.
+
+Phase 16 below supersedes Phase 13's former start-time-only rule. After Phase 16 is applied, reservations must fit a two-hour window between 10:00 AM and 9:00 PM, so the latest selectable start is 7:00 PM.
+
+The Phase 13 migration remains part of the migration history; do not rerun it to enable the two-hour rule.
+
+## Phase 14 table management
+
+For an existing database, back up the project and run [`phase14_table_management.sql`](./supabase/phase14_table_management.sql) in the Supabase SQL Editor as the database owner before deploying the updated app. Fresh installations using the current `supabase-schema.sql` already include these protections.
+
+The Table Management page is available to Administrators, Managers, and Receptionists. It shows date-based table availability, booking details, capacity, and unassigned-booking assignment; only Administrators and Managers can add, edit, or delete table records. Table capacity, assignment conflicts, and reservation-history deletion protection are also enforced by database triggers and row-level security. No-show bookings do not block reassignment. Phase 16 adds the two-hour overlap rule for assigned active bookings.
+
+After applying the migration, test as Receptionist and Manager: confirm the Receptionist can view tables and assign an eligible booking but cannot add, edit, or delete tables; confirm a Manager can manage table capacity; verify an undersized table, duplicate active table/time assignment, and capacity reduction below an active party are rejected. Confirm a table referenced by any reservation history cannot be deleted, including by direct database writes.
+
+## Phase 15 restaurant seating layout
+
+After Phase 14, back up the project and run [`phase15_restaurant_table_layout.sql`](./supabase/phase15_restaurant_table_layout.sql) as the database owner before deploying the updated table-management UI. Fresh installations using the current `supabase-schema.sql` already include the `table_type` and `area` columns.
+
+The requested layout is 15 tables and 91 seats: 3 Family tables (two 12-seat and one 8-seat); and 12 Casual tables (one 8-seat at the back, three 6-seat tables with two front and one back, three 5-seat tables at the back, four 4-seat tables with three front and one back, and one 2-seat table at the front). Managers and Administrators can use **Set up restaurant layout** to reconcile existing records to those exact capacities and categories, adding only missing slots. Existing table IDs and reservation history are preserved; legacy IDs are assigned in natural ID order. Extra legacy tables are kept as Unclassified rather than deleted. A capacity reduction is blocked if it would make an upcoming Pending, Confirmed, or Seated reservation larger than the table; resolve or reassign that reservation before retrying setup. Historical and cancelled reservations do not block the layout. Reservation records keep their existing table IDs.
+
+Use the Table type and Area filters to browse Family/Casual groups and Front/Back areas. Test setup on a database backup or staging project first, then confirm the table total and each group count before assigning new reservations.
+
+## Phase 16 two-hour table stays
+
+Back up the existing Supabase project, then run [`phase16_two_hour_table_stays.sql`](./supabase/phase16_two_hour_table_stays.sql) in the SQL Editor as the database owner. Apply it after the already-applied Phases 12–15 and before deploying the updated app. Do not paste the full baseline schema into an existing database or rerun Phases 12–15. Fresh installations using the updated `supabase-schema.sql` already include these rules.
+
+Reservations and walk-ins get a two-hour window. The full window must fit between 10:00 AM and 9:00 PM, making 7:00 PM the latest start. The database rejects out-of-hours active bookings and prevents overlapping Pending, Confirmed, or Seated bookings on the same table and date, including concurrent assignments. Back-to-back bookings at the exact two-hour boundary are allowed. Walk-ins also count as Seated reservation records and use the same table availability rules.
+
+Live table status is derived from reservations and walk-ins; cached `restaurant_tables.status` and `guest` values are no longer used to decide whether a table is Available, Reserved, or Occupied. Realtime database changes refresh the app, and the Reservations/Table Management views also recalculate every minute. A Seated party stays Occupied after two hours until staff confirms departure and marks it Completed. The app displays a “two-hour limit reached” reminder for staff; it does not automatically complete a reservation, release a table, or message a guest.
+
+The migration does not rewrite existing bookings or resolve any overlaps that were already present. Before relying on table assignments, review active same-table bookings for overlapping two-hour windows and resolve any conflicts through normal reservation status or assignment actions. An unresolved Seated booking from a prior day also keeps the table Occupied today and blocks new assignments for today until staff marks it Completed. Then test a reservation at 10:00 AM and 7:00 PM, confirm that 7:30 PM and later starts are rejected, verify that a 1:00 PM booking conflicts with 2:30 PM but allows 3:00 PM, and confirm that a still-Seated party remains Occupied after its two-hour limit until staff marks it Completed.
+
 ## Provision real users
 
 Do not add signup or service-role credentials to the browser. For each employee:
@@ -69,6 +111,12 @@ Use one of these exact roles for other profiles: `Manager`, `Inventory Clerk`, `
 ## Auth redirect configuration
 
 Serve the files over HTTP(S), not `file://`. In **Authentication → URL Configuration**, set the production Site URL and add the dashboard URL (ending in `/index.html`) to the allowed Redirect URLs so password-reset links return to the app.
+
+## Reservation calendar
+
+The **Tables / Calendar** page uses FullCalendar 7.1.4 from jsDelivr and reads the reservations already loaded from Supabase. It provides month, week, day, and agenda views, with status/type filters and guest search. Timed views display 10:00 AM–9:00 PM. Select a date to open the existing reservation form with that date prefilled, or click a time slot to prefill both the date and time; select a booking to edit it. The calendar does not save bookings directly; existing reservation validation, permissions, and Supabase persistence still apply.
+
+The calendar assets are served by the CDN, so the calendar page requires an internet connection; the Reservations page remains available as a fallback if those assets cannot load. Reservations currently store a start time but no duration, so week/day views show only a short visual marker and do not imply or save a booking length.
 
 ## Operational checks
 

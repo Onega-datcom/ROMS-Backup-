@@ -97,11 +97,15 @@ function mapDatabaseRecord(collection, row) {
       adults: row.adults, children: row.children, occasion: row.occasion,
       status: row.status, preference: row.preference, request: row.request,
       table: row.table_id, type: row.type, seatedAt: row.seated_at, completedAt: row.completed_at,
-      actualCovers: row.actual_covers
+      actualCovers: row.actual_covers, correctionReason: row.last_correction_reason || ''
     };
   }
   if (collection === 'restaurantTables') {
-    return { id: row.id, seats: row.seats, status: row.status, x: Number(row.x), y: Number(row.y), guest: row.guest };
+    return {
+      id: row.id, seats: row.seats, tableType: row.table_type || 'Unassigned',
+      area: row.area || 'Unassigned', status: row.status,
+      x: Number(row.x), y: Number(row.y), guest: row.guest
+    };
   }
   if (collection === 'buffetRates') {
     return { id: row.id, mealPeriod: row.meal_period, dayType: row.day_type,
@@ -164,9 +168,15 @@ function mapApplicationRecord(collection, record) {
     occasion: record.occasion || '', status: record.status || 'Pending', preference: record.preference || '',
     request: record.request || record.requests || '', table_id: record.table || null,
     type: record.type || 'Reservation', seated_at: record.seatedAt || null, completed_at: record.completedAt || null,
-    actual_covers: record.actualCovers == null ? null : record.actualCovers
+    actual_covers: record.actualCovers == null ? null : record.actualCovers,
+    last_correction_reason: record.correctionReason || ''
   };
-  if (collection === 'restaurantTables') return { id: record.id, seats: record.seats, status: record.status, x: record.x, y: record.y, guest: record.guest || '' };
+  if (collection === 'restaurantTables') return {
+    id: record.id, seats: record.seats,
+    table_type: record.tableType || 'Unassigned',
+    area: record.area || 'Unassigned',
+    status: record.status, x: record.x, y: record.y, guest: record.guest || ''
+  };
   if (collection === 'buffetRates') return {
     id: record.id, meal_period: record.mealPeriod, day_type: record.dayType,
     adult_rate: record.adultRate, child_rate: record.childRate, senior_pwd_rate: record.seniorPwdRate,

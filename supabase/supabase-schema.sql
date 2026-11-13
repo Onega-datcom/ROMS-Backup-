@@ -173,6 +173,7 @@ create table if not exists public.reservations (
   actual_covers integer check (actual_covers is null or actual_covers >= 0),
   preference text not null default '',
   request text not null default '',
+  last_correction_reason text not null default '',
   table_id text,
   created_by uuid references auth.users (id) on delete set null,
   created_at timestamptz not null default now(),
@@ -182,6 +183,10 @@ create table if not exists public.reservations (
     or nullif(btrim(coalesce(phone, '')), '') is not null
   )
 );
+alter table public.reservations
+  add column if not exists last_correction_reason text not null default '';
+comment on column public.reservations.last_correction_reason is
+  'Reason for the most recent privileged correction to a past reservation; changes are also stored in audit_logs.';
 
 -- PHASE 1: buffet pricing structure.
 create table if not exists public.buffet_rates (
@@ -317,12 +322,50 @@ $$;
 create table if not exists public.restaurant_tables (
   id text primary key,
   seats integer not null check (seats > 0),
+  table_type text not null default 'Unassigned',
+  area text not null default 'Unassigned',
   status text not null default 'Available',
   x numeric not null default 0,
   y numeric not null default 0,
   guest text not null default '',
+  constraint restaurant_tables_table_type_check
+    check (table_type in ('Family', 'Casual', 'Unassigned')),
+  constraint restaurant_tables_area_check
+    check (area in ('Front', 'Back', 'Unassigned')),
   updated_at timestamptz not null default now()
 );
+
+alter table public.restaurant_tables
+  add column if not exists table_type text not null default 'Unassigned',
+  add column if not exists area text not null default 'Unassigned';
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.restaurant_tables'::regclass
+      and conname = 'restaurant_tables_table_type_check'
+  ) then
+    alter table public.restaurant_tables
+      add constraint restaurant_tables_table_type_check
+      check (table_type in ('Family', 'Casual', 'Unassigned'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.restaurant_tables'::regclass
+      and conname = 'restaurant_tables_area_check'
+  ) then
+    alter table public.restaurant_tables
+      add constraint restaurant_tables_area_check
+      check (area in ('Front', 'Back', 'Unassigned'));
+  end if;
+end;
+$$;
+
+comment on column public.restaurant_tables.table_type is
+  'Restaurant seating category: Family, Casual, or Unassigned.';
+comment on column public.restaurant_tables.area is
+  'Restaurant seating area: Front, Back, or Unassigned.';
 
 -- PHASE 3: normalize table status values used by lifecycle automation.
 update public.restaurant_tables
@@ -399,7 +442,7 @@ create index if not exists reservations_created_by_idx
   on public.reservations (created_by);
 create unique index if not exists reservations_active_assigned_table_uidx
   on public.reservations (table_id, reservation_date, reservation_time)
-  where table_id is not null and status not in ('Cancelled', 'Completed');
+  where table_id is not null and status not in ('Cancelled', 'Completed', 'No-show');
 create index if not exists audit_logs_table_record_time_idx
   on public.audit_logs (table_name, record_id, occurred_at desc);
 create index if not exists audit_logs_actor_time_idx
@@ -1011,34 +1054,169 @@ begin
     new.completed_at := clock_timestamp();
   end if;
 
-  if new.table_id is not null and new.status = 'Seated' then
+  if tg_op = 'INSERT'
+     or new.status is distinct from old.status
+     or new.table_id is distinct from old.table_id
+     or new.reservation_date is distinct from old.reservation_date
+     or new.reservation_time is distinct from old.reservation_time then
+    if new.table_id is not null and new.status = 'Seated' then
+      update public.restaurant_tables
+      set status = 'Occupied',
+          guest = new.name
+      where id = new.table_id;
+    elsif new.table_id is not null
+          and new.status in ('Completed', 'Cancelled', 'No-show') then
+      select exists (
+        select 1
+        from public.reservations as r
+        where r.id <> new.id
+          and r.table_id = new.table_id
+          and r.reservation_date = new.reservation_date
+          and r.reservation_time = new.reservation_time
+          and r.status in ('Pending', 'Confirmed', 'Seated')
+      ) into table_is_held;
+      if table_is_held then
+        update public.restaurant_tables
+        set status = 'Reserved'
+        where id = new.table_id;
+      else
+        update public.restaurant_tables
+        set status = 'Available',
+            guest = ''
+        where id = new.table_id;
+      end if;
+    end if;
+  elsif tg_op = 'UPDATE'
+        and new.status = 'Seated'
+        and new.table_id is not null
+        and new.reservation_date >= current_date
+        and new.name is distinct from old.name then
     update public.restaurant_tables
-    set status = 'Occupied',
-        guest = new.name
+    set guest = new.name
     where id = new.table_id;
-  elsif new.table_id is not null
-        and new.status in ('Completed', 'Cancelled', 'No-show') then
-    select exists (
-      select 1
-      from public.reservations as r
-      where r.id <> new.id
-        and r.table_id = new.table_id
-        and r.reservation_date = new.reservation_date
-        and r.reservation_time = new.reservation_time
-        and r.status in ('Pending', 'Confirmed', 'Seated')
-    ) into table_is_held;
-    if table_is_held then
-      update public.restaurant_tables
-      set status = 'Reserved'
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.enforce_reservation_table_capacity()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  table_capacity integer;
+begin
+  if tg_op = 'INSERT'
+     or new.table_id is distinct from old.table_id
+     or new.guests is distinct from old.guests
+     or new.actual_covers is distinct from old.actual_covers then
+    if new.table_id is not null then
+      select seats into table_capacity
+      from public.restaurant_tables
       where id = new.table_id;
-    else
-      update public.restaurant_tables
-      set status = 'Available',
-          guest = ''
-      where id = new.table_id;
+      if not found then
+        raise exception 'The selected table does not exist'
+          using errcode = '23503';
+      end if;
+      if coalesce(new.actual_covers, new.guests) > table_capacity then
+        raise exception 'The selected table does not have enough seats for this reservation'
+          using errcode = '23514';
+      end if;
     end if;
   end if;
   return new;
+end;
+$$;
+
+create or replace function public.enforce_reservation_table_overlap()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  new_start integer;
+begin
+  if new.table_id is null or new.status not in ('Pending', 'Confirmed', 'Seated') then
+    return new;
+  end if;
+
+  if not public.reservation_time_within_open_hours(new.reservation_time) then
+    raise exception 'The two-hour reservation window must fit between 10:00 AM and 9:00 PM'
+      using errcode = '23514';
+  end if;
+  new_start := public.reservation_time_to_minutes(new.reservation_time);
+
+  perform pg_advisory_xact_lock(hashtext(new.table_id), hashtext(new.reservation_date::text));
+
+  if exists (
+    select 1
+    from public.reservations existing
+    where existing.table_id = new.table_id
+      and existing.id <> new.id
+      and existing.status in ('Pending', 'Confirmed', 'Seated')
+      and (
+        (existing.status = 'Seated' and existing.reservation_date < new.reservation_date and new.reservation_date = current_date)
+        or (
+          existing.reservation_date = new.reservation_date
+          and new_start < public.reservation_time_to_minutes(existing.reservation_time) + 120
+          and public.reservation_time_to_minutes(existing.reservation_time) < new_start + 120
+        )
+      )
+  ) then
+    raise exception 'The selected table already has an overlapping two-hour reservation'
+      using errcode = '23505';
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function public.enforce_restaurant_table_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if new.id is distinct from old.id then
+    raise exception 'Table identifiers cannot be changed after creation'
+      using errcode = '23514';
+  end if;
+  if new.seats is distinct from old.seats
+     and exists (
+       select 1
+       from public.reservations
+       where table_id = old.id
+         and reservation_date >= current_date
+         and status in ('Pending', 'Confirmed', 'Seated')
+         and coalesce(actual_covers, guests) > new.seats
+     ) then
+    raise exception 'Table capacity cannot be reduced below an assigned active party'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.prevent_table_delete_with_reservations()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if exists (
+    select 1
+    from public.reservations
+    where table_id = old.id
+  ) then
+    raise exception 'Tables linked to reservation history cannot be deleted'
+      using errcode = '23503';
+  end if;
+  return old;
 end;
 $$;
 
@@ -1179,6 +1357,179 @@ begin
 end;
 $$;
 
+create or replace function public.reservation_time_to_minutes(time_value text)
+returns integer
+language plpgsql
+immutable
+set search_path = pg_catalog
+as $$
+declare
+  normalized text := upper(btrim(coalesce(time_value, '')));
+  clock_value text;
+  meridiem text;
+  hour_value integer;
+  minute_value integer;
+begin
+  if normalized ~ '^(0?[1-9]|1[0-2]):[0-5][0-9][[:space:]]*(AM|PM)$' then
+    clock_value := regexp_replace(normalized, '[[:space:]]*(AM|PM)$', '');
+    meridiem := right(normalized, 2);
+  elsif normalized ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' then
+    clock_value := normalized;
+    meridiem := null;
+  else
+    return null;
+  end if;
+
+  hour_value := split_part(clock_value, ':', 1)::integer;
+  minute_value := split_part(clock_value, ':', 2)::integer;
+  if meridiem = 'AM' then
+    if hour_value = 12 then hour_value := 0; end if;
+  elsif meridiem = 'PM' and hour_value < 12 then
+    hour_value := hour_value + 12;
+  end if;
+
+  return hour_value * 60 + minute_value;
+end;
+$$;
+
+create or replace function public.reservation_time_within_open_hours(time_value text)
+returns boolean
+language plpgsql
+immutable
+set search_path = pg_catalog
+as $$
+declare
+  start_minutes integer := public.reservation_time_to_minutes(time_value);
+begin
+  return start_minutes is not null
+    and start_minutes >= 10 * 60
+    and start_minutes + 120 <= 21 * 60;
+end;
+$$;
+
+create or replace function public.enforce_reservation_hours()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if not public.reservation_time_within_open_hours(new.reservation_time) then
+      raise exception 'The two-hour reservation window must fit between 10:00 AM and 9:00 PM'
+        using errcode = '23514';
+    end if;
+  elsif new.reservation_date is distinct from old.reservation_date
+        or new.reservation_time is distinct from old.reservation_time then
+    if not public.reservation_time_within_open_hours(new.reservation_time) then
+      raise exception 'The two-hour reservation window must fit between 10:00 AM and 9:00 PM'
+        using errcode = '23514';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function public.enforce_reservation_history_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if tg_op = 'DELETE' then
+    if old.reservation_date < current_date then
+      raise exception 'Past reservations cannot be deleted'
+        using errcode = '42501';
+    end if;
+    return old;
+  end if;
+
+  if tg_op = 'INSERT' then
+    if btrim(coalesce(new.last_correction_reason, '')) <> '' then
+      raise exception 'A correction reason can only be recorded when correcting a past reservation'
+        using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  if tg_op = 'UPDATE' then
+    if new.id is distinct from old.id
+       or new.created_by is distinct from old.created_by
+       or new.created_at is distinct from old.created_at then
+      raise exception 'Reservation identity and creation details cannot be changed'
+        using errcode = '42501';
+    end if;
+
+    if old.reservation_date < current_date then
+      if not public.has_app_role(array['Administrator', 'Manager']) then
+        raise exception 'Past reservations are read-only for this role'
+          using errcode = '42501';
+      end if;
+
+      if row(
+        new.reservation_date, new.reservation_time, new.guests, new.type,
+        new.adults, new.children, new.status, new.seated_at,
+        new.completed_at, new.actual_covers, new.table_id
+      ) is distinct from row(
+        old.reservation_date, old.reservation_time, old.guests, old.type,
+        old.adults, old.children, old.status, old.seated_at,
+        old.completed_at, old.actual_covers, old.table_id
+      ) then
+        raise exception 'Historical corrections cannot change booking date, time, party size, table, or status'
+          using errcode = '42501';
+      end if;
+
+      if length(btrim(coalesce(new.last_correction_reason, ''))) not between 10 and 500 then
+        raise exception 'A correction reason between 10 and 500 characters is required'
+          using errcode = '23514';
+      end if;
+      if btrim(new.last_correction_reason) is not distinct from btrim(coalesce(old.last_correction_reason, '')) then
+        raise exception 'Enter a new reason for each historical correction'
+          using errcode = '23514';
+      end if;
+      if row(new.name, new.email, new.phone, new.occasion, new.preference, new.request)
+         is not distinct from row(old.name, old.email, old.phone, old.occasion, old.preference, old.request) then
+        raise exception 'A historical correction must change a guest detail or note'
+          using errcode = '23514';
+      end if;
+      if new.name is distinct from old.name
+         and (nullif(btrim(new.name), '') is null or length(new.name) > 160) then
+        raise exception 'A valid reservation name is required'
+          using errcode = '23514';
+      end if;
+      if new.email is distinct from old.email
+         and nullif(btrim(new.email), '') is not null
+         and (length(new.email) > 254
+           or new.email !~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$') then
+        raise exception 'A valid email address is required'
+          using errcode = '23514';
+      end if;
+      if new.phone is distinct from old.phone
+         and nullif(btrim(new.phone), '') is not null
+         and (length(new.phone) > 40
+           or length(regexp_replace(new.phone, '[^0-9]', '', 'g')) not between 7 and 15) then
+        raise exception 'A valid phone number is required'
+          using errcode = '23514';
+      end if;
+      if (new.occasion is distinct from old.occasion and length(new.occasion) > 120)
+         or (new.preference is distinct from old.preference and length(new.preference) > 500)
+         or (new.request is distinct from old.request and length(new.request) > 2000) then
+        raise exception 'Reservation details exceed the allowed length'
+          using errcode = '23514';
+      end if;
+      new.last_correction_reason := btrim(new.last_correction_reason);
+    elsif new.last_correction_reason is distinct from old.last_correction_reason then
+      raise exception 'Correction reasons may only be set for past reservation corrections'
+        using errcode = '42501';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
 create or replace function public.prevent_self_role_change()
 returns trigger
 language plpgsql
@@ -1207,11 +1558,41 @@ create trigger enforce_reservation_date
   before insert or update on public.reservations
   for each row execute function public.enforce_reservation_date();
 
+drop trigger if exists enforce_reservation_capacity on public.reservations;
+create trigger enforce_reservation_capacity
+  before insert or update on public.reservations
+  for each row execute function public.enforce_reservation_table_capacity();
+
+drop trigger if exists enforce_reservation_table_overlap on public.reservations;
+create trigger enforce_reservation_table_overlap
+  before insert or update on public.reservations
+  for each row execute function public.enforce_reservation_table_overlap();
+
+drop trigger if exists enforce_reservation_hours on public.reservations;
+create trigger enforce_reservation_hours
+  before insert or update on public.reservations
+  for each row execute function public.enforce_reservation_hours();
+
+drop trigger if exists enforce_reservation_history_guard on public.reservations;
+create trigger enforce_reservation_history_guard
+  before insert or update or delete on public.reservations
+  for each row execute function public.enforce_reservation_history_guard();
+
 -- PHASE 3: lifecycle runs after date validation and before audit logging.
 drop trigger if exists enforce_reservation_lifecycle on public.reservations;
 create trigger enforce_reservation_lifecycle
   before insert or update on public.reservations
   for each row execute function public.enforce_reservation_lifecycle();
+
+drop trigger if exists prevent_table_delete_with_reservations on public.restaurant_tables;
+create trigger prevent_table_delete_with_reservations
+  before delete on public.restaurant_tables
+  for each row execute function public.prevent_table_delete_with_reservations();
+
+drop trigger if exists enforce_restaurant_table_update on public.restaurant_tables;
+create trigger enforce_restaurant_table_update
+  before update on public.restaurant_tables
+  for each row execute function public.enforce_restaurant_table_update();
 
 drop trigger if exists validate_revenue_record on public.revenue_records;
 create trigger validate_revenue_record
@@ -1487,11 +1868,11 @@ create policy restaurant_tables_read
   using (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']));
 create policy restaurant_tables_insert
   on public.restaurant_tables for insert to authenticated
-  with check (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']));
+  with check (public.has_app_role(array['Administrator', 'Manager']));
 create policy restaurant_tables_update
   on public.restaurant_tables for update to authenticated
-  using (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']))
-  with check (public.has_app_role(array['Administrator', 'Manager', 'Receptionist']));
+  using (public.has_app_role(array['Administrator', 'Manager']))
+  with check (public.has_app_role(array['Administrator', 'Manager']));
 create policy restaurant_tables_delete
   on public.restaurant_tables for delete to authenticated
   using (public.has_app_role(array['Administrator', 'Manager']));
@@ -1705,6 +2086,10 @@ begin
   reservation_time_value := nullif(btrim(payload ->> 'reservation_time'), '');
   if reservation_time_value is null or length(reservation_time_value) > 40 then
     raise exception 'A reservation time is required';
+  end if;
+  if not public.reservation_time_within_open_hours(reservation_time_value) then
+    raise exception 'The two-hour reservation window must fit between 10:00 AM and 9:00 PM'
+      using errcode = '23514';
   end if;
 
   guest_count := (payload ->> 'guests')::integer;
@@ -2026,6 +2411,14 @@ revoke all on function public.apply_waste_stock() from public, anon, authenticat
 revoke all on function public.apply_physical_count_stock() from public, anon, authenticated;
 revoke all on function public.prevent_direct_stock_change() from public, anon, authenticated;
 revoke all on function public.enforce_reservation_date() from public, anon, authenticated;
+revoke all on function public.reservation_time_within_open_hours(text) from public, anon, authenticated;
+revoke all on function public.reservation_time_to_minutes(text) from public, anon, authenticated;
+revoke all on function public.enforce_reservation_hours() from public, anon, authenticated;
+revoke all on function public.enforce_reservation_table_overlap() from public, anon, authenticated;
+revoke all on function public.enforce_reservation_table_capacity() from public, anon, authenticated;
+revoke all on function public.enforce_restaurant_table_update() from public, anon, authenticated;
+revoke all on function public.enforce_reservation_history_guard() from public, anon, authenticated;
+revoke all on function public.prevent_table_delete_with_reservations() from public, anon, authenticated;
 
 -- PHASE 2: finalize buffet-rate access. Receptionist can read rates for
 -- reservation workflows; kitchen and inventory roles do not need this table.

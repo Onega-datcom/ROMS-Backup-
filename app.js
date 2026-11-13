@@ -15,6 +15,7 @@ let realtimeRefreshTimer = null;
 let realtimeConnected = false;
 let realtimeConfigPromise = null;
 let realtimeRequestedKey = '';
+let reservationCalendar = null;
 const recentLocalChanges = new Set();
 const collectionState = Object.fromEntries(KEYS.map(key => [key, []]));
 state.ingredientStatus = 'All';
@@ -37,6 +38,17 @@ state.receivingForm = {};
 state.reservationFilter = 'All';
 state.reservationTypeFilter = 'All';
 state.calendarDate = '';
+state.reservationCalendarDate = '';
+state.reservationCalendarView = 'dayGridMonth';
+state.reservationCalendarStatus = 'All';
+state.reservationCalendarType = 'All';
+state.reservationCalendarQuery = '';
+state.tableManagementDate = '';
+state.tableManagementStatus = 'All';
+state.tableManagementCapacity = 'All';
+state.tableManagementType = 'All';
+state.tableManagementArea = 'All';
+state.tableManagementQuery = '';
 state.revenueRange = '30';
 state.revenueStatus = 'Active';
 state.ingredientView = localStorage.getItem('costtrack_ingredient_view') || 'cards';
@@ -68,11 +80,11 @@ function persistReservationFilters() {
   }));
 }
 const roleAccess = {
-  'Administrator': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'roles', 'settings', 'reservations', 'calendar'],
-  'Manager': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'reservations', 'calendar'],
+  'Administrator': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'roles', 'settings', 'reservations', 'calendar', 'tables'],
+  'Manager': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'reservations', 'calendar', 'tables'],
   'Inventory Clerk': ['ingredients', 'receiving', 'counts', 'reports'],
   'Chef / Kitchen Staff': ['recipes', 'production', 'waste'],
-  'Receptionist': ['dashboard', 'reservations', 'calendar']
+  'Receptionist': ['dashboard', 'reservations', 'calendar', 'tables']
 };
 const canAccess = view => Boolean(roleAccess[state.role]?.includes(view));
 const canAccessRevenue = () => ['Administrator', 'Manager'].includes(state.role);
@@ -88,16 +100,17 @@ function localDateStr(date) {
 }
 
 function parseTime12h(timeStr) {
-  if (typeof timeStr !== 'string') return null;
-  const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (!match) return null;
-  let hours = parseInt(match[1], 10);
-  const minutes = parseInt(match[2], 10);
-  const ampm = match[3].toUpperCase();
-  if (hours < 1 || hours > 12 || minutes < 0 || minutes > 59) return null;
-  if (hours === 12) hours = ampm === 'AM' ? 0 : 12;
-  else if (ampm === 'PM') hours += 12;
-  return hours * 60 + minutes;
+  return window.CostTrackLogic.parseReservationTime(timeStr);
+}
+function liveTableAvailability(table, date = today(), reservations = all('reservations'), now = new Date()) {
+  return window.CostTrackLogic.tableAvailability(
+    table,
+    reservations,
+    date,
+    today(),
+    now.getHours() * 60 + now.getMinutes(),
+    now
+  );
 }
 const read = key => collectionState[key] || [];
 function currentUserName() {
@@ -145,6 +158,44 @@ async function saveCollections(changes) {
     }
     setSyncState(navigator.onLine ? 'error' : 'offline', error.message);
     toast(navigator.onLine ? friendlyRpcError(error) : 'You are offline. Reconnect to save.', 'error');
+    render();
+    throw error;
+  }
+}
+async function saveRecord(key, record) {
+  if (!state.user || !supabaseSyncEnabled) throw new Error('Cloud data is not ready. Please wait for the initial load.');
+  if (!navigator.onLine) throw new Error('You are offline. Reconnect to save.');
+  setSyncState('syncing');
+  rememberLocalChange(key, record.id);
+  try {
+    await window.supabaseRecord.upsert(key, record);
+    collectionState[key] = await window.supabaseRecord.load(key);
+    setPostSaveSyncState();
+    render();
+  } catch (error) {
+    console.error(`Single-record save failed for ${key}.`, error);
+    try { collectionState[key] = await window.supabaseRecord.load(key); }
+    catch (refreshError) { console.error(`Could not restore ${key} after a failed record save.`, refreshError); }
+    setSyncState(navigator.onLine ? 'error' : 'offline', error.message);
+    render();
+    throw error;
+  }
+}
+async function removeRecord(key, recordId) {
+  if (!state.user || !supabaseSyncEnabled) throw new Error('Cloud data is not ready. Please wait for the initial load.');
+  if (!navigator.onLine) throw new Error('You are offline. Reconnect to save.');
+  setSyncState('syncing');
+  rememberLocalChange(key, recordId);
+  try {
+    await window.supabaseRecord.remove(key, recordId, window.supabaseRecord.version(key, recordId));
+    collectionState[key] = await window.supabaseRecord.load(key);
+    setPostSaveSyncState();
+    render();
+  } catch (error) {
+    console.error(`Single-record delete failed for ${key}.`, error);
+    try { collectionState[key] = await window.supabaseRecord.load(key); }
+    catch (refreshError) { console.error(`Could not restore ${key} after a failed record delete.`, refreshError); }
+    setSyncState(navigator.onLine ? 'error' : 'offline', error.message);
     render();
     throw error;
   }
@@ -214,7 +265,13 @@ function activeBuffetRate(item, date = item?.date || today()) {
 }
 function friendlyRpcError(error) {
   const message = String(error?.message || error || '');
+  if (/reservation time must be within restaurant hours|two-hour reservation window/i.test(message)) return 'Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.';
   if (/production would make stock negative/i.test(message)) return 'Not enough inventory is available to complete this batch. Ask an Inventory Clerk to check the stock before marking it ready.';
+  if (/table_type|restaurant_tables.*area/i.test(message) && /column|schema cache|does not exist/i.test(message)) return 'Apply the Phase 15 table layout migration in Supabase, then reload the app.';
+  if (/reservations_active_assigned_table_uidx|overlapping two-hour reservation/i.test(message)) return 'That table already has an overlapping two-hour reservation.';
+  if (/selected table does not have enough seats/i.test(message)) return 'This table does not have enough seats for the reservation.';
+  if (/table capacity cannot be reduced/i.test(message)) return 'Capacity cannot be reduced below an active party already assigned to this table.';
+  if (/tables linked to reservation history/i.test(message)) return 'This table is linked to reservation history and cannot be deleted.';
   if (/foreign key|violates.*constraint|referenced/i.test(message)) {
     if (/ingredient/i.test(message)) return 'This ingredient is used by recipes or inventory history and cannot be deleted.';
     if (/recipe/i.test(message)) return 'This recipe is used by production history and cannot be deleted.';
@@ -268,6 +325,7 @@ function realtimeCollectionsForView() {
     counts: ['ingredients', 'physical_counts'],
     reservations: ['reservations', 'restaurant_tables'],
     calendar: ['reservations', 'restaurant_tables'],
+    tables: ['reservations', 'restaurant_tables'],
     rates: ['buffet_rates'],
     revenue: ['revenue_records', 'production_logs', 'waste_logs', 'reservations'],
     reports: ['ingredients', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts']
@@ -386,7 +444,7 @@ function configureRealtimeSubscriptions() {
   return realtimeConfigPromise;
 }
 const sidebarGroups = [
-  { id: 'front-of-house', label: 'Front of House', icon: '▣', items: [['reservations', '▤', 'Reservations'], ['calendar', '▦', 'Tables / Calendar']] },
+  { id: 'front-of-house', label: 'Front of House', icon: '▣', items: [['reservations', '▤', 'Reservations'], ['calendar', '▦', 'Tables / Calendar'], ['tables', '▦', 'Table Management']] },
   { id: 'inventory', label: 'Inventory Management', icon: '◈', items: [['ingredients', '◈', 'Ingredients'], ['receiving', '↓', 'Ingredients + Receiving'], ['counts', '⌗', 'Physical Count']] },
   { id: 'production', label: 'Kitchen Operations', icon: '♨', items: [['recipes', '◇', 'Recipes'], ['production', '♨', 'Production Board'], ['waste', '◌', 'Waste Logs']] },
   { id: 'revenue-management', label: 'Revenue Management', icon: '₱', items: [['revenue', '₱', 'Revenue Tracking']] },
@@ -491,7 +549,7 @@ function roleDashboard() {
   const profitToday = canAccessRevenue() ? profitability(todayDate, { total_revenue: revenueToday }).profit : 0;
   const foodCostToday = revenueMonth ? (productionMonth + wasteMonth) / revenueMonth * 100 : null;
   const cards = state.role === 'Receptionist'
-    ? [metric("Today's reservations", reservations.filter(item => item.date === today()).length, '▤', 'orange-icon', `${pendingReservations} awaiting confirmation`), metric('Guests expected', reservations.filter(item => item.date === today()).reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(item => String(item.status).toLowerCase() === 'available').length, '⌂', 'orange-icon', 'Ready for assignment')]
+    ? [metric("Today's reservations", reservations.filter(item => item.date === today()).length, '▤', 'orange-icon', `${pendingReservations} awaiting confirmation`), metric('Guests expected', reservations.filter(item => item.date === today()).reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => liveTableAvailability(table, today(), reservations).status === 'Available').length, '⌂', 'orange-icon', 'Ready for assignment')]
     : state.role === 'Chef / Kitchen Staff'
     ? [metric('Recipes created', recipes.length, '◇', 'purple-icon', `${new Set(recipes.map(item => item.category)).size} categories`), metric('Production logs today', productionToday, '♨', 'green-icon', 'Batches recorded today'), metric('Waste logs today', wasteToday, '◌', 'red-icon', money(wasteCost()) + ' total waste cost'), metric('Active recipes', recipes.length, '↗', 'orange-icon', 'Available to produce')]
     : state.role === 'Inventory Clerk'
@@ -1037,33 +1095,120 @@ function reservationDisplayName(item) {
   return item.type === 'Walk-in' ? 'Walk-in guest' : (item.name || 'Guest');
 }
 function reservationCard(item, showRevenue = false) {
+  const isPastReservation = item.date < today();
   const guestCount = item.actualCovers || item.guests || (Number(item.adults || 0) + Number(item.children || 0));
   const rate = activeBuffetRate(item);
   const hasRevenue = all('revenueRecords').some(record => record.reservation_id === item.id);
-  const details = `<small><strong>${esc(item.time || 'Time not set')}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span><b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() && rate ? `<em>${money(reservationRevenue(item, rate))} estimated buffet revenue</em>` : ''}`;
-  const lifecycleActions = item.status === 'Pending' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Confirmed' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Seated' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}">Complete</button>${canCreateDraft() ? `<button type="button" class="reservation-confirm-btn" data-action="create-revenue-draft" data-id="${esc(item.id)}">Create revenue draft</button>` : ''}` : '';
-  const actions = `${lifecycleActions}${['Administrator', 'Manager'].includes(state.role) ? `<button type="button" class="danger-btn compact-btn" data-action="delete-reservation" data-id="${esc(item.id)}">Delete</button>` : ''}`;
-  return `<article class="reservation-card"><button type="button" class="reservation-card-main" data-action="edit-reservation" data-id="${esc(item.id)}" aria-label="View reservation for ${esc(item.name)}">${details}</button><div class="reservation-actions">${actions}</div></article>`;
+  const historyLabel = isPastReservation ? '<span class="reservation-history-label">Past record · view only</span>' : '';
+  const endTime = window.CostTrackLogic.reservationEndTime(item.time);
+  const stayLimitReached = item.status === 'Seated' && window.CostTrackLogic.reservationStayLimitReached(item);
+  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() && rate ? `<em>${money(reservationRevenue(item, rate))} estimated buffet revenue</em>` : ''}`;
+  const lifecycleActions = isPastReservation ? '' : item.status === 'Pending' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Confirmed' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Seated' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}">Complete</button>${canCreateDraft() ? `<button type="button" class="reservation-confirm-btn" data-action="create-revenue-draft" data-id="${esc(item.id)}">Create revenue draft</button>` : ''}` : '';
+  const canDelete = !isPastReservation && ['Administrator', 'Manager'].includes(state.role);
+  const actions = `${lifecycleActions}${canDelete ? `<button type="button" class="danger-btn compact-btn" data-action="delete-reservation" data-id="${esc(item.id)}">Delete</button>` : ''}`;
+  const actionLabel = isPastReservation
+    ? (['Administrator', 'Manager'].includes(state.role) ? 'Correct past reservation' : 'View past reservation')
+    : 'View reservation';
+  return `<article class="reservation-card${isPastReservation ? ' reservation-card--historical' : ''}"><button type="button" class="reservation-card-main" data-action="edit-reservation" data-id="${esc(item.id)}" aria-label="${actionLabel} for ${esc(item.name)}">${details}</button><div class="reservation-actions">${actions}</div></article>`;
 }
-function reservationForm(item = {}) {
-  const tableOptions = all('restaurantTables').map(table => `<option value="${table.id}" ${item.table === table.id ? 'selected' : ''}>${table.id} · ${table.seats} seats</option>`).join('');
+function reservationTableOptions({ tableId = '', date = '', time = '', partySize = 0, reservationId = '' } = {}) {
+  return all('restaurantTables').map(table => {
+    const alreadyAssigned = table.id === tableId;
+    const hasCapacity = Number(table.seats) >= Number(partySize || 0);
+    const tableDetails = [
+      table.tableType && table.tableType !== 'Unassigned' ? table.tableType : '',
+      table.area && table.area !== 'Unassigned' ? table.area : ''
+    ].filter(Boolean).join(' · ');
+    const hasConflict = window.CostTrackLogic.tableHasReservationConflict(
+      table.id, date, time, all('reservations'), reservationId, today()
+    );
+    const disabled = hasConflict || (!alreadyAssigned && !hasCapacity);
+    const reason = hasConflict ? ' · overlaps another two-hour booking' : !hasCapacity ? ' · too small' : '';
+    return `<option value="${esc(table.id)}" ${alreadyAssigned ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${esc(table.id)} · ${Number(table.seats)} seats${tableDetails ? ` · ${esc(tableDetails)}` : ''}${reason}</option>`;
+  }).join('');
+}
+function refreshReservationTables(form) {
+  const select = form.elements.table;
+  if (!select) return;
+  const selectedTable = select.value;
+  const partySize = Number(form.elements.adults.value || 0) + Number(form.elements.children.value || 0);
+  select.innerHTML = `<option value="">Unassigned</option>${reservationTableOptions({
+    tableId: selectedTable,
+    date: form.elements.date.value,
+    time: form.elements.time.value,
+    partySize,
+    reservationId: form.dataset.id
+  })}`;
+  if (selectedTable && [...select.options].some(option => option.value === selectedTable && !option.disabled)) {
+    select.value = selectedTable;
+  } else if (selectedTable) {
+    toast('That table is not available for the selected date, time, or party size.', 'error');
+  }
+}
+function reservationForm(item = {}, defaults = {}) {
+  const isPastReservation = Boolean(item.id && item.date && item.date < today());
+  const canCorrectPast = isPastReservation && ['Administrator', 'Manager'].includes(state.role);
+  const isReadOnly = isPastReservation && !canCorrectPast;
+  const lockHistoricalFields = isPastReservation ? 'disabled' : '';
+  const lockReadOnlyFields = isReadOnly ? 'disabled' : '';
   const adults = Number(item.adults || item.guests || 2);
   const children = Number(item.children || 0);
-  modal(item.id ? 'Update reservation' : 'New reservation', `<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" required autocomplete="name"></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="email"></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel"></label></div><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(item.date || today())}" required></label><label>Time<select name="time" required><option ${item.time === '11:30 AM' ? 'selected' : ''}>11:30 AM</option><option ${item.time === '6:00 PM' ? 'selected' : ''}>6:00 PM</option><option ${item.time === '7:30 PM' ? 'selected' : ''}>7:30 PM</option><option ${item.time === '8:30 PM' ? 'selected' : ''}>8:30 PM</option></select></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="20" value="${adults}" required></label><label>Children<input name="children" type="number" min="0" max="20" value="${children}" required></label></div><div class="form-grid"><label>Table<select name="table"><option value="">Unassigned</option>${tableOptions}</select></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly></label></div><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}"></label><label>Special request<textarea name="request">${esc(item.request || '')}</textarea></label>`, item.id ? 'Save changes' : 'Create reservation');
+  const tableOptions = reservationTableOptions({
+    tableId: item.table,
+    date: item.date || defaults.date || today(),
+    time: item.time || defaults.time || '',
+    partySize: adults + children,
+    reservationId: item.id
+  });
+  const selectedTime = item.time || defaults.time || '';
+  const reservationTimeSlots = window.CostTrackLogic.reservationTimeSlots();
+  const timeOptions = `<option value="" disabled ${selectedTime ? '' : 'selected'}>Choose a time</option>${reservationTimeSlots.map(time => `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`).join('')}${selectedTime && !reservationTimeSlots.includes(selectedTime) ? `<option value="${esc(selectedTime)}" selected>${esc(selectedTime)} · existing</option>` : ''}`;
+  const historyNotice = isPastReservation
+    ? `<div class="reservation-history-notice"><strong>${canCorrectPast ? 'Historical correction' : 'Past reservation · view only'}</strong><span>${canCorrectPast ? 'Only the guest name, contact details, occasion, seating preference, and special-request notes can be corrected. Date, time, party size, table, and status are locked. Your reason is recorded in the audit log.' : 'Past bookings are kept for reference and cannot be changed from this account.'}</span></div>`
+    : '';
+  const correctionReason = canCorrectPast
+    ? `<label>Correction reason<textarea name="correctionReason" minlength="10" maxlength="500" required placeholder="Explain why this historical detail needs correction"></textarea><small class="field-help">Required; enter at least 10 characters.</small></label>`
+    : '';
+  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" required autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(item.date || defaults.date || today())}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="20" value="${adults}" required ${lockHistoricalFields || lockReadOnlyFields}></label><label>Children<input name="children" type="number" min="0" max="20" value="${children}" required ${lockHistoricalFields || lockReadOnlyFields}></label></div><div class="form-grid"><label>Table<select name="table" ${lockHistoricalFields || lockReadOnlyFields}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label></div><label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}`;
+  const title = isPastReservation ? canCorrectPast ? 'Correct past reservation' : 'Past reservation details' : item.id ? 'Update reservation' : 'New reservation';
+  const submitLabel = isReadOnly ? '' : item.id ? canCorrectPast ? 'Save correction' : 'Save changes' : 'Create reservation';
+  modal(title, formContent, submitLabel);
   document.querySelector('#modalForm').dataset.type = 'reservation';
   document.querySelector('#modalForm').dataset.id = item.id || '';
+  if (isReadOnly) {
+    const root = document.querySelector('#modalRoot');
+    root.querySelector('[data-action="close-modal"]').textContent = 'Close';
+    requestAnimationFrame(() => root.querySelector('.modal')?.focus());
+  }
 }
-function walkInTableOptions(partySize = 0) {
-  const tables = all('restaurantTables').filter(table => String(table.status).toLowerCase() === 'available' && Number(table.seats) >= Number(partySize || 0));
+function walkInTableOptions(partySize = 0, date = today(), time = null) {
+  const now = new Date();
+  const walkInTime = time || window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+  const reservations = all('reservations');
+  const tables = window.CostTrackLogic.isReservationTimeWithinOpenHours(walkInTime)
+    ? all('restaurantTables').filter(table =>
+      Number(table.seats) >= Number(partySize || 0)
+      && !reservations.some(item => item.table === table.id && item.date <= date && item.status === 'Seated')
+      && !window.CostTrackLogic.tableHasReservationConflict(table.id, date, walkInTime, reservations, '', today())
+    )
+    : [];
   return {
     tables,
-    markup: tables.map(table => `<option value="${esc(table.id)}">${esc(table.id)} · ${table.seats} seats</option>`).join('')
+    markup: tables.map(table => {
+      const details = [table.tableType, table.area].filter(value => value && value !== 'Unassigned').join(' · ');
+      return `<option value="${esc(table.id)}">${esc(table.id)} · ${table.seats} seats${details ? ` · ${esc(details)}` : ''}</option>`;
+    }).join('')
   };
 }
 function walkInForm() {
+  const now = new Date();
+  const time = window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+  if (!window.CostTrackLogic.isReservationTimeWithinOpenHours(time)) {
+    return toast('Walk-ins must start early enough to finish by closing. The latest seating time is 7:00 PM.', 'error');
+  }
   const available = walkInTableOptions();
   const tableMessage = `<small class="field-help walk-in-table-message ${available.tables.length ? 'is-hidden' : ''}">No available tables are currently suitable for this party.</small>`;
-  modal('Record walk-in', `<div class="form-grid"><label>Party size<input name="partySize" type="number" min="1" max="1000" required></label><label>Meal period<select name="mealPeriod"><option>All Day</option><option>Lunch</option><option>Dinner</option></select></label><label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label><label>Contact phone<input name="phone" type="tel" required></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Only tables with status <strong>Available</strong> and enough seats are listed. A phone number is required by the current reservations schema.</small></label>`, 'Record walk-in');
+  modal('Record walk-in', `<div class="form-grid"><label>Party size<input name="partySize" type="number" min="1" max="1000" required></label><label>Meal period<select name="mealPeriod"><option>All Day</option><option>Lunch</option><option>Dinner</option></select></label><label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label><label>Contact phone<input name="phone" type="tel" required></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Tables are listed only when no party is seated and no reservation overlaps the next two hours. Walk-ins are recorded as seated reservations. A phone number is required.</small></label>`, 'Record walk-in');
   document.querySelector('#modalForm').dataset.type = 'walk-in';
 }
 function refreshWalkInTables(form) {
@@ -1077,7 +1222,7 @@ function refreshWalkInTables(form) {
   if (available.tables.some(table => table.id === selected)) select.value = selected;
   const message = select.parentElement.querySelector('.walk-in-table-message');
   if (message) {
-    message.textContent = 'No available tables are currently suitable for this party.';
+    message.textContent = 'No available tables are currently suitable for this party and seating window.';
     message.classList.toggle('is-hidden', Boolean(available.tables.length));
   }
   const submit = form.querySelector('.modal-submit');
@@ -1174,20 +1319,325 @@ function reservationsPage() {
     return `<button type="button" class="calendar-day${isCurrentMonth ? '' : ' is-outside'}${isSelected ? ' is-selected' : ''}${isToday ? ' is-today' : ''}" data-calendar-date="${key}" aria-label="${reservationDateLabel(key)}${badgeCount ? `, ${badgeCount} reservations` : ''}" aria-pressed="${isSelected}"><span>${date.getDate()}</span>${badgeCount ? `<div class="calendar-day-meta">${statusDots}<b>${badgeCount}</b></div>` : ''}</button>`;
   }).join('');
   const selectedCount = items.length;
-  const tableCards = all('restaurantTables').map(table => `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${String(table.status).toLowerCase() === 'available' ? 'status-good' : String(table.status).toLowerCase() === 'occupied' ? 'status-low' : 'status-out'}">${esc(table.status)}</span><small>${esc(table.guest || `${table.seats} seats`)}</small></div>`).join('');
+  const tableCards = all('restaurantTables').map(table => {
+    const availability = liveTableAvailability(table, today(), reservations);
+    const booking = availability.primaryBooking;
+    const statusClass = availability.status === 'Available' ? 'status-good' : availability.status === 'Reserved' ? 'status-low' : 'status-out';
+    const detail = booking
+      ? `${booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest')} · ${booking.date < today() ? `${reservationDateLabel(booking.date)} · ` : ''}${booking.time || 'Time not set'}`
+      : `${Number(table.seats)} seats`;
+    const warning = availability.stayLimitReached
+      ? '<small class="reservation-stay-warning">Two-hour limit reached — notify guest; table remains occupied.</small>'
+      : '';
+    return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}</div>`;
+  }).join('');
   const listLabel = state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
-  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Updated after each seating and completion action.</div></div></div><div class="table-status-grid">${tableCards}</div></div><div class="reservation-workspace"><section class="panel reservation-calendar-panel"><div class="panel-header"><div><div class="panel-title">Reservation calendar</div><div class="panel-subtitle">Select a date to view its bookings</div></div><button class="text-btn" data-calendar-today>Today</button></div><div class="calendar-month-toolbar"><button type="button" class="calendar-nav" data-calendar-month="-1" aria-label="Previous month">‹</button><strong>${selected.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong><button type="button" class="calendar-nav" data-calendar-month="1" aria-label="Next month">›</button></div><div class="calendar-weekdays">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => `<span>${day}</span>`).join('')}</div><div class="monthly-calendar">${calendarCells}</div><div class="calendar-legend"><span><i class="calendar-status-dot status-good"></i> Confirmed / completed</span><span><i class="calendar-status-dot status-low"></i> Pending</span><span><i class="calendar-status-dot status-out"></i> Cancelled</span></div></section><section class="panel reservation-table-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${selectedCount} reservation${selectedCount === 1 ? '' : 's'} scheduled</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-toolbar"><div class="reservation-filters">${filters}</div><input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Search guests..." aria-label="Search guests"></div><div class="reservation-timeline">${selectedCount ? timeline : `<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>`}</div></section></div>`;
+  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><div class="reservation-workspace"><section class="panel reservation-calendar-panel"><div class="panel-header"><div><div class="panel-title">Reservation calendar</div><div class="panel-subtitle">Select a date to view its bookings</div></div><button class="text-btn" data-calendar-today>Today</button></div><div class="calendar-month-toolbar"><button type="button" class="calendar-nav" data-calendar-month="-1" aria-label="Previous month">‹</button><strong>${selected.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong><button type="button" class="calendar-nav" data-calendar-month="1" aria-label="Next month">›</button></div><div class="calendar-weekdays">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => `<span>${day}</span>`).join('')}</div><div class="monthly-calendar">${calendarCells}</div><div class="calendar-legend"><span><i class="calendar-status-dot status-good"></i> Confirmed / completed</span><span><i class="calendar-status-dot status-low"></i> Pending</span><span><i class="calendar-status-dot status-out"></i> Cancelled</span></div></section><section class="panel reservation-table-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${selectedCount} reservation${selectedCount === 1 ? '' : 's'} scheduled</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-toolbar"><div class="reservation-filters">${filters}</div><input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Search guests..." aria-label="Search guests"></div><div class="reservation-timeline">${selectedCount ? timeline : `<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>`}</div></section></div>`;
+}
+function tableManagementPage() {
+  const date = state.tableManagementDate || today();
+  const statusFilter = state.tableManagementStatus || 'All';
+  const capacityFilter = state.tableManagementCapacity || 'All';
+  const typeFilter = state.tableManagementType || 'All';
+  const areaFilter = state.tableManagementArea || 'All';
+  const query = String(state.tableManagementQuery || '').trim().toLowerCase();
+  const reservations = all('reservations');
+  const tables = all('restaurantTables').slice().sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: 'base' }));
+  const layoutPlan = window.CostTrackLogic.planRestaurantTableLayout(tables, reservations, today());
+  const getAvailability = table => liveTableAvailability(table, date, reservations);
+  const availabilityByTable = new Map(tables.map(table => [table.id, getAvailability(table)]));
+  const counts = tables.reduce((result, table) => {
+    result[availabilityByTable.get(table.id).status] += 1;
+    return result;
+  }, { Available: 0, Reserved: 0, Occupied: 0 });
+  const matchingTables = tables.filter(table => {
+    const availability = availabilityByTable.get(table.id);
+    const capacity = Number(table.seats);
+    const tableType = table.tableType || 'Unassigned';
+    const area = table.area || 'Unassigned';
+    const capacityMatches = capacityFilter === 'All'
+      || (capacityFilter === 'Small' && capacity <= 2)
+      || (capacityFilter === 'Medium' && capacity >= 3 && capacity <= 4)
+      || (capacityFilter === 'Large' && capacity >= 5);
+    const bookingText = availability.bookings.map(item => `${item.name || ''} ${item.email || ''} ${item.phone || ''}`).join(' ');
+    return (statusFilter === 'All' || availability.status === statusFilter)
+      && capacityMatches
+      && (typeFilter === 'All' || tableType === typeFilter)
+      && (areaFilter === 'All' || area === areaFilter)
+      && (!query || `${table.id} ${tableType} ${area} ${bookingText}`.toLowerCase().includes(query));
+  });
+  const canManage = ['Administrator', 'Manager'].includes(state.role);
+  const capacityOptions = ['All', 'Small', 'Medium', 'Large']
+    .map(value => `<option value="${value}" ${capacityFilter === value ? 'selected' : ''}>${value === 'All' ? 'All capacities' : value === 'Small' ? '1–2 seats' : value === 'Medium' ? '3–4 seats' : '5+ seats'}</option>`).join('');
+  const statusOptions = ['All', 'Available', 'Reserved', 'Occupied']
+    .map(value => `<option value="${value}" ${statusFilter === value ? 'selected' : ''}>${value === 'All' ? 'All statuses' : value}</option>`).join('');
+  const typeOptions = ['All', 'Family', 'Casual', 'Unassigned']
+    .map(value => `<option value="${value}" ${typeFilter === value ? 'selected' : ''}>${value === 'All' ? 'All table types' : value === 'Unassigned' ? 'Unclassified' : value}</option>`).join('');
+  const areaOptions = ['All', 'Front', 'Back', 'Unassigned']
+    .map(value => `<option value="${value}" ${areaFilter === value ? 'selected' : ''}>${value === 'All' ? 'All areas' : value === 'Unassigned' ? 'Area not set' : value}</option>`).join('');
+  const renderCard = table => {
+    const availability = availabilityByTable.get(table.id);
+    const statusClass = availability.status === 'Available' ? 'status-good' : availability.status === 'Reserved' ? 'status-low' : 'status-out';
+    const tableType = table.tableType || 'Unassigned';
+    const area = table.area || 'Unassigned';
+    const booking = availability.primaryBooking;
+    const historyExists = reservations.some(item => item.table === table.id);
+    const assignable = reservations.some(item =>
+      item.date === date
+      && !item.table
+      && window.CostTrackLogic.isReservationTimeWithinOpenHours(item.time)
+      && ['Pending', 'Confirmed'].includes(item.status)
+      && Number(item.guests || 0) <= Number(table.seats)
+      && !window.CostTrackLogic.tableHasReservationConflict(table.id, date, item.time, reservations, item.id, today())
+    );
+    const bookingEnd = booking ? window.CostTrackLogic.reservationEndTime(booking.time) : null;
+    const bookingDate = booking?.date < date ? `${reservationDateLabel(booking.date)} · ` : '';
+    const bookingDetails = booking
+      ? `<div class="table-booking-details"><strong>${esc(booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest'))}</strong><span>${esc(bookingDate)}${esc(booking.time || 'Time not set')}${bookingEnd ? `–${esc(bookingEnd)}` : ''} · ${Number(booking.guests || 0)} guest${Number(booking.guests || 0) === 1 ? '' : 's'}</span><button type="button" class="text-btn" data-action="edit-reservation" data-id="${esc(booking.id)}">Open booking</button>${availability.stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest. Keep this table occupied until they leave.</small>' : ''}${availability.bookingWindowEnded ? '<small class="reservation-stay-warning" role="status">The two-hour window passed. Confirm whether the guest arrived, or update the booking status.</small>' : ''}</div>`
+      : '<small class="table-empty-detail">No active booking assigned for this date</small>';
+    const additionalBookings = availability.bookings.length > (booking ? 1 : 0)
+      ? `<small class="table-additional-bookings">+${availability.bookings.length - (booking ? 1 : 0)} more booking${availability.bookings.length - (booking ? 1 : 0) === 1 ? '' : 's'} on this date</small>`
+      : '';
+    const areaBadge = area !== 'Unassigned' ? `<span class="table-area-badge">${esc(area)}</span>` : '';
+    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>${historyExists ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>' : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`}` : ''}</div></article>`;
+  };
+  const groups = [
+    { type: 'Family', area: 'Unassigned', label: 'Family tables' },
+    { type: 'Family', area: 'Front', label: 'Family tables · Front' },
+    { type: 'Family', area: 'Back', label: 'Family tables · Back' },
+    { type: 'Casual', area: 'Front', label: 'Casual tables · Front' },
+    { type: 'Casual', area: 'Back', label: 'Casual tables · Back' },
+    { type: 'Casual', area: 'Unassigned', label: 'Casual tables · Area not set' },
+    { type: 'Unassigned', area: 'Front', label: 'Unclassified · Front' },
+    { type: 'Unassigned', area: 'Back', label: 'Unclassified · Back' },
+    { type: 'Unassigned', area: 'Unassigned', label: 'Unclassified tables' }
+  ];
+  const cards = groups.map(group => {
+    const groupTables = matchingTables.filter(table =>
+      (table.tableType || 'Unassigned') === group.type
+      && (table.area || 'Unassigned') === group.area);
+    if (!groupTables.length) return '';
+    const groupSeats = groupTables.reduce((sum, table) => sum + Number(table.seats || 0), 0);
+    return `<section class="table-layout-group"><div class="table-layout-group-heading"><h2>${group.label}</h2><span>${groupTables.length} table${groupTables.length === 1 ? '' : 's'} · ${groupSeats} seats</span></div><div class="table-management-grid">${groupTables.map(renderCard).join('')}</div></section>`;
+  }).join('') || `<div class="empty-table"><strong>${tables.length ? 'No tables match these filters' : 'No tables have been added yet'}</strong><small>${tables.length ? 'Try another status, capacity, type, area, or search term.' : canManage ? 'Use “Set up restaurant layout” to create the requested 15 tables, or add tables individually.' : 'Ask a Manager or Administrator to add the restaurant tables.'}</small></div>`;
+  const totalSeats = tables.reduce((sum, table) => sum + Number(table.seats || 0), 0);
+  const layoutReady = layoutPlan.additions.length === 0 && layoutPlan.updates.length === 0 && layoutPlan.conflicts.length === 0;
+  const headerActions = canManage
+    ? `<span class="table-management-header-actions"><button type="button" class="ghost-btn" data-action="apply-table-layout" ${layoutReady ? 'disabled' : ''}>${layoutReady ? 'Layout configured' : 'Set up restaurant layout'}</button><button type="button" class="primary-btn" data-action="open-table-form">+ Add table</button></span>`
+    : '';
+
+  return `${pageHeader('Front of house', 'Table management', 'Manage the client’s seating layout and see availability derived from reservations and walk-ins.', headerActions)}<div class="table-management-summary"><div class="table-summary-card"><small>All tables</small><strong>${tables.length}</strong></div><div class="table-summary-card"><small>Total seats</small><strong>${totalSeats}</strong></div><div class="table-summary-card status-good"><small>Available</small><strong>${counts.Available}</strong></div><div class="table-summary-card status-low"><small>Reserved</small><strong>${counts.Reserved}</strong></div><div class="table-summary-card status-out"><small>Occupied</small><strong>${counts.Occupied}</strong></div></div><section class="panel table-management-panel"><div class="table-management-toolbar"><label>Date<input type="date" min="${today()}" value="${esc(date)}" data-table-date></label><label>Status<select data-table-status>${statusOptions}</select></label><label>Capacity<select data-table-capacity>${capacityOptions}</select></label><label>Table type<select data-table-type>${typeOptions}</select></label><label>Area<select data-table-area>${areaOptions}</select></label><label class="table-management-search">Search<input id="tableManagementSearch" type="search" value="${esc(state.tableManagementQuery)}" placeholder="Table or guest" aria-label="Search tables or guests"></label></div><p class="table-management-note">Availability is derived from active reservation and walk-in records, not the table’s cached status. Reservations occupy two-hour windows, with back-to-back bookings allowed; the latest start is 7:00 PM. A seated party remains Occupied after the two-hour limit until staff marks them Completed. The page refreshes status after live updates and every minute.</p>${cards}</section>`;
+}
+async function applyRestaurantTableLayout() {
+  if (!['Administrator', 'Manager'].includes(state.role)) {
+    return toast('Only Managers and Administrators can set up the restaurant layout.', 'error');
+  }
+  const tables = all('restaurantTables');
+  const plan = window.CostTrackLogic.planRestaurantTableLayout(tables, all('reservations'), today());
+  if (plan.conflicts.length) {
+    const details = plan.conflicts.map(conflict =>
+      `${conflict.tableId} → ${conflict.targetSeats} seats (reservation${conflict.reservationIds.length === 1 ? '' : 's'} ${conflict.reservationIds.join(', ')})`
+    ).join('; ');
+    return toast(`Layout not applied. Resolve these upcoming reservations first: ${details}.`, 'error');
+  }
+  if (!plan.additions.length && !plan.updates.length) {
+    return toast('The requested 15-table layout is already configured.');
+  }
+  const existingById = new Map(tables.map(table => [String(table.id), table]));
+  const capacityChanges = plan.updates.filter(table =>
+    existingById.has(String(table.id))
+    && Number(existingById.get(String(table.id)).seats) !== Number(table.seats)
+  ).length;
+  const extraCount = plan.unmatchedTables.length;
+  if (!confirm(`Apply the requested 15-table layout? This will update ${plan.updates.length} existing table${plan.updates.length === 1 ? '' : 's'}, change ${capacityChanges} existing capacity value${capacityChanges === 1 ? '' : 's'}, and add ${plan.additions.length} table${plan.additions.length === 1 ? '' : 's'}. Existing table IDs and reservation history will be preserved.${extraCount ? ` ${extraCount} extra legacy table${extraCount === 1 ? ' will' : 's will'} remain Unclassified.` : ''}`)) return;
+  const updates = new Map(plan.updates.map(table => [String(table.id), table]));
+  const nextTables = [
+    ...tables.map(table => updates.get(String(table.id)) || table),
+    ...plan.additions
+  ];
+  try {
+    await save('restaurantTables', nextTables);
+  } catch (error) {
+    console.error('Restaurant table layout setup failed.', error);
+    toast(friendlyRpcError(error), 'error');
+    return;
+  }
+  toast(`Layout ready: ${plan.updates.length} existing table${plan.updates.length === 1 ? '' : 's'} updated, ${capacityChanges} capacities changed, and ${plan.additions.length} added.${extraCount ? ` ${extraCount} extra table${extraCount === 1 ? ' remains' : 's remain'} Unclassified.` : ''}`, 'success');
+}
+function tableForm(item = {}) {
+  if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Managers and Administrators can manage restaurant tables.', 'error');
+  const title = item.id ? `Edit ${item.id}` : 'Add table';
+  const tableType = item.tableType || 'Unassigned';
+  const area = item.area || 'Unassigned';
+  const contents = `<label>Table name or number<input name="tableId" value="${esc(item.id || '')}" maxlength="40" required ${item.id ? 'readonly' : ''} placeholder="For example, Table 1"></label><label>Seat capacity<input name="seats" type="number" min="1" max="1000" step="1" value="${esc(item.seats || '')}" required></label><label>Table type<select name="tableType"><option value="Family" ${tableType === 'Family' ? 'selected' : ''}>Family</option><option value="Casual" ${tableType === 'Casual' ? 'selected' : ''}>Casual</option><option value="Unassigned" ${tableType === 'Unassigned' ? 'selected' : ''}>Unclassified</option></select></label><label>Area<select name="area"><option value="Front" ${area === 'Front' ? 'selected' : ''}>Front</option><option value="Back" ${area === 'Back' ? 'selected' : ''}>Back</option><option value="Unassigned" ${area === 'Unassigned' ? 'selected' : ''}>Not set</option></select></label><small class="field-help">Table status is managed automatically from reservation actions. Existing table IDs cannot be changed because reservations may refer to them.</small>`;
+  modal(title, contents, item.id ? 'Save table' : 'Add table');
+  document.querySelector('#modalForm').dataset.type = 'restaurant-table';
+  document.querySelector('#modalForm').dataset.id = item.id || '';
+}
+function tableAssignmentForm(table) {
+  const date = state.tableManagementDate || today();
+  const candidates = all('reservations').filter(item =>
+    item.date === date
+    && !item.table
+    && window.CostTrackLogic.isReservationTimeWithinOpenHours(item.time)
+    && ['Pending', 'Confirmed'].includes(item.status)
+    && Number(item.guests || 0) <= Number(table.seats)
+    && !window.CostTrackLogic.tableHasReservationConflict(table.id, date, item.time, all('reservations'), item.id, today())
+  ).sort((left, right) => (parseTime12h(left.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(right.time) ?? Number.MAX_SAFE_INTEGER));
+  if (!candidates.length) return toast('There are no unassigned bookings for this date that fit this table.', 'error');
+  const options = candidates.map(item => `<option value="${esc(item.id)}">${esc(item.time)} · ${esc(item.name || 'Guest')} · ${Number(item.guests || 0)} guests</option>`).join('');
+  modal(`Assign ${table.id}`, `<p class="panel-subtitle">Only unassigned bookings that fit this table and date are listed.</p><label>Reservation<select name="reservationId" required>${options}</select></label>`, 'Assign table');
+  document.querySelector('#modalForm').dataset.type = 'assign-table';
+  document.querySelector('#modalForm').dataset.id = table.id;
+}
+function reservationCalendarEvents() {
+  const reservations = all('reservations').filter(item =>
+    (state.reservationCalendarStatus === 'All' || item.status === state.reservationCalendarStatus)
+    && (state.reservationCalendarType === 'All' || (item.type || 'Reservation') === state.reservationCalendarType)
+    && (!state.reservationCalendarQuery || `${item.name || ''} ${item.email || ''} ${item.phone || ''} ${item.table || ''}`.toLowerCase().includes(state.reservationCalendarQuery.toLowerCase()))
+  );
+  const statusClass = {
+    Pending: 'pending',
+    Confirmed: 'confirmed',
+    Seated: 'seated',
+    'Checked-in': 'seated',
+    Completed: 'completed',
+    Cancelled: 'cancelled',
+    'No-show': 'cancelled'
+  };
+  const statusColors = {
+    pending: { backgroundColor: '#fff3df', borderColor: '#e8c98c', textColor: '#895a21' },
+    confirmed: { backgroundColor: '#e3f4ef', borderColor: '#b8ded3', textColor: '#176d62' },
+    seated: { backgroundColor: '#e7effb', borderColor: '#c4d2ec', textColor: '#385d95' },
+    completed: { backgroundColor: '#e8f2e8', borderColor: '#c6ddc8', textColor: '#42734c' },
+    cancelled: { backgroundColor: '#fae9e7', borderColor: '#e8c4c0', textColor: '#9a4843' }
+  };
+  return reservations.map(item => {
+    const minutes = parseTime12h(item.time);
+    const guests = Number(item.actualCovers || item.guests || Number(item.adults || 0) + Number(item.children || 0));
+    const start = minutes === null
+      ? item.date
+      : `${item.date}T${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}:00`;
+    const end = minutes === null || minutes + window.CostTrackLogic.MAX_TABLE_STAY_MINUTES >= 24 * 60
+      ? undefined
+      : `${item.date}T${String(Math.floor((minutes + window.CostTrackLogic.MAX_TABLE_STAY_MINUTES) / 60)).padStart(2, '0')}:${String((minutes + window.CostTrackLogic.MAX_TABLE_STAY_MINUTES) % 60).padStart(2, '0')}:00`;
+    const color = statusColors[statusClass[item.status] || 'pending'];
+    return {
+      id: item.id,
+      title: `${reservationDisplayName(item)} · ${guests} covers${item.table ? ` · ${item.table}` : ''}`,
+      start,
+      ...(end ? { end } : {}),
+      allDay: minutes === null,
+      classNames: [`reservation-event--${statusClass[item.status] || 'pending'}`],
+      ...color,
+      extendedProps: {
+        reservationId: item.id,
+        guestName: reservationDisplayName(item),
+        coverCount: guests,
+        table: item.table || ''
+      }
+    };
+  }).filter(event => event.start);
+}
+function destroyReservationCalendar() {
+  if (!reservationCalendar) return;
+  reservationCalendar.destroy();
+  reservationCalendar = null;
+}
+function initializeReservationCalendar() {
+  const element = document.querySelector('#reservationFullCalendar');
+  if (!element) return;
+  if (!window.FullCalendar?.Calendar) {
+    element.innerHTML = '<div class="panel error-state" role="alert">The calendar could not load. Check your internet connection and refresh the page, or use Reservations to view bookings.</div>';
+    return;
+  }
+  reservationCalendar = new window.FullCalendar.Calendar(element, {
+    themeSystem: 'classic',
+    initialView: state.reservationCalendarView || 'dayGridMonth',
+    initialDate: state.reservationCalendarDate || state.calendarDate || today(),
+    timeZone: 'local',
+    slotMinTime: '10:00:00',
+    slotMaxTime: '21:00:00',
+    slotDuration: '00:30:00',
+    scrollTime: '10:00:00',
+    defaultTimedEventDuration: '02:00',
+    forceEventDuration: true,
+    height: 'auto',
+    eventDisplay: 'block',
+    dayMaxEvents: true,
+    nowIndicator: true,
+    editable: false,
+    selectable: false,
+    eventTimeFormat: { hour: 'numeric', minute: '2-digit' },
+    headerToolbar: {
+      start: 'prev,next today',
+      center: 'title',
+      end: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek'
+    },
+    buttonText: { today: 'Today', month: 'Month', week: 'Week', day: 'Day', list: 'Agenda' },
+    noEventsContent: 'No reservations match these filters.',
+    eventContent(info) {
+      const content = document.createElement('span');
+      content.className = 'reservation-event-content';
+      if (!info.view.type.startsWith('list') && info.timeText) {
+        const time = document.createElement('span');
+        time.className = 'reservation-event-time';
+        time.textContent = info.timeText;
+        content.appendChild(time);
+      }
+      const name = document.createElement('span');
+      name.className = 'reservation-event-name';
+      name.textContent = info.event.extendedProps.guestName || 'Guest';
+      content.appendChild(name);
+      const details = [info.event.extendedProps.coverCount ? `${info.event.extendedProps.coverCount} covers` : '', info.event.extendedProps.table]
+        .filter(Boolean)
+        .join(' · ');
+      if (details) {
+        const meta = document.createElement('span');
+        meta.className = 'reservation-event-meta';
+        meta.textContent = details;
+        content.appendChild(meta);
+      }
+      return { domNodes: [content] };
+    },
+    events(fetchInfo, successCallback) {
+      successCallback(reservationCalendarEvents());
+    },
+    datesSet(info) {
+      state.reservationCalendarDate = localDateStr(reservationCalendar.getDate());
+      state.reservationCalendarView = info.view.type;
+    },
+    dateClick(info) {
+      const selectedDate = info.dateStr.slice(0, 10);
+      if (selectedDate < today()) return toast('New reservations cannot be created for a past date.', 'error');
+      state.reservationCalendarDate = selectedDate;
+      const selectedTime = info.allDay
+        ? ''
+        : window.CostTrackLogic.formatReservationTime(info.date.getHours() * 60 + info.date.getMinutes());
+      if (selectedTime && !window.CostTrackLogic.isReservationTimeWithinOpenHours(selectedTime)) {
+        return toast('Bookings need a two-hour window before closing. The latest start time is 7:00 PM.', 'error');
+      }
+      reservationForm({}, { date: selectedDate, time: selectedTime });
+    },
+    eventClick(info) {
+      const reservation = all('reservations').find(item => item.id === info.event.extendedProps.reservationId);
+      if (reservation) reservationForm(reservation);
+    }
+  });
+  reservationCalendar.render();
 }
 function calendarPage() {
-  const date = state.calendarDate || today();
-  const items = all('reservations').filter(item => item.date === date).sort((a, b) => (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
-  const hours = ['11:30 AM', '6:00 PM', '7:30 PM', '8:30 PM'];
-  return `${pageHeader('Front of house', 'Reservation calendar', 'Review the service timeline and prepare each arrival.', '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>')}<div class="calendar-controls"><button class="ghost-btn" data-calendar-step="-1">← Previous day</button><label>Service date<input id="calendarDate" type="date" value="${date}"></label><button class="ghost-btn" data-calendar-step="1">Next day →</button></div><div class="calendar-grid">${hours.map(time => { const slotMinutes = parseTime12h(time); const matches = items.filter(item => parseTime12h(item.time) === slotMinutes); return `<div class="calendar-slot"><strong>${time}</strong><div class="reservation-card-list">${matches.map(item => reservationCard(item)).join('') || '<span class="calendar-empty">No booking</span>'}</div></div>`; }).join('')}</div>`;
+  const statusOptions = ['All', 'Pending', 'Confirmed', 'Checked-in', 'Seated', 'Completed', 'Cancelled', 'No-show']
+    .map(status => `<option value="${status}" ${state.reservationCalendarStatus === status ? 'selected' : ''}>${status === 'All' ? 'All statuses' : status}</option>`).join('');
+  const typeOptions = ['All', 'Reservation', 'Walk-in']
+    .map(type => `<option value="${type}" ${state.reservationCalendarType === type ? 'selected' : ''}>${type === 'All' ? 'All booking types' : type}</option>`).join('');
+  return `${pageHeader('Front of house', 'Reservation calendar', 'Browse bookings by month, week, day, or agenda. Select a date to start a reservation, or select a booking to edit it.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel full-calendar-panel"><div class="full-calendar-filters"><label>Status<select data-reservation-calendar-filter="status">${statusOptions}</select></label><label>Type<select data-reservation-calendar-filter="type">${typeOptions}</select></label><label class="full-calendar-search">Search<input id="reservationCalendarSearch" type="search" value="${esc(state.reservationCalendarQuery)}" placeholder="Guest, email, phone, or table" aria-label="Search reservations"></label><div class="calendar-status-legend" aria-label="Reservation status colors"><span><i class="calendar-status-dot status-low"></i> Pending</span><span><i class="calendar-status-dot status-good"></i> Confirmed / seated / completed</span><span><i class="calendar-status-dot status-out"></i> Cancelled / no-show</span></div></div><small class="full-calendar-note">Reservations have a two-hour window; the latest start is 7:00 PM so the stay ends by closing at 9:00 PM. Calendar events show the two-hour window, and timed views display 10:00 AM–9:00 PM.</small><div id="reservationFullCalendar" aria-label="Reservations calendar"></div></div>`;
 }
 async function handleSubmit(form) {
   const data = Object.fromEntries(new FormData(form));
   const type = form.dataset.type;
   const editId = form.dataset.id;
+  let successMessage = 'Saved to cloud.';
   const requiredAction = {
     ingredient: 'product.manage',
     receiving: 'inventory.receive',
@@ -1282,11 +1732,30 @@ async function handleSubmit(form) {
     await save('buffetRates', editId ? all('buffetRates').map(item => item.id === editId ? { ...item, ...record } : item) : [record, ...all('buffetRates')]);
   } else if (type === 'walk-in') {
     const partySize = Number(data.partySize);
-    const record = { id: id('RS'), name: 'Walk-in guest', email: '', phone: data.phone, date: today(), time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), guests: partySize, adults: partySize, children: 0, type: 'Walk-in', mealPeriod: data.mealPeriod, status: 'Seated', seatedAt: new Date().toISOString(), actualCovers: partySize, table: data.table, request: data.notes || '', preference: '' };
-    await saveCollections({
-      reservations: [record, ...all('reservations')],
-      restaurantTables: all('restaurantTables')
-    });
+    const now = new Date();
+    const date = today();
+    const time = window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+    const selectedTable = all('restaurantTables').find(table => table.id === data.table);
+    if (!window.CostTrackLogic.isReservationTimeWithinOpenHours(time)) {
+      return toast('Walk-ins must start early enough to finish by closing. The latest seating time is 7:00 PM.', 'error');
+    }
+    if (!selectedTable || Number(selectedTable.seats) < partySize) return toast('Choose an available table with enough seats for this party.', 'error');
+    const reservations = all('reservations');
+    const hasUnresolvedSeating = reservations.some(item =>
+      item.table === selectedTable.id && item.date <= date && item.status === 'Seated'
+    );
+    if (hasUnresolvedSeating
+      || window.CostTrackLogic.tableHasReservationConflict(selectedTable.id, date, time, reservations, '', today())) {
+      return toast('That table is no longer available for a two-hour walk-in. Choose another table.', 'error');
+    }
+    const record = { id: id('RS'), name: 'Walk-in guest', email: '', phone: data.phone, date, time, guests: partySize, adults: partySize, children: 0, type: 'Walk-in', mealPeriod: data.mealPeriod, status: 'Seated', seatedAt: now.toISOString(), actualCovers: partySize, table: data.table, request: data.notes || '', preference: '' };
+    try {
+      await saveRecord('reservations', record);
+      await refetchCollection('restaurantTables');
+    } catch (error) {
+      toast(friendlyRpcError(error), 'error');
+      return;
+    }
   } else if (type === 'revenue') {
     if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error');
     const duplicate = all('revenueRecords').find(item => item.id !== editId && item.status === 'Confirmed' && item.business_date === data.business_date && item.meal_period === data.meal_period);
@@ -1303,17 +1772,131 @@ async function handleSubmit(form) {
     });
     await save('revenueRecords', editId ? all('revenueRecords').map(item => item.id === editId ? record : item) : [record, ...all('revenueRecords')]);
   } else if (type === 'reservation') {
-    const adults = data.adults === undefined ? Number(data.guests || 0) : Number(data.adults);
-    const children = Number(data.children || 0);
-    const record = {
-      id: editId || id('RS'),
-      ...data,
-      adults,
-      children,
-      guests: adults + children,
-      table: data.table || ''
-    };
-    await save('reservations', editId ? all('reservations').map(item => item.id === editId ? { ...item, ...record } : item) : [record, ...all('reservations')]);
+    const existing = editId ? all('reservations').find(item => item.id === editId) : null;
+    if (editId && !existing) return toast('This reservation is no longer available. Reload the page and try again.', 'error');
+    const isPastReservation = Boolean(existing?.date && existing.date < today());
+    let record;
+    if (isPastReservation) {
+      if (!['Administrator', 'Manager'].includes(state.role)) return toast('Past reservations are view-only for your role.', 'error');
+      const correctionReason = String(data.correctionReason || '').trim();
+      if (correctionReason.length < 10 || correctionReason.length > 500) {
+        return toast('Enter a correction reason between 10 and 500 characters.', 'error');
+      }
+      const correctedFields = {
+        name: String(data.name || '').trim(),
+        email: String(data.email || '').trim(),
+        phone: String(data.phone || '').trim(),
+        occasion: String(data.occasion || '').trim(),
+        preference: String(data.preference || '').trim(),
+        request: String(data.request || '').trim()
+      };
+      if (!Object.entries(correctedFields).some(([key, value]) => value !== String(existing[key] || '').trim())) {
+        return toast('Change at least one guest detail or note before saving a correction.', 'error');
+      }
+      record = {
+        ...existing,
+        ...correctedFields,
+        correctionReason
+      };
+      successMessage = 'Historical correction saved and recorded in the audit log.';
+    } else {
+      const dateOrTimeChanged = !existing || data.date !== existing.date || data.time !== existing.time;
+      if (dateOrTimeChanged && !window.CostTrackLogic.isReservationTimeWithinOpenHours(data.time)) {
+        return toast('Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.', 'error');
+      }
+      const adults = data.adults === undefined ? Number(data.guests || 0) : Number(data.adults);
+      const children = Number(data.children || 0);
+      if (data.table) {
+        const selectedTable = all('restaurantTables').find(table => table.id === data.table);
+        if (!selectedTable) return toast('The selected table is no longer available. Reload and try again.', 'error');
+        if (Number(selectedTable.seats) < adults + children) return toast('Choose a table with enough seats for this party.', 'error');
+        if (window.CostTrackLogic.tableHasReservationConflict(data.table, data.date, data.time, all('reservations'), editId, today())) {
+          return toast('That table already has an overlapping two-hour booking.', 'error');
+        }
+      }
+      record = {
+        ...window.CostTrackLogic.buildReservationRecord(
+          existing,
+          data,
+          editId || form.dataset.reservationId || (form.dataset.reservationId = id('RS'))
+        ),
+        adults,
+        children,
+        guests: adults + children,
+        table: data.table || '',
+        correctionReason: existing?.correctionReason || ''
+      };
+    }
+    try {
+      await saveRecord('reservations', record);
+    } catch (error) {
+      console.error('Reservation save failed.', error);
+      const submit = form.querySelector('.modal-submit');
+      if (submit) {
+        submit.disabled = false;
+        submit.classList.remove('is-loading');
+        submit.removeAttribute('aria-busy');
+        submit.textContent = isPastReservation ? 'Save correction' : editId ? 'Save changes' : 'Create reservation';
+      }
+      toast(friendlyRpcError(error), 'error');
+      return;
+    }
+    state.modalDirty = false;
+  } else if (type === 'restaurant-table') {
+    if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Managers and Administrators can manage restaurant tables.', 'error');
+    const tableId = String(data.tableId || '').trim();
+    const seats = Number(data.seats);
+    if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/.test(tableId)) return toast('Enter a table name or number using letters, numbers, spaces, hyphens, or underscores.', 'error');
+    if (!Number.isInteger(seats) || seats < 1 || seats > 1000) return toast('Table capacity must be a whole number between 1 and 1,000.', 'error');
+    if (!['Family', 'Casual', 'Unassigned'].includes(data.tableType)) return toast('Choose a valid table type.', 'error');
+    if (!['Front', 'Back', 'Unassigned'].includes(data.area)) return toast('Choose a valid table area.', 'error');
+    const existing = editId ? all('restaurantTables').find(table => table.id === editId) : null;
+    if (editId && !existing) return toast('This table is no longer available. Reload and try again.', 'error');
+    if (editId && tableId !== editId) return toast('Table names cannot be changed after creation.', 'error');
+    if (!editId && all('restaurantTables').some(table => table.id.toLowerCase() === tableId.toLowerCase())) {
+      return toast('A table with that name or number already exists.', 'error');
+    }
+    const largestActiveParty = editId
+      ? all('reservations')
+        .filter(item => item.table === editId && item.date >= today() && ['Pending', 'Confirmed', 'Seated'].includes(item.status))
+        .reduce((largest, item) => Math.max(largest, Number(item.actualCovers || item.guests || 0)), 0)
+      : 0;
+    if (seats < largestActiveParty) return toast(`Capacity cannot be reduced below the ${largestActiveParty}-guest party already assigned to this table.`, 'error');
+    const record = existing
+      ? { ...existing, seats, tableType: data.tableType, area: data.area }
+      : { id: tableId, seats, tableType: data.tableType, area: data.area, status: 'Available', x: 0, y: 0, guest: '' };
+    try {
+      await save('restaurantTables', editId
+        ? all('restaurantTables').map(table => table.id === editId ? record : table)
+        : [record, ...all('restaurantTables')]);
+    } catch (error) {
+      console.error('Table save failed.', error);
+      toast(friendlyRpcError(error), 'error');
+      return;
+    }
+    successMessage = editId ? 'Table capacity updated.' : 'Table added.';
+  } else if (type === 'assign-table') {
+    const table = all('restaurantTables').find(item => item.id === editId);
+    const reservation = all('reservations').find(item => item.id === data.reservationId);
+    if (!table || !reservation) return toast('The table or reservation is no longer available. Reload and try again.', 'error');
+    if (reservation.date < today() || !['Pending', 'Confirmed'].includes(reservation.status) || reservation.table) {
+      return toast('Only unassigned upcoming reservations can be assigned from this page.', 'error');
+    }
+    if (Number(reservation.guests || 0) > Number(table.seats)) return toast('This table does not have enough seats for the reservation.', 'error');
+    if (!window.CostTrackLogic.isReservationTimeWithinOpenHours(reservation.time)) {
+      return toast('This booking cannot be assigned because its two-hour window would run past closing.', 'error');
+    }
+    if (window.CostTrackLogic.tableHasReservationConflict(table.id, reservation.date, reservation.time, all('reservations'), reservation.id, today())) {
+      return toast('This table already has an overlapping two-hour booking.', 'error');
+    }
+    try {
+      await saveRecord('reservations', { ...reservation, table: table.id });
+    } catch (error) {
+      console.error('Table assignment failed.', error);
+      toast(friendlyRpcError(error), 'error');
+      return;
+    }
+    successMessage = `${table.id} assigned to ${reservation.name || 'the reservation'}.`;
   } else if (type === 'recipe') {
     const ingredients = state.recipeDraft.map(item => ({ ingredientId: item.ingredientId, quantity: Number(item.quantity) })).filter(item => item.ingredientId && item.quantity > 0);
     if (!ingredients.length) return toast('Add at least one inventory ingredient.', 'error');
@@ -1354,12 +1937,13 @@ async function handleSubmit(form) {
     }
   }
   document.querySelector('#modalRoot').innerHTML = '';
-  toast('Saved to cloud.');
+  toast(successMessage);
   render();
 }
 async function transitionReservation(itemId, nextStatus) {
   const reservation = all('reservations').find(item => item.id === itemId);
   if (!reservation) return toast('Reservation not found.', 'error');
+  if (reservation.date < today()) return toast('Past reservations are kept for history and cannot change status.', 'error');
   const valid = { Pending: ['Confirmed', 'Cancelled'], Confirmed: ['Seated', 'No-show', 'Cancelled'], Seated: ['Completed'] };
   if (!valid[reservation.status]?.includes(nextStatus)) return toast('That reservation status transition is not valid.', 'error');
   if (nextStatus === 'No-show' && !confirm(`Mark ${reservation.name} as a no-show?`)) return;
@@ -1372,7 +1956,7 @@ async function transitionReservation(itemId, nextStatus) {
   }
   const updated = { ...reservation, status: nextStatus, actualCovers, seatedAt: nextStatus === 'Seated' ? new Date().toISOString() : reservation.seatedAt, completedAt: nextStatus === 'Completed' ? new Date().toISOString() : reservation.completedAt };
   try {
-    await save('reservations', all('reservations').map(item => item.id === itemId ? updated : item));
+    await saveRecord('reservations', updated);
     if (reservation.table) await refetchCollection('restaurantTables');
     toast(`Reservation marked ${nextStatus}.`);
     if (nextStatus === 'Completed' && canCreateDraft() && confirm('Create revenue draft?')) {
@@ -1402,6 +1986,20 @@ function confirmRevenueForm(record) {
   document.querySelector('#modalForm').dataset.type = 'confirm-revenue';
   document.querySelector('#modalForm').dataset.id = record.id;
 }
+document.addEventListener('click', event => {
+  const actionElement = event.target.closest('[data-action]');
+  const action = actionElement?.dataset.action;
+  if (!['open-table-form', 'edit-table', 'assign-table', 'delete-table', 'apply-table-layout'].includes(action)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (action === 'open-table-form') return tableForm();
+  if (action === 'apply-table-layout') return applyRestaurantTableLayout();
+  const table = all('restaurantTables').find(item => item.id === actionElement.dataset.id);
+  if (!table) return toast('This table is no longer available. Reload and try again.', 'error');
+  if (action === 'edit-table') return tableForm(table);
+  if (action === 'assign-table') return tableAssignmentForm(table);
+  return deleteRecord('table', table.id);
+});
 document.addEventListener('click', async event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (!action) return;
@@ -1428,7 +2026,8 @@ document.addEventListener('click', event => {
  if (event.target.closest('[data-action="toggle-sidebar"]')) {
  const control = event.target.closest('[data-action="toggle-sidebar"]'); const shell = document.querySelector('#appShell'); shell.classList.toggle('sidebar-collapsed'); const collapsed = shell.classList.contains('sidebar-collapsed'); localStorage.setItem(`costtrack_sidebar_collapsed_${state.role}`, String(collapsed)); control.textContent = collapsed ? '›' : '‹'; control.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar'); control.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar'); return; } const groupToggle = event.target.closest('[data-action="toggle-nav-group"]'); if (groupToggle) { toggleSidebarGroup(groupToggle.dataset.group); return; } const view = event.target.closest('[data-view]')?.dataset.view; if (view) { const group = sidebarGroups.find(item => item.items.some(([itemView]) => itemView === view)); if (group && !sidebarGroupState().includes(group.id)) saveSidebarGroups([...sidebarGroupState(), group.id]); setView(view); document.querySelector('#sidebar').classList.remove('open'); return; } const category = event.target.closest('[data-recipe-category]')?.dataset.recipeCategory; if (category) { state.recipeCategory = category; render(); return; } const dashboardStatus = event.target.closest('[data-dashboard-status]')?.dataset.dashboardStatus; if (dashboardStatus) { state.ingredientStatus = dashboardStatus; setView('ingredients'); return; } const action = event.target.closest('[data-action]'); if (!action) return; const name = action.dataset.action; if (name === 'close-modal') closeModal(); else if (name === 'open-recipe') openRecipeForm(); else if (name === 'open-revenue') revenueForm(); else if (name === 'edit-revenue') { if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error'); const record = all('revenueRecords').find(x => x.id === action.dataset.id); if (record) revenueForm(record); } else if (name === 'void-revenue') { if (!canVoidRevenue()) return toast('Only Administrators can void revenue.', 'error'); if (!confirm('Void this revenue record? This action is recorded and cannot be undone.')) return; const reason = prompt('Why is this revenue record being voided?'); if (!reason?.trim()) return; save('revenueRecords', all('revenueRecords').map(x => x.id === action.dataset.id ? { ...x, status: 'Voided', voided_by: state.role, void_reason: reason.trim(), voided_at: new Date().toISOString() } : x)); toast('Revenue record voided'); render(); } else if (name === 'open-reservation') reservationForm(); else if (name === 'edit-reservation') { const record = all('reservations').find(x => x.id === action.dataset.id); if (record) reservationForm(record); } else if (name === 'toggle-recipe-picker') document.querySelector('.recipe-picker').classList.toggle('is-hidden'); else if (name === 'add-recipe-ingredient') { const form = document.querySelector('#modalForm'); const ingredientId = form.elements.draftIngredient.value; const quantity = Number(form.elements.draftQuantity.value); if (!quantity) return toast('Enter a quantity for the ingredient.', 'error'); state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id }; state.recipeDraft.push({ ingredientId, quantity }); renderRecipeModal(); } else if (name === 'remove-recipe-ingredient') { const form = document.querySelector('#modalForm'); state.recipeForm = { ...state.recipeForm, ...Object.fromEntries(new FormData(form)), id: form.dataset.id || state.recipeForm?.id }; state.recipeDraft.splice(Number(action.dataset.index), 1); renderRecipeModal(); } else if (name.startsWith('view-')) { const type = name.replace('view-', ''); const map = { ingredient: 'ingredients', recipe: 'recipes' }; const record = all(map[type]).find(x => x.id === action.dataset.id); if (record) viewRecord(type, record); } else if (name.startsWith('open-')) openForm(name.replace('open-', '')); else if (name.startsWith('edit-')) { const type = name.replace('edit-', ''); const map = { ingredient: 'ingredients', recipe: 'recipes', user: 'users' }; const record = all(map[type]).find(x => x.id === action.dataset.id); if (record) type === 'recipe' ? openRecipeForm(record) : openForm(type, record); } else if (name.startsWith('delete-')) deleteRecord(name.replace('delete-', ''), action.dataset.id); });
 document.addEventListener('submit', async event => {
-  if (event.target.id === 'loginForm') {
+  const formId = event.target.getAttribute('id');
+  if (formId === 'loginForm') {
     event.preventDefault();
     const form = event.target;
     const submit = form.querySelector('button[type="submit"]');
@@ -1447,7 +2046,7 @@ document.addEventListener('submit', async event => {
       submit.disabled = false;
     }
   }
-  if (event.target.id === 'passwordRecoveryForm') {
+  if (formId === 'passwordRecoveryForm') {
     event.preventDefault();
     try {
       const { error } = await window.supabaseClient.auth.updateUser({ password: event.target.elements.password.value });
@@ -1463,9 +2062,18 @@ document.addEventListener('submit', async event => {
       login(error.message || 'Password update failed. Request a new reset link.');
     }
   }
-  if (event.target.id === 'modalForm') { event.preventDefault(); handleSubmit(event.target); }
+  if (formId === 'modalForm') { event.preventDefault(); handleSubmit(event.target); }
 });
 document.addEventListener('input', event => { if (event.target.id === 'tableSearch') { state.query = event.target.value; render(); const search = document.querySelector('#tableSearch'); search.focus(); search.setSelectionRange(state.query.length, state.query.length); } });
+document.addEventListener('input', event => {
+  if (event.target.id !== 'tableManagementSearch') return;
+  state.tableManagementQuery = event.target.value;
+  const position = event.target.selectionStart;
+  render();
+  const search = document.querySelector('#tableManagementSearch');
+  search?.focus();
+  search?.setSelectionRange(position, position);
+});
 document.addEventListener('change', event => {
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
   if (event.target.closest('#modalForm[data-type="receiving"]')) {
@@ -1490,6 +2098,33 @@ document.querySelector('#mobileMenu').addEventListener('click', () => document.q
 document.addEventListener('change', event => {
   if (event.target.matches('[data-revenue-range]')) {
     state.revenueRange = event.target.value;
+    render();
+  }
+});
+document.addEventListener('change', event => {
+  const form = event.target.closest('#modalForm[data-type="reservation"]');
+  if (form && event.target.matches('[name="date"],[name="time"],[name="adults"],[name="children"]')) {
+    refreshReservationTables(form);
+    return;
+  }
+  if (event.target.matches('[data-table-date]')) {
+    if (event.target.value && event.target.value < today()) {
+      event.target.value = today();
+      return toast('Table management is available for today and future dates.', 'error');
+    }
+    state.tableManagementDate = event.target.value || today();
+    render();
+  } else if (event.target.matches('[data-table-status]')) {
+    state.tableManagementStatus = event.target.value;
+    render();
+  } else if (event.target.matches('[data-table-capacity]')) {
+    state.tableManagementCapacity = event.target.value;
+    render();
+  } else if (event.target.matches('[data-table-type]')) {
+    state.tableManagementType = event.target.value;
+    render();
+  } else if (event.target.matches('[data-table-area]')) {
+    state.tableManagementArea = event.target.value;
     render();
   }
 });
@@ -1698,7 +2333,11 @@ function clearFieldErrors(form) {
 function normaliseRenderedStatuses() {
   document.querySelectorAll('.status, .stock-state').forEach(element => {
     const value = element.textContent.trim().toLowerCase();
-    const kind = value.includes('cancel') ? 'out' : value.includes('pending') ? 'low' : value.includes('out') ? 'out' : value.includes('low') || value.includes('short') ? 'low' : value.includes('over') ? 'over' : 'healthy';
+    const tableAvailability = element.dataset.tableAvailability;
+    const kind = tableAvailability === 'Available' ? 'good'
+      : tableAvailability === 'Reserved' ? 'low'
+        : tableAvailability === 'Occupied' ? 'out'
+          : value.includes('cancel') ? 'out' : value.includes('pending') ? 'low' : value.includes('out') ? 'out' : value.includes('low') || value.includes('short') ? 'low' : value.includes('over') ? 'over' : 'healthy';
     element.classList.remove('status-good', 'status-low', 'status-out', 'status-over', 'healthy', 'low', 'out', 'over');
     element.classList.add(`status-${kind}`);
     element.insertAdjacentHTML('afterbegin', `<span class="status-dot" aria-hidden="true"></span>`);
@@ -1706,6 +2345,7 @@ function normaliseRenderedStatuses() {
 }
 
 function render() {
+  destroyReservationCalendar();
   if (!state.user || !state.role) return;
   if (state.view === 'revenue' && !canAccessRevenue()) {
     document.querySelector('#sidebar').innerHTML = nav();
@@ -1715,10 +2355,10 @@ function render() {
   }
   if (!canAccess(state.view)) state.view = roleAccess[state.role][0];
   document.querySelector('#sidebar').innerHTML = nav();
-  const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management', roles: 'System Management', settings: 'System Management' };
-  const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', users: 'User management', roles: 'Role management', settings: 'System settings', reservations: 'Reservations', calendar: 'Tables / Calendar' };
+  const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management', roles: 'System Management', settings: 'System Management' };
+  const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', users: 'User management', roles: 'Role management', settings: 'System settings', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management' };
   document.querySelector('.breadcrumb').innerHTML = `<span>CostTrack</span><b>/</b><span>${moduleNames[state.view] || 'Workspace'}</span><b>/</b><strong id="pageCrumb">${pageNames[state.view] || state.view}</strong>`;
-  const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), users: () => usersPage(), roles: () => usersPage(), settings: () => usersPage(), reservations: reservationsPage, calendar: calendarPage };
+  const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), users: () => usersPage(), roles: () => usersPage(), settings: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
   const renderPage = pages[state.view];
   if (!renderPage) {
     console.error(`No page renderer is registered for "${state.view}".`);
@@ -1732,6 +2372,7 @@ function render() {
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
     return;
   }
+  if (state.view === 'calendar') initializeReservationCalendar();
   if (state.view === 'reports') loadReportData();
   configureRealtimeSubscriptions().catch(error => {
     console.error('Realtime subscription setup failed.', error);
@@ -1752,6 +2393,17 @@ function render() {
     if (toolbar && !toolbar.querySelector('[data-action="clear-filters"]')) toolbar.insertAdjacentHTML('beforeend', '<button class="ghost-btn clear-filters" data-action="clear-filters">Clear filters</button>');
   }
 }
+window.setInterval(() => {
+  if (!state.user || document.hidden || state.modalDirty || document.querySelector('#modalForm')) return;
+  const isLiveTableView = ['reservations', 'tables'].includes(state.view)
+    || (state.view === 'dashboard' && state.role === 'Receptionist');
+  if (!isLiveTableView) return;
+  const scrollY = window.scrollY;
+  const focusedId = document.activeElement?.id;
+  render();
+  if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
+  window.scrollTo(0, scrollY);
+}, 60 * 1000);
 
 function actions(type, itemId) {
   const labels = { view: 'View', edit: 'Edit', delete: 'Delete' };
@@ -1764,21 +2416,25 @@ function actions(type, itemId) {
 }
 
 async function deleteRecord(type, itemId) {
-  const mapping = { ingredient: 'ingredients', recipe: 'recipes', reservation: 'reservations', transaction: 'inventoryTransactions', production: 'productionLogs', waste: 'wasteLogs', count: 'physicalCounts', user: 'users' };
+  const mapping = { ingredient: 'ingredients', recipe: 'recipes', reservation: 'reservations', table: 'restaurantTables', transaction: 'inventoryTransactions', production: 'productionLogs', waste: 'wasteLogs', count: 'physicalCounts', user: 'users' };
   const key = mapping[type]; if (!key) return;
   if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Administrators and Managers can delete records.', 'error');
   const record = all(key).find(item => item.id === itemId);
+  if (type === 'reservation' && record?.date < today()) return toast('Past reservations cannot be deleted.', 'error');
+  if (type === 'table' && all('reservations').some(item => item.table === itemId)) return toast('Tables linked to reservation history cannot be deleted.', 'error');
   if (type === 'ingredient' && (all('recipes').some(item => item.ingredients.some(line => line.ingredientId === itemId)) || all('inventoryTransactions').some(item => item.ingredientId === itemId) || all('wasteLogs').some(item => item.ingredientId === itemId) || all('physicalCounts').some(item => item.ingredientId === itemId))) {
     return toast('This ingredient is referenced by recipe or inventory history and cannot be deleted.', 'error');
   }
   if (type === 'recipe' && all('productionLogs').some(item => item.recipeId === itemId)) {
     return toast('This recipe is referenced by production history and cannot be deleted.', 'error');
   }
-  const name = record?.name || ingredient(record?.ingredientId)?.name || recipe(record?.recipeId)?.name || 'this record';
+  const name = record?.name || (type === 'table' ? record?.id : '') || ingredient(record?.ingredientId)?.name || recipe(record?.recipeId)?.name || 'this record';
   if (!confirm(`Delete ${name}? This can't be undone.`)) return;
   try {
-    await save(key, all(key).filter(item => item.id !== itemId));
+    if (type === 'reservation') await removeRecord(key, itemId);
+    else await save(key, all(key).filter(item => item.id !== itemId));
   } catch (error) {
+    if (type === 'reservation') toast(friendlyRpcError(error), 'error');
     return;
   }
   toast(`${name} deleted`);
@@ -1856,9 +2512,9 @@ document.addEventListener('click', event => {
       render();
       return;
     }
-    save('reservations', all('reservations').map(item =>
-      item.id === reservation.id ? { ...item, status: 'Confirmed' } : item
-    )).then(() => { toast(`Reservation for ${reservation.name} confirmed.`); render(); }).catch(() => {});
+    saveRecord('reservations', { ...reservation, status: 'Confirmed' })
+      .then(() => { toast(`Reservation for ${reservation.name} confirmed.`); render(); })
+      .catch(error => toast(friendlyRpcError(error), 'error'));
     return;
   }
   const calendarDate = event.target.closest('[data-calendar-date]');
@@ -1885,6 +2541,12 @@ document.addEventListener('click', event => {
 });
 document.addEventListener('change', event => {
   if (event.target.id === 'calendarDate') { state.calendarDate = event.target.value; render(); }
+  if (event.target.matches('[data-reservation-calendar-filter]')) {
+    if (event.target.dataset.reservationCalendarFilter === 'status') state.reservationCalendarStatus = event.target.value;
+    if (event.target.dataset.reservationCalendarFilter === 'type') state.reservationCalendarType = event.target.value;
+    if (reservationCalendar) reservationCalendar.refetchEvents();
+    return;
+  }
   if (event.target.id === 'tableSearch') { state.query = event.target.value; render(); }
   if (event.target.matches('[data-user-role]')) {
     const control = event.target;
@@ -1910,6 +2572,10 @@ document.addEventListener('change', event => {
 });
 document.addEventListener('input', event => {
   if (event.target.closest('#modalForm')) state.modalDirty = true;
+  if (event.target.id === 'reservationCalendarSearch') {
+    state.reservationCalendarQuery = event.target.value;
+    if (reservationCalendar) reservationCalendar.refetchEvents();
+  }
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
   if (event.target.closest('#modalForm[data-type="receiving"]')) updateReceivingTotals(event.target.closest('#modalForm'));
   if (event.target.name === 'partySize' && event.target.closest('#modalForm[data-type="walk-in"]')) refreshWalkInTables(event.target.closest('#modalForm'));
@@ -2104,7 +2770,7 @@ document.addEventListener('click', async event => {
 });
 
 document.addEventListener('submit', async event => {
-  if (event.target.id !== 'modalForm') return;
+  if (event.target.getAttribute('id') !== 'modalForm') return;
   event.preventDefault();
   const form = event.target; clearFieldErrors(form);
   let valid = true;

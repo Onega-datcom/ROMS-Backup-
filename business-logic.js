@@ -27,6 +27,23 @@
     'Count adjustment': 0,
     'Void reversal': 0
   };
+  const RESTAURANT_TABLE_LAYOUT = [
+    { id: 'FAM-12-1', seats: 12, tableType: 'Family', area: 'Unassigned' },
+    { id: 'FAM-12-2', seats: 12, tableType: 'Family', area: 'Unassigned' },
+    { id: 'FAM-8-1', seats: 8, tableType: 'Family', area: 'Unassigned' },
+    { id: 'CAS-8-B1', seats: 8, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-6-F1', seats: 6, tableType: 'Casual', area: 'Front' },
+    { id: 'CAS-6-F2', seats: 6, tableType: 'Casual', area: 'Front' },
+    { id: 'CAS-6-B1', seats: 6, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-5-B1', seats: 5, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-5-B2', seats: 5, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-5-B3', seats: 5, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-4-F1', seats: 4, tableType: 'Casual', area: 'Front' },
+    { id: 'CAS-4-F2', seats: 4, tableType: 'Casual', area: 'Front' },
+    { id: 'CAS-4-F3', seats: 4, tableType: 'Casual', area: 'Front' },
+    { id: 'CAS-4-B1', seats: 4, tableType: 'Casual', area: 'Back' },
+    { id: 'CAS-2-F1', seats: 2, tableType: 'Casual', area: 'Front' }
+  ];
 
   function number(value, label) {
     const parsed = Number(value);
@@ -300,20 +317,230 @@
     return covers === adults + children ? adults * adultRate + children * childRate : covers * adultRate;
   }
 
+  function parseReservationTime(value) {
+    if (typeof value !== 'string') return null;
+    const normalized = value.trim();
+    let match = normalized.match(/^(0?[1-9]|1[0-2]):([0-5]\d)\s*(AM|PM)$/i);
+    if (match) {
+      let hours = Number(match[1]) % 12;
+      if (match[3].toUpperCase() === 'PM') hours += 12;
+      return hours * 60 + Number(match[2]);
+    }
+    match = normalized.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  }
+
+  function formatReservationTime(minutes) {
+    if (!Number.isInteger(minutes) || minutes < 0 || minutes >= 24 * 60) {
+      throw new RangeError('Reservation time must be a minute of the day.');
+    }
+    const hours = Math.floor(minutes / 60);
+    const hour12 = hours % 12 || 12;
+    return `${hour12}:${String(minutes % 60).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`;
+  }
+
+  const MAX_TABLE_STAY_MINUTES = 120;
+  const RESTAURANT_OPEN_MINUTES = 10 * 60;
+  const RESTAURANT_CLOSE_MINUTES = 21 * 60;
+
+  function reservationTimeSlots() {
+    const slots = [];
+    for (let minutes = RESTAURANT_OPEN_MINUTES; minutes + MAX_TABLE_STAY_MINUTES <= RESTAURANT_CLOSE_MINUTES; minutes += 30) {
+      slots.push(formatReservationTime(minutes));
+    }
+    return slots;
+  }
+
+  function isReservationTimeWithinOpenHours(value) {
+    const minutes = parseReservationTime(value);
+    return minutes !== null
+      && minutes >= RESTAURANT_OPEN_MINUTES
+      && minutes + MAX_TABLE_STAY_MINUTES <= RESTAURANT_CLOSE_MINUTES;
+  }
+
+  function reservationEndTime(value, duration = MAX_TABLE_STAY_MINUTES) {
+    const minutes = parseReservationTime(value);
+    if (minutes === null || !Number.isInteger(duration) || duration <= 0 || minutes + duration >= 24 * 60) return null;
+    return formatReservationTime(minutes + duration);
+  }
+
+  function reservationTimeOverlaps(firstTime, secondTime, duration = MAX_TABLE_STAY_MINUTES) {
+    const firstStart = parseReservationTime(firstTime);
+    const secondStart = parseReservationTime(secondTime);
+    if (firstStart === null || secondStart === null || !Number.isInteger(duration) || duration <= 0) return false;
+    return firstStart < secondStart + duration && secondStart < firstStart + duration;
+  }
+
+  function reservationStayLimitReached(reservation, now = new Date()) {
+    if (!reservation || reservation.status !== 'Seated' || !(now instanceof Date) || !Number.isFinite(now.getTime())) return false;
+    const minutes = parseReservationTime(reservation.time);
+    const dateParts = String(reservation.date || '').split('-').map(Number);
+    if (minutes === null || dateParts.length !== 3 || dateParts.some(value => !Number.isInteger(value))) return false;
+    const start = new Date(dateParts[0], dateParts[1] - 1, dateParts[2], Math.floor(minutes / 60), minutes % 60);
+    return now.getTime() >= start.getTime() + MAX_TABLE_STAY_MINUTES * 60 * 1000;
+  }
+
+  function tableAvailability(table, reservations, date, currentDate, currentTimeMinutes = null, now = new Date()) {
+    const bookings = reservations
+      .filter(item =>
+        item.table === table.id
+        && (item.date === date || (date === currentDate && item.date < date && item.status === 'Seated'))
+        && ['Pending', 'Confirmed', 'Seated'].includes(item.status)
+      )
+      .sort((left, right) => (parseReservationTime(left.time) ?? Number.MAX_SAFE_INTEGER)
+        - (parseReservationTime(right.time) ?? Number.MAX_SAFE_INTEGER));
+    const seatedBooking = bookings.find(item => item.status === 'Seated');
+    if (seatedBooking) {
+      return {
+        status: 'Occupied',
+        bookings,
+        primaryBooking: seatedBooking,
+        stayLimitReached: reservationStayLimitReached(seatedBooking, now),
+        bookingWindowEnded: false
+      };
+    }
+    const nextBooking = bookings.find(item => ['Pending', 'Confirmed'].includes(item.status));
+    if (nextBooking) {
+      const start = parseReservationTime(nextBooking.time);
+      const bookingWindowEnded = date === currentDate
+        && Number.isFinite(currentTimeMinutes)
+        && start !== null
+        && currentTimeMinutes >= start + MAX_TABLE_STAY_MINUTES;
+      return {
+        status: 'Reserved',
+        bookings,
+        primaryBooking: nextBooking,
+        stayLimitReached: false,
+        bookingWindowEnded
+      };
+    }
+    return { status: 'Available', bookings, primaryBooking: null, stayLimitReached: false, bookingWindowEnded: false };
+  }
+
+  function tableHasReservationConflict(tableId, date, time, reservations, excludeReservationId = '', currentDate = '') {
+    if (!tableId || !date || !time) return false;
+    if (date === currentDate && reservations.some(item =>
+      item.id !== excludeReservationId
+      && item.table === tableId
+      && item.date < date
+      && item.status === 'Seated'
+    )) return true;
+    return reservations.some(item =>
+      item.id !== excludeReservationId
+      && item.table === tableId
+      && item.date === date
+      && ['Pending', 'Confirmed', 'Seated'].includes(item.status)
+      && reservationTimeOverlaps(time, item.time)
+    );
+  }
+
+  function buildReservationRecord(existing, formData, newId) {
+    return {
+      ...(existing || {}),
+      ...formData,
+      id: existing?.id || newId,
+      type: existing?.type || 'Reservation'
+    };
+  }
+
+  function planRestaurantTableLayout(tables, reservations = [], asOfDate = new Date().toISOString().slice(0, 10)) {
+    const sortedTables = tables.slice().sort((left, right) =>
+      String(left.id).localeCompare(String(right.id), undefined, { numeric: true, sensitivity: 'base' }));
+    const usedIds = new Set();
+    const updates = [];
+    const additions = [];
+    const conflicts = [];
+    const templateIds = new Set(RESTAURANT_TABLE_LAYOUT.map(table => table.id.toLowerCase()));
+    const exactMatches = new Map(RESTAURANT_TABLE_LAYOUT.map(template => [
+      template.id,
+      sortedTables.find(table => String(table.id).toLowerCase() === template.id.toLowerCase())
+    ]));
+
+    for (const template of RESTAURANT_TABLE_LAYOUT) {
+      const match = exactMatches.get(template.id) || sortedTables.find(table =>
+        !usedIds.has(String(table.id))
+        && !templateIds.has(String(table.id).toLowerCase()));
+
+      if (match) {
+        usedIds.add(String(match.id));
+        const nextTable = {
+          ...match,
+          seats: template.seats,
+          tableType: template.tableType,
+          area: template.area
+        };
+        if (Number(match.seats) > template.seats) {
+          const blockingReservations = reservations.filter(reservation =>
+            reservation.table === match.id
+            && reservation.date >= asOfDate
+            && ['Pending', 'Confirmed', 'Seated'].includes(reservation.status)
+            && Number(reservation.actualCovers ?? reservation.guests ?? 0) > template.seats
+          );
+          if (blockingReservations.length) {
+            conflicts.push({
+              tableId: match.id,
+              targetSeats: template.seats,
+              reservationIds: blockingReservations.map(reservation => reservation.id)
+            });
+          }
+        }
+        if (Number(match.seats) !== template.seats
+            || (match.tableType || 'Unassigned') !== template.tableType
+            || (match.area || 'Unassigned') !== template.area) updates.push(nextTable);
+        continue;
+      }
+
+      additions.push({
+        ...template,
+        status: 'Available',
+        x: 0,
+        y: 0,
+        guest: ''
+      });
+    }
+
+    const unmatchedTables = sortedTables.filter(table => !usedIds.has(String(table.id)));
+    for (const table of unmatchedTables) {
+      if ((table.tableType || 'Unassigned') !== 'Unassigned' || (table.area || 'Unassigned') !== 'Unassigned') {
+        updates.push({ ...table, tableType: 'Unassigned', area: 'Unassigned' });
+      }
+    }
+
+    return {
+      expectedTableCount: RESTAURANT_TABLE_LAYOUT.length,
+      updates,
+      additions,
+      conflicts,
+      unmatchedTables
+    };
+  }
+
   const logic = {
     assertInventoryRole,
     availableStock,
     batchStatus,
+    buildReservationRecord,
     canPerformInventoryAction,
     convertQuantity,
     createRevenueRecord,
     createStockMovement,
     computedRecipeCost,
     orderBatches,
+    formatReservationTime,
+    isReservationTimeWithinOpenHours,
+    parseReservationTime,
+    planRestaurantTableLayout,
     planConsumption,
     productionProgress,
     reservationRevenue,
+    reservationEndTime,
+    reservationStayLimitReached,
+    reservationTimeSlots,
+    reservationTimeOverlaps,
     stockHealth,
+    MAX_TABLE_STAY_MINUTES,
+    tableAvailability,
+    tableHasReservationConflict,
     weightedAverageUnitCost
   };
   root.CostTrackLogic = logic;

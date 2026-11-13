@@ -246,6 +246,212 @@ th:first-child {
   color: var(--muted);
 }
 
+.table-management-panel {
+  margin-top: 18px;
+}
+
+.table-management-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.table-layout-group + .table-layout-group {
+  margin-top: 24px;
+}
+
+.table-layout-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+
+.table-layout-group-heading h2 {
+  margin: 0;
+  font: 700 14px 'Plus Jakarta Sans', sans-serif;
+}
+
+.table-layout-group-heading span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.table-management-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.table-summary-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 64px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.table-summary-card small {
+  color: var(--muted);
+}
+
+.table-summary-card strong {
+  font: 800 24px 'Plus Jakarta Sans', sans-serif;
+}
+
+.table-summary-card.status-good,
+.table-summary-card.status-low,
+.table-summary-card.status-out {
+  background: #fff;
+}
+
+.table-management-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.table-management-toolbar label {
+  min-width: 150px;
+  flex: 1;
+}
+
+.table-management-toolbar .table-management-search {
+  flex: 2;
+}
+
+.table-management-note {
+  display: block;
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.table-management-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.table-management-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 205px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.table-management-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.table-management-card-heading small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.table-management-card-heading h2 {
+  margin: 2px 0 0;
+  font: 700 17px 'Plus Jakarta Sans', sans-serif;
+}
+
+.table-capacity {
+  margin: 8px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.table-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.table-type-badge,
+.table-area-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 3px 8px;
+  border: 1px solid #e1ece7;
+  border-radius: 999px;
+  background: #f5faf7;
+  color: #53675e;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.table-area-badge {
+  border-color: #e7e5f1;
+  background: #f7f6fb;
+  color: #676078;
+}
+
+.table-booking-details {
+  display: grid;
+  gap: 4px;
+  min-height: 48px;
+  margin-bottom: 8px;
+}
+
+.table-booking-details strong {
+  font-size: 12px;
+}
+
+.table-booking-details span,
+.table-empty-detail,
+.table-additional-bookings {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.table-booking-details .text-btn {
+  justify-self: start;
+  padding: 2px 0;
+  font-size: 10px;
+}
+
+.reservation-stay-warning {
+  display: block;
+  padding: 7px 9px;
+  border-left: 3px solid #d59a34;
+  border-radius: 6px;
+  background: #fff7e8;
+  color: #80551c;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.table-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.table-management-actions button:disabled {
+  opacity: .65;
+  cursor: not-allowed;
+}
+
 .report-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -790,3 +996,70 @@ th:first-child {
   .waste-filters{grid-template-columns:repeat(2,minmax(0,1fr))}
   .waste-filter-actions{grid-column:span 2}
 }
+
+.full-calendar-panel{--fc-classic-primary:#117f76;--fc-classic-primary-foreground:#fff;--fc-classic-background:#fff;--fc-classic-button:#fff;--fc-classic-button-border:var(--line);--fc-classic-button-foreground:var(--ink);--fc-classic-today:#e8f6f1;padding:22px;border-radius:16px;overflow:hidden}
+.full-calendar-filters{display:grid;grid-template-columns:minmax(145px,180px) minmax(145px,180px) minmax(220px,1fr);align-items:end;gap:12px;margin-bottom:15px;padding:15px;border:1px solid #e8efeb;border-radius:12px;background:linear-gradient(135deg,#f9fcfa,#f4f9f6)}
+.full-calendar-filters label{display:flex;min-width:0;flex-direction:column;gap:6px;color:#667871;font-size:10px;font-weight:700}
+.full-calendar-filters select,.full-calendar-filters input{height:39px;border:1px solid #dfe9e4;border-radius:9px;background:#fff;color:var(--ink);font:inherit;font-size:12px;padding:8px 11px;transition:border-color .15s,box-shadow .15s}
+.full-calendar-filters select:focus-visible,.full-calendar-filters input:focus-visible{outline:0;border-color:#73b8a7;box-shadow:0 0 0 3px #1682771c}
+.full-calendar-filters .full-calendar-search{min-width:0}
+.full-calendar-note{display:block;margin:0 0 14px;color:#71827b;font-size:11px}
+.calendar-status-legend{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding-top:1px;color:#667871;font-size:10px}
+.calendar-status-legend>span{display:flex;align-items:center;gap:6px}
+.calendar-status-legend .calendar-status-dot{width:8px;height:8px;flex:none}
+.calendar-status-legend .status-low{background:#c58436}
+.calendar-status-legend .status-good{background:#168b7e}
+.calendar-status-legend .status-out{background:#ab5550}
+.full-calendar-panel .fc{--fc-border-color:#e8eeeb;--fc-neutral-bg-color:#f7faf8;--fc-today-bg-color:#eaf7f1;font-family:'DM Sans',sans-serif;font-size:12px}
+.full-calendar-panel .fc .fc-toolbar{gap:12px;flex-wrap:wrap;margin-bottom:17px}
+.full-calendar-panel .fc .fc-toolbar-title{font:700 20px 'Plus Jakarta Sans',sans-serif;letter-spacing:-.4px;color:var(--ink)}
+.full-calendar-panel .fc .fc-button{min-height:36px;border-radius:8px!important;box-shadow:none;text-transform:none;font-family:inherit;font-size:11px;font-weight:600;transition:background .15s,border-color .15s,color .15s}
+.full-calendar-panel .fc .fc-button-primary{border-color:#dfe9e4;background:#fff;color:#52635d}
+.full-calendar-panel .fc .fc-button-primary:hover{border-color:#b8d8cc;background:#f3faf6;color:#0e6d64}
+.full-calendar-panel .fc .fc-button-primary:not(:disabled).fc-button-active,
+.full-calendar-panel .fc .fc-button-primary:not(:disabled):active{border-color:#117f76;background:#117f76;color:#fff}
+.full-calendar-panel .fc .fc-button-primary:focus-visible{box-shadow:0 0 0 3px #117f7626}
+.full-calendar-panel .fc .fc-toolbar-chunk{display:flex;align-items:center;gap:5px}
+.full-calendar-panel .fc .fc-col-header-cell{background:#f8fbf9}
+.full-calendar-panel .fc .fc-col-header-cell-cushion{padding:10px 4px;color:#71817b;font-size:10px;font-weight:700;text-decoration:none}
+.full-calendar-panel .fc .fc-daygrid-day-number{padding:8px;color:#52625c;font-size:11px;font-weight:600;text-decoration:none}
+.full-calendar-panel .fc .fc-daygrid-day:hover{background:#f8fcfa}
+.full-calendar-panel .fc .fc-day-today{background:#eaf7f1}
+.full-calendar-panel .fc .fc-daygrid-event{margin:3px 4px;border-radius:6px;padding:0;font-size:10px;cursor:pointer}
+.full-calendar-panel .fc .fc-daygrid-block-event .fc-event-main{padding:4px 6px}
+.full-calendar-panel .fc .fc-timegrid-event{border-radius:6px;cursor:pointer}
+.reservation-event-content{display:flex;align-items:center;gap:4px;min-width:0;line-height:1.25}
+.reservation-event-time{flex:none;font-weight:700}
+.reservation-event-name{min-width:0;overflow:hidden;font-weight:700;text-overflow:ellipsis;white-space:nowrap}
+.reservation-event-meta{overflow:hidden;font-size:9px;font-weight:500;opacity:.82;text-overflow:ellipsis;white-space:nowrap}
+.full-calendar-panel .fc .fc-daygrid .reservation-event-meta{display:none}
+.full-calendar-panel .fc .fc-timegrid .reservation-event-meta{display:none}
+.full-calendar-panel .fc .reservation-event--cancelled .reservation-event-name{text-decoration:line-through}
+.full-calendar-panel .fc .fc-list-event:hover td{background:#f1f8f5}
+.full-calendar-panel .fc .fc-list-day-cushion{background:#f6faf8}
+.full-calendar-panel .fc .fc-list-event-title a{color:inherit;text-decoration:none}
+.full-calendar-panel .fc .fc-list-event:hover a{text-decoration:underline}
+.full-calendar-panel .fc .fc-more-link{color:#147a70;font-size:10px;font-weight:700}
+
+@media (max-width: 720px) {
+  .full-calendar-panel{padding:13px;border-radius:12px}
+  .full-calendar-filters{grid-template-columns:1fr;gap:10px;padding:12px}
+  .full-calendar-filters label,.full-calendar-filters .full-calendar-search{min-width:0;width:100%}
+  .calendar-status-legend{gap:7px 12px}
+  .full-calendar-panel .fc .fc-toolbar{justify-content:center}
+  .full-calendar-panel .fc .fc-toolbar-title{font-size:17px}
+  .full-calendar-panel .fc .fc-toolbar-chunk{justify-content:center;flex-wrap:wrap;gap:4px}
+  .full-calendar-panel .fc .fc-button{min-height:33px;padding:4px 7px;font-size:10px}
+  .full-calendar-panel .fc .fc-daygrid-event{margin:2px 1px}
+  .full-calendar-panel .fc .fc-daygrid-block-event .fc-event-main{padding:3px 4px}
+  .reservation-event-content{gap:3px}
+  .reservation-event-time,.reservation-event-name{font-size:9px}
+}
+
+.reservation-history-notice{display:flex;flex-direction:column;gap:4px;margin-bottom:16px;padding:12px 14px;border:1px solid #dcebe4;border-left:3px solid #168277;border-radius:9px;background:#f3f9f6;color:#415b51}
+.reservation-history-notice strong{font-size:12px}
+.reservation-history-notice span{font-size:11px;line-height:1.5}
+.reservation-history-label{align-self:flex-start;border-radius:999px;background:#f0f4f2;color:#64736c;padding:3px 8px;font-size:9px;font-weight:700}
+#modalForm[data-type="reservation"] input:disabled,
+#modalForm[data-type="reservation"] select:disabled,
+#modalForm[data-type="reservation"] textarea:disabled{background:#f4f6f5;color:#78837e;cursor:not-allowed}
