@@ -1,5 +1,6 @@
 const SUPABASE_URL = 'https://niiodqunoflblfcgdods.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_IVE25Rqzu-lDLFayVYmhfQ_dvPIO6E5';
+const POS_BILL_SAVE_TIMEOUT_MS = 15000;
 
 window.supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
@@ -32,7 +33,8 @@ const tableForCollection = {
   billLines: 'pos_bill_lines',
   billPayments: 'pos_bill_payments',
   reservationDeposits: 'pos_reservation_deposits',
-  billApprovals: 'pos_bill_approvals'
+  billApprovals: 'pos_bill_approvals',
+  posNotifications: 'pos_notifications'
 };
 
 function rememberVersion(collection, id, updatedAt) {
@@ -107,10 +109,14 @@ function mapDatabaseRecord(collection, row) {
     return {
       id: row.id, name: row.name, email: row.email, phone: row.phone,
       date: row.reservation_date, time: row.reservation_time, guests: row.guests,
-      adults: row.adults, children: row.children, occasion: row.occasion,
+      adults: row.adults, seniorPwdCount: Number(row.senior_pwd_count || 0),
+      children: row.children, source: row.source || '', occasion: row.occasion,
       status: row.status, preference: row.preference, request: row.request,
       table: row.table_id, type: row.type, seatedAt: row.seated_at, completedAt: row.completed_at,
-      actualCovers: row.actual_covers, correctionReason: row.last_correction_reason || ''
+      actualCovers: row.actual_covers, correctionReason: row.last_correction_reason || '',
+      packageChargeItemId: row.package_charge_item_id || '',
+      packageTierId: row.package_tier_id || '',
+      packagePaxCount: row.package_pax_count == null ? '' : Number(row.package_pax_count)
     };
   }
   if (collection === 'restaurantTables') {
@@ -173,18 +179,22 @@ function mapDatabaseRecord(collection, row) {
       id: row.id, code: row.shift_code, openedBy: row.opened_by, openedAt: row.opened_at,
       closedAt: row.closed_at, status: row.status, openingFloat: Number(row.opening_float || 0),
       cashSales: Number(row.cash_sales || 0), cardSales: Number(row.card_sales || 0),
-      declaredCash: Number(row.declared_cash || 0), notes: row.notes || ''
+      declaredCash: Number(row.declared_cash || 0), expectedCash: row.expected_cash == null ? null : Number(row.expected_cash),
+      cashVariance: row.cash_variance == null ? null : Number(row.cash_variance),
+      closedBy: row.closed_by || null, notes: row.notes || ''
     };
   }
   if (collection === 'cashMovements') {
     return {
       id: row.id, shiftId: row.shift_id, movementType: row.movement_type, amount: Number(row.amount || 0),
-      reason: row.reason || '', reference: row.reference || '', createdBy: row.created_by, createdAt: row.created_at
+      reason: row.reason || '', reference: row.reference || '', createdBy: row.created_by,
+      idempotencyKey: row.idempotency_key || '', createdAt: row.created_at
     };
   }
   if (collection === 'posBills') {
     return {
       id: row.id, billNumber: row.bill_number, reservationId: row.reservation_id,
+      shiftId: row.shift_id || null, tableId: row.table_id || null,
       customerName: row.customer_name || '', status: row.status, subtotal: Number(row.subtotal || 0),
       serviceCharge: Number(row.service_charge || 0), discountTotal: Number(row.discount_total || 0),
       depositTotal: Number(row.deposit_total || 0), paidTotal: Number(row.paid_total || 0),
@@ -215,13 +225,16 @@ function mapDatabaseRecord(collection, row) {
       id: row.id, billId: row.bill_id, paymentMethod: row.payment_method, amount: Number(row.amount || 0),
       tenderedAmount: Number(row.tendered_amount || 0), changeAmount: Number(row.change_amount || 0),
       idempotencyKey: row.idempotency_key || '', referenceNo: row.reference_no || '',
+      shiftId: row.shift_id || null, reservationDepositId: row.reservation_deposit_id || null,
       paidBy: row.paid_by || '', paidAt: row.paid_at || null
     };
   }
   if (collection === 'reservationDeposits') {
     return {
       id: row.id, reservationId: row.reservation_id, billId: row.bill_id, amount: Number(row.amount || 0),
-      paymentMethod: row.payment_method, status: row.status, createdAt: row.created_at
+      paymentMethod: row.payment_method, status: row.status, notes: row.notes || '',
+      receiptAmount: Number(row.receipt_amount || 0), receivedShiftId: row.received_shift_id || null,
+      parentDepositId: row.parent_deposit_id || null, createdBy: row.created_by, createdAt: row.created_at
     };
   }
   if (collection === 'billApprovals') {
@@ -231,6 +244,13 @@ function mapDatabaseRecord(collection, row) {
       requestedBy: row.requested_by, requestedAt: row.requested_at,
       decidedBy: row.decided_by || null, decidedAt: row.decided_at || null,
       decisionReason: row.decision_reason || ''
+    };
+  }
+  if (collection === 'posNotifications') {
+    return {
+      id: row.id, type: row.notification_type, sourceType: row.source_type,
+      sourceId: row.source_id, targetRole: row.target_role, title: row.title,
+      message: row.message, createdAt: row.created_at, readAt: row.read_at || null
     };
   }
   return {
@@ -284,12 +304,17 @@ function mapApplicationRecord(collection, record) {
   if (collection === 'reservations') return {
     id: record.id, name: record.name, email: record.email || '', phone: record.phone || '',
     reservation_date: dateValue(record.date), reservation_time: record.time, guests: Number(record.guests || 0),
-    adults: record.adults === undefined ? Number(record.guests || 0) : Number(record.adults), children: Number(record.children || 0),
+    adults: record.adults === undefined ? Number(record.guests || 0) : Number(record.adults),
+    senior_pwd_count: Number(record.seniorPwdCount || 0), children: Number(record.children || 0),
+    source: record.source || null,
     occasion: record.occasion || '', status: record.status || 'Pending', preference: record.preference || '',
     request: record.request || record.requests || '', table_id: record.table || null,
     type: record.type || 'Reservation', seated_at: record.seatedAt || null, completed_at: record.completedAt || null,
     actual_covers: record.actualCovers == null ? null : record.actualCovers,
-    last_correction_reason: record.correctionReason || ''
+    last_correction_reason: record.correctionReason || '',
+    package_charge_item_id: record.packageChargeItemId || null,
+    package_tier_id: record.packageTierId || null,
+    package_pax_count: record.packagePaxCount === '' || record.packagePaxCount == null ? null : Number(record.packagePaxCount)
   };
   if (collection === 'restaurantTables') return {
     id: record.id, seats: record.seats,
@@ -411,6 +436,37 @@ window.supabaseRecord = {
     throwIfError(result.error);
     return (result.data || []).map(row => mapDatabaseRecord(collection, row));
   },
+  async loadRecord(collection, recordId) {
+    const table = tableForCollection[collection];
+    if (!table) throw new Error(`Unknown data collection: ${collection}`);
+    const { data, error } = await window.supabaseClient
+      .from(table)
+      .select('*')
+      .eq('id', recordId)
+      .maybeSingle();
+    throwIfError(error);
+    return data ? mapDatabaseRecord(collection, data) : null;
+  },
+  async loadRelated(collection, relation, relatedId) {
+    const table = tableForCollection[collection];
+    const relationColumns = {
+      billLines: { billId: 'bill_id' },
+      billPayments: { billId: 'bill_id' },
+      cashMovements: { shiftId: 'shift_id' },
+      reservationDeposits: { reservationId: 'reservation_id' }
+    };
+    const column = relationColumns[collection]?.[relation];
+    if (!table || !column) throw new Error(`Unsupported related-data query: ${collection}.${relation}`);
+    const { data, error } = await window.supabaseClient
+      .from(table)
+      .select('*')
+      .eq(column, relatedId);
+    throwIfError(error);
+    return (data || []).map(row => mapDatabaseRecord(collection, row));
+  },
+  mapRecord(collection, row) {
+    return row ? mapDatabaseRecord(collection, row) : null;
+  },
   async upsert(collection, record, expectedVersion) {
     if (collection === 'users') throw new Error('User accounts must be provisioned through Supabase Auth.');
     const table = tableForCollection[collection];
@@ -501,11 +557,6 @@ window.supabaseRecord = {
       reference,
       contact
     });
-    throwIfError(error);
-    return data;
-  },
-  async createRevenueDraft(reservationId) {
-    const { data, error } = await window.supabaseClient.rpc('create_revenue_draft', { reservation_id_value: reservationId });
     throwIfError(error);
     return data;
   },
@@ -619,26 +670,47 @@ window.supabaseRecord = {
     return data;
   },
   async posSaveBill(payload) {
-    const { data, error } = await window.supabaseClient.rpc('pos_save_bill', {
-      p_bill_id: payload.billId || null,
-      p_customer_name: payload.customerName,
-      p_notes: payload.notes || '',
-      p_reservation_id: payload.reservationId || null,
-      p_adult_count: payload.adultCount,
-      p_senior_count: payload.seniorCount,
-      p_kids_count: payload.kidsCount,
-      p_comped_count: payload.compedCount,
-      p_discount_id: payload.discountId || null,
-      p_discount_reason: payload.discountReason || '',
-      p_extra_lines: payload.extraLines || [],
-      p_initial_deposit: payload.initialDeposit || 0,
-      p_idempotency_key: payload.idempotencyKey || null
-    });
-    throwIfError(error);
-    return data;
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient.rpc('pos_save_bill_phase3', {
+        p_bill_id: payload.billId || null,
+        p_customer_name: payload.customerName,
+        p_notes: payload.notes || '',
+        p_reservation_id: payload.reservationId || null,
+        p_adult_count: payload.adultCount,
+        p_senior_count: payload.seniorCount,
+        p_kids_count: payload.kidsCount,
+        p_comped_count: payload.compedCount,
+        p_discount_id: payload.discountId || null,
+        p_discount_reason: payload.discountReason || '',
+        p_extra_lines: payload.extraLines || [],
+        p_idempotency_key: payload.idempotencyKey || null,
+        p_table_id: payload.tableId || null,
+        p_charge_extra_pax: Boolean(payload.chargeExtraPax)
+      }).abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('Bill save timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('Bill save timed out after 15 seconds. The server may still finish the request. Retry from this same form to reuse its idempotency key, or reload the bill list before starting another bill.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   },
   async posCloseBill(billId, tenderedAmount, idempotencyKey) {
-    const { data, error } = await window.supabaseClient.rpc('pos_close_bill', {
+    const { data, error } = await window.supabaseClient.rpc('pos_close_bill_phase3', {
       p_bill_id: billId,
       p_tendered_amount: tenderedAmount,
       p_idempotency_key: idempotencyKey
@@ -647,7 +719,7 @@ window.supabaseRecord = {
     return data;
   },
   async posRequestBillVoid(billId, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_request_bill_void', {
+    const { data, error } = await window.supabaseClient.rpc('pos_request_bill_void_phase3', {
       p_bill_id: billId,
       p_reason: reason
     });
@@ -655,10 +727,80 @@ window.supabaseRecord = {
     return data;
   },
   async posDecideBillApproval(approvalId, decision, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_decide_bill_approval', {
+    const { data, error } = await window.supabaseClient.rpc('pos_decide_bill_approval_phase3', {
       p_approval_id: approvalId,
       p_decision: decision,
       p_decision_reason: reason || ''
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posOpenShift(openingCash, notes) {
+    const { data, error } = await window.supabaseClient.rpc('pos_open_shift', {
+      p_opening_cash: openingCash, p_notes: notes || ''
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posShiftSummary(shiftId) {
+    const { data, error } = await window.supabaseClient.rpc('pos_shift_summary', {
+      p_shift_id: shiftId
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posCloseShift(shiftId, countedCash, notes) {
+    const { data, error } = await window.supabaseClient.rpc('pos_close_shift', {
+      p_shift_id: shiftId, p_counted_cash: countedCash, p_notes: notes || ''
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posRecordCashMovement(shiftId, movementType, amount, reason, idempotencyKey) {
+    const { data, error } = await window.supabaseClient.rpc('pos_record_cash_movement', {
+      p_shift_id: shiftId, p_movement_type: movementType,
+      p_amount: amount, p_reason: reason, p_idempotency_key: idempotencyKey
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posRecordReservationDeposit(reservationId, amount, notes, idempotencyKey) {
+    const { data, error } = await window.supabaseClient.rpc('pos_record_reservation_deposit', {
+      p_reservation_id: reservationId, p_amount: amount, p_notes: notes || '',
+      p_idempotency_key: idempotencyKey
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posReservationDepositDecision(depositId, decision, reason) {
+    const { data, error } = await window.supabaseClient.rpc('pos_reservation_deposit_decision', {
+      p_deposit_id: depositId, p_decision: decision, p_reason: reason
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posReservationDepositHistory(reservationId) {
+    const { data, error } = await window.supabaseClient.rpc('pos_reservation_deposit_history', {
+      p_reservation_id: reservationId
+    });
+    throwIfError(error);
+    return data || { deposits: [], actions: [] };
+  },
+  async posBillClosePreview(billId) {
+    const { data, error } = await window.supabaseClient.rpc('pos_bill_close_preview', {
+      p_bill_id: billId
+    });
+    throwIfError(error);
+    return data;
+  },
+  async posRefreshNotifications() {
+    const { data, error } = await window.supabaseClient.rpc('pos_refresh_notifications');
+    throwIfError(error);
+    return data;
+  },
+  async posMarkNotificationRead(notificationId) {
+    const { data, error } = await window.supabaseClient.rpc('pos_mark_notification_read', {
+      p_notification_id: notificationId
     });
     throwIfError(error);
     return data;

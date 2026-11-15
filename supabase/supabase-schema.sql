@@ -165,7 +165,9 @@ create table if not exists public.reservations (
   guests integer not null check (guests > 0),
   type text not null default 'Reservation',
   adults integer not null default 0 check (adults >= 0),
+  senior_pwd_count integer not null default 0 check (senior_pwd_count >= 0),
   children integer not null default 0 check (children >= 0),
+  source text check (source is null or source in ('Website', 'Phone', 'Facebook', 'Walk-in', 'Other')),
   occasion text not null default '',
   status text not null default 'Pending' check (status in ('Pending', 'Confirmed', 'Cancelled', 'Seated', 'Completed', 'No-show')),
   seated_at timestamptz,
@@ -179,7 +181,8 @@ create table if not exists public.reservations (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint reservations_contact_check check (
-    nullif(btrim(coalesce(email, '')), '') is not null
+    type = 'Walk-in'
+    or nullif(btrim(coalesce(email, '')), '') is not null
     or nullif(btrim(coalesce(phone, '')), '') is not null
   )
 );
@@ -242,9 +245,9 @@ insert into public.buffet_rates (
   id, meal_period, day_type, adult_rate, child_rate, senior_pwd_rate,
   effective_from, effective_to, is_active
 ) values
-  ('RATE-ALL-DAY-WEEKDAY-20260101', 'All Day', 'weekday', 499, 299, 399, '2026-01-01', null, true),
-  ('RATE-ALL-DAY-WEEKEND-20260101', 'All Day', 'weekend', 499, 299, 399, '2026-01-01', null, true),
-  ('RATE-ALL-DAY-HOLIDAY-20260101', 'All Day', 'holiday', 499, 299, 399, '2026-01-01', null, true)
+  ('RATE-ALL-DAY-WEEKDAY-20260101', 'All Day', 'weekday', 449, 225, 360, '2026-01-01', null, true),
+  ('RATE-ALL-DAY-WEEKEND-20260101', 'All Day', 'weekend', 449, 225, 360, '2026-01-01', null, true),
+  ('RATE-ALL-DAY-HOLIDAY-20260101', 'All Day', 'holiday', 449, 225, 360, '2026-01-01', null, true)
 on conflict (id) do nothing;
 
 -- PHASE 1: batch quantity remains quantity; covers are tracked separately.
@@ -282,8 +285,8 @@ comment on column public.production_logs.quantity is
   'Number of recipe batches produced.';
 comment on column public.production_logs.covers_produced is
   'Nullable number of buffet covers produced by the batches.';
--- Older iterations enforced a split count equal to guests; legacy records may
--- intentionally have only the total, so retain independent nonnegative counts.
+-- Guest totals include adults, Senior/PWD, and kids. Legacy records may
+-- intentionally have only the total, so leave this constraint unvalidated.
 alter table public.reservations
   drop constraint if exists reservations_guest_count_check;
 
@@ -297,7 +300,7 @@ begin
   ) then
     alter table public.reservations
       add constraint reservations_guest_count_check
-      check (guests = adults + children) not valid;
+      check (guests = adults + senior_pwd_count + children) not valid;
   end if;
 end;
 $$;
@@ -844,7 +847,7 @@ begin
     insert into public.app_records_migration_errors (migration_key, error_text)
     values (
       'typed_app_records_backfill_v1',
-      'Typed reservations contain guest counts where guests does not equal adults + children; correct those rows to validate reservations_guest_count_check.'
+      'Typed reservations contain guest counts where guests does not equal adults + senior_pwd_count + children; correct those rows to validate reservations_guest_count_check.'
     )
     on conflict (migration_key) do update
       set error_text = excluded.error_text, detected_at = clock_timestamp();
@@ -1107,10 +1110,43 @@ set search_path = pg_catalog
 as $$
 declare
   table_capacity integer;
+  total_covers integer;
+  capacity_covers integer;
+  guest_counts_changed boolean;
 begin
+  total_covers := coalesce(new.adults, 0)
+    + coalesce(new.senior_pwd_count, 0)
+    + coalesce(new.children, 0);
+  guest_counts_changed := tg_op = 'INSERT'
+    or new.adults is distinct from old.adults
+    or new.senior_pwd_count is distinct from old.senior_pwd_count
+    or new.children is distinct from old.children;
+
+  if guest_counts_changed or new.guests is distinct from old.guests then
+    if total_covers < 1 or total_covers > 1000 then
+      raise exception 'Reservation guest counts must total between 1 and 1,000'
+        using errcode = '23514';
+    end if;
+    new.guests := total_covers;
+  end if;
+  capacity_covers := case
+    when new.type = 'Walk-in' and total_covers > 0 then total_covers
+    when total_covers > 0 then coalesce(new.actual_covers, total_covers)
+    else coalesce(new.actual_covers, new.guests, 0)
+  end;
+
+  if new.type = 'Walk-in' and new.status = 'Seated'
+     and (tg_op = 'INSERT' or guest_counts_changed
+       or new.status is distinct from old.status) then
+    new.actual_covers := total_covers;
+  end if;
+
   if tg_op = 'INSERT'
      or new.table_id is distinct from old.table_id
      or new.guests is distinct from old.guests
+     or new.adults is distinct from old.adults
+     or new.senior_pwd_count is distinct from old.senior_pwd_count
+     or new.children is distinct from old.children
      or new.actual_covers is distinct from old.actual_covers then
     if new.table_id is not null then
       select seats into table_capacity
@@ -1120,11 +1156,25 @@ begin
         raise exception 'The selected table does not exist'
           using errcode = '23503';
       end if;
-      if coalesce(new.actual_covers, new.guests) > table_capacity then
+      if capacity_covers > table_capacity then
         raise exception 'The selected table does not have enough seats for this reservation'
           using errcode = '23514';
       end if;
     end if;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.set_public_reservation_source()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if new.id like 'RSV-%' then
+    new.source := 'Website';
   end if;
   return new;
 end;
@@ -1530,6 +1580,23 @@ begin
 end;
 $$;
 
+create or replace function public.prevent_historical_reservation_phase_a_changes()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if old.reservation_date < current_date
+     and (new.senior_pwd_count is distinct from old.senior_pwd_count
+       or new.source is distinct from old.source) then
+    raise exception 'Historical corrections cannot change Senior/PWD count or reservation source'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
 create or replace function public.prevent_self_role_change()
 returns trigger
 language plpgsql
@@ -1562,6 +1629,16 @@ drop trigger if exists enforce_reservation_capacity on public.reservations;
 create trigger enforce_reservation_capacity
   before insert or update on public.reservations
   for each row execute function public.enforce_reservation_table_capacity();
+
+drop trigger if exists set_public_reservation_source on public.reservations;
+create trigger set_public_reservation_source
+  before insert on public.reservations
+  for each row execute function public.set_public_reservation_source();
+
+drop trigger if exists prevent_historical_reservation_phase_a_changes on public.reservations;
+create trigger prevent_historical_reservation_phase_a_changes
+  before update on public.reservations
+  for each row execute function public.prevent_historical_reservation_phase_a_changes();
 
 drop trigger if exists enforce_reservation_table_overlap on public.reservations;
 create trigger enforce_reservation_table_overlap
@@ -2416,6 +2493,8 @@ revoke all on function public.reservation_time_to_minutes(text) from public, ano
 revoke all on function public.enforce_reservation_hours() from public, anon, authenticated;
 revoke all on function public.enforce_reservation_table_overlap() from public, anon, authenticated;
 revoke all on function public.enforce_reservation_table_capacity() from public, anon, authenticated;
+revoke all on function public.set_public_reservation_source() from public, anon, authenticated;
+revoke all on function public.prevent_historical_reservation_phase_a_changes() from public, anon, authenticated;
 revoke all on function public.enforce_restaurant_table_update() from public, anon, authenticated;
 revoke all on function public.enforce_reservation_history_guard() from public, anon, authenticated;
 revoke all on function public.prevent_table_delete_with_reservations() from public, anon, authenticated;
@@ -2461,8 +2540,7 @@ grant execute on function public.public_create_reservation(jsonb) to anon, authe
 revoke all on function public.public_get_reservation_status(text, text) from public;
 grant execute on function public.public_get_reservation_status(text, text) to anon, authenticated;
 -- PHASE 3: RPC callers are checked inside the security-definer functions.
-revoke all on function public.create_revenue_draft(text) from public, anon;
-grant execute on function public.create_revenue_draft(text) to authenticated;
+revoke all on function public.create_revenue_draft(text) from public, anon, authenticated;
 revoke all on function public.confirm_revenue(text, jsonb) from public, anon;
 grant execute on function public.confirm_revenue(text, jsonb) to authenticated;
 
@@ -2497,7 +2575,7 @@ comment on function public.public_create_reservation(jsonb) is
 comment on function public.public_get_reservation_status(text, text) is
   'Returns minimal status fields only when reservation reference and email or phone match.';
 comment on function public.create_revenue_draft(text) is
-  'Creates an idempotent All Day buffet revenue draft from a Seated reservation; returns only id and status.';
+  'Retired: revenue now comes from closed POS bills. Execution is revoked.';
 comment on function public.confirm_revenue(text, jsonb) is
   'Confirms a revenue draft for Administrator or Manager and optionally corrects customer counts.';
 comment on table public.public_reservation_attempts is

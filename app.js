@@ -1,4 +1,4 @@
-const KEYS = ['ingredients', 'recipes', 'inventoryTransactions', 'productionLogs', 'revenueRecords', 'wasteLogs', 'physicalCounts', 'users', 'reservations', 'restaurantTables', 'buffetRates', 'chargeItems', 'chargeItemVariants', 'packageTiers', 'packageInclusions', 'discounts', 'posSettings', 'shifts', 'cashMovements', 'posBills', 'billLines', 'billPayments', 'reservationDeposits', 'billApprovals'];
+const KEYS = ['ingredients', 'recipes', 'inventoryTransactions', 'productionLogs', 'revenueRecords', 'wasteLogs', 'physicalCounts', 'users', 'reservations', 'restaurantTables', 'buffetRates', 'chargeItems', 'chargeItemVariants', 'packageTiers', 'packageInclusions', 'discounts', 'posSettings', 'shifts', 'cashMovements', 'posBills', 'billLines', 'billPayments', 'reservationDeposits', 'billApprovals', 'posNotifications'];
 const DATA_STORAGE_KEYS = [...KEYS.map(key => `costtrack_${key}`), 'costtrack_pending_sync_anonymous'];
 function clearDataStorage() {
   DATA_STORAGE_KEYS.forEach(key => localStorage.removeItem(key));
@@ -20,7 +20,7 @@ let passwordRecoveryMode = new URLSearchParams(window.location.hash.slice(1)).ge
 let supabaseSyncEnabled = false;
 let realtimeChannel = null;
 let realtimeSubscriptionKey = '';
-let realtimeRefreshTimer = null;
+const realtimeRefreshTimers = new Map();
 let realtimeConnected = false;
 let realtimeConfigPromise = null;
 let realtimeRequestedKey = '';
@@ -102,7 +102,6 @@ const roleAccess = {
 const canAccess = view => Boolean(roleAccess[state.role]?.includes(view));
 const canAccessRevenue = () => ['Administrator', 'Manager'].includes(state.role);
 const canManageRates = () => ['Administrator', 'Manager'].includes(state.role);
-const canCreateDraft = () => ['Administrator', 'Manager', 'Receptionist'].includes(state.role);
 const canVoidRevenue = () => state.role === 'Administrator';
 const app = document.querySelector('#app');
 const money = value => `₱${Number(value || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -134,7 +133,7 @@ function parseTime12h(timeStr) {
   return window.CostTrackLogic.parseReservationTime(timeStr);
 }
 function liveTableAvailability(table, date = today(), reservations = all('reservations'), now = new Date()) {
-  return window.CostTrackLogic.tableAvailability(
+  const availability = window.CostTrackLogic.tableAvailability(
     table,
     reservations,
     date,
@@ -142,6 +141,10 @@ function liveTableAvailability(table, date = today(), reservations = all('reserv
     now.getHours() * 60 + now.getMinutes(),
     now
   );
+  if (availability.status === 'Available' && table.status === 'Needs cleaning') {
+    return { ...availability, status: 'Needs cleaning' };
+  }
+  return availability;
 }
 const read = key => collectionState[key] || [];
 function currentUserName() {
@@ -255,6 +258,20 @@ async function saveDelivery(payload) {
   }
 }
 const all = key => read(key);
+function upsertLocalRecord(collection, record) {
+  if (!record) return;
+  const records = read(collection);
+  const existingIndex = records.findIndex(item => String(item.id) === String(record.id));
+  collectionState[collection] = existingIndex < 0
+    ? [record, ...records]
+    : records.map(item => String(item.id) === String(record.id) ? record : item);
+}
+function replaceLocalRelatedRecords(collection, matches, records) {
+  collectionState[collection] = [
+    ...read(collection).filter(record => !matches(record)),
+    ...records
+  ];
+}
 document.addEventListener('click', async event => {
   const action = event.target.closest('[data-action="void-revenue"]');
   if (!action) return;
@@ -290,11 +307,32 @@ function profitability(date, record) {
   const profit = revenue - production - waste;
   return { revenue, production, waste, profit, foodCostPercent: revenue ? production / revenue * 100 : null, wasteCostPercent: revenue ? waste / revenue * 100 : null, profitMargin: revenue ? profit / revenue * 100 : null };
 }
-function reservationRevenue(item) { return window.CostTrackLogic.reservationRevenue(item); }
-function buffetRevenue(date = today()) { return all('reservations').filter(item => item.date === date && item.status !== 'Cancelled' && item.status !== 'No-show').reduce((sum, item) => sum + reservationRevenue(item, activeBuffetRate(item, date) || {}), 0); }
+function reservationRevenue(item, rates) { return window.CostTrackLogic.reservationRevenue(item, rates); }
+function reservationCategoryCount(item) {
+  const seniorPwdCount = Number(item.seniorPwdCount ?? item.senior_pwd_count ?? 0);
+  const children = Number(item.children || 0);
+  if (item.adults != null) {
+    const total = Number(item.adults) + seniorPwdCount + children;
+    return total || Number(item.guests || 0);
+  }
+  if (item.guests != null) return Number(item.guests);
+  return seniorPwdCount + children;
+}
+function reservationGuestCount(item) {
+  return Number(item.actualCovers || item.guests || reservationCategoryCount(item));
+}
+function buffetRevenue(date = today()) {
+  return all('reservations')
+    .filter(item => item.date === date && item.status !== 'Cancelled' && item.status !== 'No-show')
+    .reduce((sum, item) => sum + (reservationRevenue(item, activeBuffetRate(item, date)) || 0), 0);
+}
 function activeBuffetRate(item, date = item?.date || today()) {
-  const dayType = [0, 6].includes(new Date(`${date}T12:00:00`).getDay()) ? 'weekend' : 'weekday';
-  return all('buffetRates').filter(rate => rate.isActive && rate.mealPeriod === (item?.mealPeriod || 'All Day') && rate.dayType === dayType && rate.effectiveFrom <= date && (!rate.effectiveTo || rate.effectiveTo >= date)).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))[0];
+  const requestedDayType = String(item?.dayType || item?.day_type || '').trim().toLowerCase();
+  const dayType = ['weekday', 'weekend', 'holiday'].includes(requestedDayType)
+    ? requestedDayType
+    : [0, 6].includes(new Date(`${date}T12:00:00`).getDay()) ? 'weekend' : 'weekday';
+  const mealPeriod = item?.mealPeriod || (item?.time ? reservationMealPeriod(item) : 'All Day');
+  return window.CostTrackLogic.activeBuffetRate(all('buffetRates'), mealPeriod, date, dayType);
 }
 function friendlyRpcError(error) {
   const message = String(error?.message || error || '');
@@ -366,7 +404,7 @@ function realtimeCollectionsForView() {
     calendar: ['reservations', 'restaurant_tables'],
     tables: ['reservations', 'restaurant_tables'],
     cashier: ['pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'reservations'],
-    shifts: ['pos_shifts', 'pos_cash_movements'],
+    shifts: ['pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_approvals', 'pos_notifications'],
     approvals: ['pos_bills', 'pos_bill_approvals'],
     'charge-catalog': ['pos_charge_items', 'pos_package_tiers', 'pos_discounts', 'pos_settings'],
     rates: ['buffet_rates'],
@@ -383,8 +421,8 @@ function realtimeCollectionsForView() {
 }
 function realtimeTablesForRole(tables) {
   const allowed = {
-    Administrator: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals'],
-    Manager: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals'],
+    Administrator: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'],
+    Manager: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'],
     'Chef / Kitchen Staff': ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'production_batches', 'waste_logs'],
     Receptionist: ['reservations', 'restaurant_tables', 'buffet_rates', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_shifts', 'pos_cash_movements'],
     'Inventory Clerk': ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'physical_counts', 'waste_logs']
@@ -417,9 +455,16 @@ function realtimeCollectionName(table) {
     pos_bill_lines: 'billLines',
     pos_bill_payments: 'billPayments',
     pos_reservation_deposits: 'reservationDeposits',
-    pos_bill_approvals: 'billApprovals'
+    pos_bill_approvals: 'billApprovals',
+    pos_notifications: 'posNotifications'
   }[table];
 }
+const posRelatedRealtimeCollections = new Set([
+  'reservations', 'restaurantTables', 'chargeItems', 'chargeItemVariants',
+  'packageTiers', 'packageInclusions', 'discounts', 'posSettings', 'shifts',
+  'cashMovements', 'posBills', 'billLines', 'billPayments',
+  'reservationDeposits', 'billApprovals', 'posNotifications'
+]);
 function persistCollection(collection, records) {
   collectionState[collection] = records;
 }
@@ -429,7 +474,11 @@ async function refetchCollection(collection) {
   return records;
 }
 async function refreshPosCollections() {
-  const collections = ['posBills', 'billLines', 'billPayments', 'billApprovals'];
+  const collections = ['posBills', 'billLines', 'billPayments', 'billApprovals', 'shifts', 'cashMovements', 'reservationDeposits', 'reservations', 'restaurantTables'];
+  if (['Administrator', 'Manager'].includes(state.role)) collections.push('posNotifications');
+  if (['Administrator', 'Manager'].includes(state.role)) {
+    await window.supabaseRecord.posRefreshNotifications();
+  }
   const loaded = await Promise.all(collections.map(collection => window.supabaseRecord.load(collection)));
   collections.forEach((collection, index) => persistCollection(collection, loaded[index]));
 }
@@ -451,8 +500,14 @@ async function refreshRealtimeCollection(table, payload) {
     if (confirm('This record changed in another session. Reload the latest data?')) closeModal();
     else toast('Remote change received. Your edit remains open.', 'error');
   }
-  const records = await window.supabaseRecord.load(collection);
-  persistCollection(collection, records);
+  if (!posRelatedRealtimeCollections.has(collection) || !recordId) {
+    persistCollection(collection, await window.supabaseRecord.load(collection));
+  } else if (payload?.eventType === 'DELETE') {
+    collectionState[collection] = read(collection).filter(record => String(record.id) !== String(recordId));
+  } else {
+    const record = await window.supabaseRecord.loadRecord(collection, recordId);
+    if (record) upsertLocalRecord(collection, record);
+  }
   invalidateReportData();
   const changed = payload?.new || payload?.old || {};
   const actor = changed.recorded_by || changed.created_by || changed.updated_by || '';
@@ -461,18 +516,24 @@ async function refreshRealtimeCollection(table, payload) {
   if (table === 'reservations' && payload?.old?.status !== payload?.new?.status && payload?.new?.status) toast(`Reservation status changed to ${payload.new.status}${actor ? ` by ${actor}` : ''}.`);
   if (table === 'restaurant_tables' && payload?.old?.status !== payload?.new?.status) toast(`Table ${payload.new.id} is now ${payload.new.status}.`);
   if (table === 'revenue_records' && payload?.new?.status === 'Draft' && canAccessRevenue()) toast(`New revenue draft${actor ? ` from ${actor}` : ''}.`);
-  if (['ingredients', 'reservations', 'restaurant_tables', 'revenue_records', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'recipes', 'buffet_rates'].includes(table)) render();
+  if (['ingredients', 'reservations', 'restaurant_tables', 'revenue_records', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'recipes', 'buffet_rates', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'].includes(table)) render();
 }
 function scheduleRealtimeRefresh(table, payload) {
-  clearTimeout(realtimeRefreshTimer);
-  realtimeRefreshTimer = setTimeout(() => refreshRealtimeCollection(table, payload).catch(error => {
-    console.error('Realtime refresh failed.', error);
-    setSyncState(navigator.onLine ? 'reconnecting' : 'offline', error.message);
-  }), 300);
+  const recordId = payload?.new?.id || payload?.old?.id || '';
+  const refreshKey = `${table}:${recordId}`;
+  clearTimeout(realtimeRefreshTimers.get(refreshKey));
+  realtimeRefreshTimers.set(refreshKey, setTimeout(() => {
+    realtimeRefreshTimers.delete(refreshKey);
+    refreshRealtimeCollection(table, payload).catch(error => {
+      console.error(`Realtime refresh failed for ${table}.`, error);
+      setSyncState(navigator.onLine ? 'reconnecting' : 'offline', error.message);
+      toast(`Live update for ${table} could not be refreshed.`, 'error');
+    });
+  }, 300));
 }
 async function stopRealtimeSubscriptions() {
-  clearTimeout(realtimeRefreshTimer);
-  realtimeRefreshTimer = null;
+  for (const timer of realtimeRefreshTimers.values()) clearTimeout(timer);
+  realtimeRefreshTimers.clear();
   if (realtimeChannel) await window.supabaseClient.removeChannel(realtimeChannel);
   realtimeChannel = null;
   realtimeSubscriptionKey = '';
@@ -600,7 +661,10 @@ function sidebarGroupState() {
       hasPreference = false;
     }
   }
-  return hasPreference ? groups : (activeGroup ? [activeGroup] : []);
+  const defaultGroup = activeGroup || sidebarGroups.find(group =>
+    group.items.some(([view]) => canAccess(view))
+  )?.id;
+  return hasPreference && groups.length ? groups : (defaultGroup ? [defaultGroup] : []);
 }
 
 function renderNavItem(view, icon, label, options = {}) {
@@ -983,7 +1047,7 @@ function pageHeader(eyebrow, title, subtitle, action = '') { return `<div class=
 function tablePage(config) {
   const rows = config.rows || [];
   const emptyMessage = config.emptyMessage || 'No records found. Add your first record to get started.';
-  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
+  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
 }
 function stockStatus(item) { return item.stock <= 0 ? 'Out of Stock' : item.stock <= item.minimum ? 'Low Stock' : 'Healthy'; }
 function roleDashboard() {
@@ -1321,7 +1385,7 @@ function chargeCatalogPage() {
   const rows = chargeItems.length ? chargeItems.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td><span class="tag">${esc(item.type)}</span></td><td>${item.isFoodRevenue ? 'Food' : 'Non-food'}</td><td>${money(item.unitPrice || 0)}</td><td><button class="ghost-btn compact-btn" data-action="edit-charge-item" data-id="${esc(item.id)}">Edit</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty-state">No catalog entries yet. Use the migration seed data or add a charge item from the catalog editor.</td></tr>';
   const packageRows = packageTiers.length ? packageTiers.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.defaultMealPeriod || 'All Day')}</td><td>${money(item.basePrice || 0)}</td><td><span class="status ${item.isActive ? 'status-good' : 'status-low'}">${item.isActive ? 'Active' : 'Inactive'}</span></td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No package tiers defined.</td></tr>';
   const discountRows = discounts.length ? discounts.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.discountType)}</td><td>${esc(item.appliesTo || 'bill')}</td><td>${item.discountType === 'percent' ? `${Number(item.value || 0).toFixed(2)}%` : money(item.value || 0)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No discount presets defined.</td></tr>';
-  const settingsRows = settings.length ? settings.map(item => `<tr><td>${esc(item.key)}</td><td>${esc(item.type)}</td><td>${esc(String(item.value || ''))}</td></tr>`).join('') : '<tr><td colspan="3" class="empty-state">No operating settings saved yet.</td></tr>';
+  const settingsRows = settings.length ? settings.map(item => `<tr><td>${esc(item.key)}</td><td>${esc(item.type)}</td><td>${esc(String(item.value || ''))}</td><td>${state.role === 'Administrator' && ['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(item.key) ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-pos-setting" data-id="${esc(item.id)}">Edit</button>` : ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No operating settings saved yet.</td></tr>';
   return `
     <section class="panel">
       <div class="panel-header">
@@ -1348,14 +1412,18 @@ function chargeCatalogPage() {
         </div>
         <div class="panel">
           <div class="sub-panel-header"><strong>POS settings</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Key</th><th>Type</th><th>Value</th></tr></thead><tbody>${settingsRows}</tbody></table></div>
+          <div class="table-scroll"><table><thead><tr><th>Key</th><th>Type</th><th>Value</th><th></th></tr></thead><tbody>${settingsRows}</tbody></table></div>
         </div>
       </div>
     </section>
   `;
 }
 function cashierPage() {
-  const bills = all('posBills').slice().sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
+  const bills = all('posBills')
+    .filter(item => state.role !== 'Receptionist' || item.createdBy === state.user?.id)
+    .slice()
+    .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
+  const activeShift = all('shifts').find(item => item.status === 'Open' && item.openedBy === state.user?.id);
   const rows = bills.map(item => {
     const canEdit = item.status === 'Open'
       && (state.role !== 'Receptionist' || item.createdBy === state.user?.id);
@@ -1365,7 +1433,7 @@ function cashierPage() {
     eyebrow: 'Front of House',
     title: 'Cashier',
     subtitle: 'Create and settle bills without changing stock. Deposits are payments, never discounts.',
-    action: '<button class="primary-btn" data-action="new-bill">+ New bill</button>',
+    action: `${activeShift ? `<span class="pos-shift-chip">Shift open · ${esc(activeShift.code)}</span>` : '<button class="ghost-btn" data-action="new-shift">Open shift</button>'} <button class="primary-btn" data-action="new-bill" ${activeShift ? '' : 'disabled'}>+ New bill</button>`,
     search: 'cashier',
     headers: ['Bill #', 'Customer', 'Served', 'Status', 'Balance', 'Paid', ''],
     rows,
@@ -1373,16 +1441,29 @@ function cashierPage() {
   });
 }
 function shiftsPage() {
-  const rows = all('shifts').slice().reverse().map(item => `<tr><td>${esc(item.code || item.id)}</td><td>${esc(item.status)}</td><td>${esc(item.openedAt || '')}</td><td>${money(item.openingFloat || 0)}</td><td>${money(item.cashSales || 0)}</td><td><button class="ghost-btn compact-btn" data-action="open-shift" data-id="${esc(item.id)}">View</button></td></tr>`);
+  const shifts = all('shifts').slice().sort((a, b) => String(b.openedAt || '').localeCompare(String(a.openedAt || '')));
+  const ownOpenShift = shifts.find(item => item.status === 'Open' && item.openedBy === state.user?.id);
+  const canCloseAny = ['Administrator', 'Manager'].includes(state.role);
+  const rows = shifts.map(item => {
+    const own = item.openedBy === state.user?.id;
+    const canMove = item.status === 'Open' && own;
+    const canClose = item.status === 'Open' && (own || canCloseAny);
+    const variance = item.cashVariance == null ? '—' : `${item.cashVariance > 0 ? '+' : ''}${money(item.cashVariance)}`;
+    return `<tr><td><strong>${esc(item.code || item.id)}</strong><small>${own ? 'Your shift' : `Cashier ${esc(item.openedBy || '—')}`}</small></td><td><span class="status ${item.status === 'Closed' ? 'status-good' : item.status === 'Needs review' ? 'status-out' : 'status-low'}">${esc(item.status)}</span></td><td>${esc(item.openedAt || '')}</td><td>${money(item.openingFloat || 0)}</td><td>${item.expectedCash == null ? '—' : money(item.expectedCash)}</td><td>${variance}</td><td><div class="row-actions"><button class="ghost-btn compact-btn" data-action="open-shift" data-id="${esc(item.id)}">View</button>${canMove ? `<button class="ghost-btn compact-btn" data-action="cash-movement" data-id="${esc(item.id)}">Paid in/out</button>` : ''}${canClose ? `<button class="primary-btn compact-btn" data-action="close-shift" data-id="${esc(item.id)}">Close</button>` : ''}<button class="ghost-btn compact-btn" data-action="print-shift" data-id="${esc(item.id)}">Print</button></div></td></tr>`;
+  });
+  const notifications = ['Administrator', 'Manager'].includes(state.role)
+    ? all('posNotifications').filter(item => !item.readAt).slice(0, 8).map(item => `<div class="pos-notification"><strong>${esc(item.title)}</strong><span>${esc(item.message)}</span><button type="button" class="text-btn" data-action="read-pos-notification" data-id="${esc(item.id)}">Mark read</button></div>`).join('')
+    : '';
   return tablePage({
     eyebrow: 'Front of House',
     title: 'Shifts',
     subtitle: 'Track cashier float, cash movement, and end-of-shift reconciliation.',
-    action: '<button class="primary-btn" data-action="new-shift">+ Open shift</button>',
+    action: `${ownOpenShift ? `<span class="pos-shift-chip">Open · ${esc(ownOpenShift.code)}</span>` : '<button class="primary-btn" data-action="new-shift">+ Open shift</button>'}`,
     search: 'shifts',
-    headers: ['Shift', 'Status', 'Opened', 'Float', 'Cash sales', ''],
+    headers: ['Shift / cashier', 'Status', 'Opened', 'Starting cash', 'Expected cash', 'Variance', ''],
     rows,
-    emptyMessage: 'No shifts recorded yet.'
+    emptyMessage: 'No shifts recorded yet.',
+    beforeTable: notifications ? `<section class="panel pos-notifications"><div class="panel-title">Manager notifications</div>${notifications}</section>` : ''
   });
 }
 function approvalsPage() {
@@ -1455,6 +1536,30 @@ async function openForm(type, item) {
   }[type];
   if (requiredAction && !window.CostTrackLogic.canPerformInventoryAction(state.role, requiredAction)) {
     return toast('You do not have permission to perform this action.', 'error');
+  }
+  if (type === 'pos-setting') {
+    const setting = all('posSettings').find(item => item.id === editId);
+    if (state.role !== 'Administrator' || !setting
+      || !['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(setting.key)) {
+      return toast('Only an Administrator can change this POS setting.', 'error');
+    }
+    const value = Number(data.value);
+    if (!Number.isFinite(value) || (setting.key === 'pos_max_shift_hours' && (!Number.isInteger(value) || value < 1 || value > 72))
+      || (setting.key === 'pos_extra_pax_rate' && value < 0)) {
+      return toast(setting.key === 'pos_max_shift_hours'
+        ? 'Set the alert threshold to a whole number from 1 to 72 hours.'
+        : 'Set a non-negative extra-pax rate.', 'error');
+    }
+    try {
+      await save('posSettings', all('posSettings').map(item => item.id === setting.id ? { ...item, value: String(value) } : item));
+      state.modalDirty = false;
+      closeModal();
+      toast('POS setting saved.');
+    } catch (error) {
+      console.error('POS setting could not be saved.', error);
+      toast(friendlyRpcError(error), 'error');
+    }
+    return;
   }
   const edit = item ? true : false; const value = key => item?.[key] ?? '';
   if (type === 'ingredient') {
@@ -1673,16 +1778,53 @@ function reservationDisplayName(item) {
 }
 function reservationCard(item, showRevenue = false) {
   const isPastReservation = item.date < today();
-  const guestCount = item.actualCovers || item.guests || (Number(item.adults || 0) + Number(item.children || 0));
+  const guestCount = reservationGuestCount(item);
   const rate = activeBuffetRate(item);
+  const revenueEstimate = rate ? reservationRevenue(item, rate) : null;
   const hasRevenue = all('revenueRecords').some(record => record.reservation_id === item.id);
   const historyLabel = isPastReservation ? '<span class="reservation-history-label">Past record · view only</span>' : '';
   const endTime = window.CostTrackLogic.reservationEndTime(item.time);
   const stayLimitReached = item.status === 'Seated' && window.CostTrackLogic.reservationStayLimitReached(item);
-  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() && rate ? `<em>${money(reservationRevenue(item, rate))} estimated buffet revenue</em>` : ''}`;
-  const lifecycleActions = isPastReservation ? '' : item.status === 'Pending' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Confirmed' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>` : item.status === 'Seated' ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}">Complete</button>${canCreateDraft() ? `<button type="button" class="reservation-confirm-btn" data-action="create-revenue-draft" data-id="${esc(item.id)}">Create revenue draft</button>` : ''}` : '';
+  const reservationDeposits = all('reservationDeposits')
+    .filter(deposit => deposit.reservationId === item.id)
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const heldDeposits = reservationDeposits.filter(deposit => deposit.status === 'Held' && !deposit.billId);
+  const heldTotal = heldDeposits.reduce((sum, deposit) => sum + Number(deposit.amount || 0), 0);
+  const openBill = all('posBills').find(bill => bill.reservationId === item.id && bill.status === 'Open');
+  const hasOpenShift = all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id);
+  const packageItem = all('chargeItems').find(charge => charge.id === item.packageChargeItemId);
+  const packageTier = all('packageTiers').find(tier => tier.id === item.packageTierId);
+  const depositHistory = reservationDeposits.map(deposit => {
+    const receipt = Number(deposit.receiptAmount || 0);
+    const amount = Number(deposit.amount || 0);
+    const amountLabel = receipt > amount
+      ? `${money(receipt)} received · ${money(amount)} remaining`
+      : money(amount);
+    const note = deposit.notes ? ` · ${esc(deposit.notes)}` : '';
+    return `<small>Deposit ${esc(deposit.status)}: ${amountLabel}${note}</small>`;
+  }).join('');
+  const shiftHint = item.status === 'Seated' && !hasOpenShift
+    ? '<small class="field-help">Open your cashier shift before opening a bill or recording a cash deposit.</small>'
+    : '';
+  const rateLabel = rate && revenueEstimate !== null
+    ? `${money(revenueEstimate)} estimated buffet revenue`
+    : 'No rate set';
+  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}`;
+  const lifecycleActions = isPastReservation ? '' : item.status === 'Pending'
+    ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
+    : item.status === 'Confirmed'
+      ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
+      : item.status === 'Seated'
+        ? `${openBill ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>` : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`}<button type="button" class="reservation-confirm-btn" data-action="record-deposit" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before recording a deposit."'}>Record deposit</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}" aria-describedby="reservation-complete-help-${esc(item.id)}" disabled title="A reservation is completed automatically when its linked bill is closed and fully settled.">Complete</button><small class="field-help" id="reservation-complete-help-${esc(item.id)}">Complete is available only through closing and settling the linked bill.</small>`
+        : '';
+  const depositActions = ['Administrator', 'Manager'].includes(state.role)
+    ? heldDeposits.map(deposit => `<span class="deposit-action-group"><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="refund" data-id="${esc(deposit.id)}">Refund ${money(deposit.amount)}</button><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="forfeit" data-id="${esc(deposit.id)}">Forfeit</button></span>`).join('')
+    : '';
+  const depositHistoryAction = reservationDeposits.length
+    ? `<button type="button" class="ghost-btn compact-btn" data-action="deposit-history" data-id="${esc(item.id)}">Deposit history</button>`
+    : '';
   const canDelete = !isPastReservation && ['Administrator', 'Manager'].includes(state.role);
-  const actions = `${lifecycleActions}${canDelete ? `<button type="button" class="danger-btn compact-btn" data-action="delete-reservation" data-id="${esc(item.id)}">Delete</button>` : ''}`;
+  const actions = `${lifecycleActions}${depositHistoryAction}${depositActions}${canDelete ? `<button type="button" class="danger-btn compact-btn" data-action="delete-reservation" data-id="${esc(item.id)}">Delete</button>` : ''}`;
   const actionLabel = isPastReservation
     ? (['Administrator', 'Manager'].includes(state.role) ? 'Correct past reservation' : 'View past reservation')
     : 'View reservation';
@@ -1692,6 +1834,7 @@ function reservationTableOptions({ tableId = '', date = '', time = '', partySize
   return all('restaurantTables').map(table => {
     const alreadyAssigned = table.id === tableId;
     const hasCapacity = Number(table.seats) >= Number(partySize || 0);
+    const needsCleaning = table.status === 'Needs cleaning' && !alreadyAssigned;
     const tableDetails = [
       table.tableType && table.tableType !== 'Unassigned' ? table.tableType : '',
       table.area && table.area !== 'Unassigned' ? table.area : ''
@@ -1699,8 +1842,8 @@ function reservationTableOptions({ tableId = '', date = '', time = '', partySize
     const hasConflict = window.CostTrackLogic.tableHasReservationConflict(
       table.id, date, time, all('reservations'), reservationId, today()
     );
-    const disabled = hasConflict || (!alreadyAssigned && !hasCapacity);
-    const reason = hasConflict ? ' · overlaps another two-hour booking' : !hasCapacity ? ' · too small' : '';
+    const disabled = hasConflict || (!alreadyAssigned && (!hasCapacity || needsCleaning));
+    const reason = hasConflict ? ' · overlaps another two-hour booking' : needsCleaning ? ' · needs cleaning' : !hasCapacity ? ' · too small' : '';
     return `<option value="${esc(table.id)}" ${alreadyAssigned ? 'selected' : ''} ${disabled ? 'disabled' : ''}>${esc(table.id)} · ${Number(table.seats)} seats${tableDetails ? ` · ${esc(tableDetails)}` : ''}${reason}</option>`;
   }).join('');
 }
@@ -1708,7 +1851,9 @@ function refreshReservationTables(form) {
   const select = form.elements.table;
   if (!select) return;
   const selectedTable = select.value;
-  const partySize = Number(form.elements.adults.value || 0) + Number(form.elements.children.value || 0);
+  const partySize = Number(form.elements.adults.value || 0)
+    + Number(form.elements.seniorPwdCount.value || 0)
+    + Number(form.elements.children.value || 0);
   select.innerHTML = `<option value="">Unassigned</option>${reservationTableOptions({
     tableId: selectedTable,
     date: form.elements.date.value,
@@ -1728,30 +1873,42 @@ function reservationForm(item = {}, defaults = {}) {
   const isReadOnly = isPastReservation && !canCorrectPast;
   const lockHistoricalFields = isPastReservation ? 'disabled' : '';
   const lockReadOnlyFields = isReadOnly ? 'disabled' : '';
-  const adults = Number(item.adults || item.guests || 2);
+  const adults = Number(item.adults ?? item.guests ?? 2);
+  const seniorPwdCount = Number(item.seniorPwdCount || 0);
   const children = Number(item.children || 0);
   const tableOptions = reservationTableOptions({
     tableId: item.table,
     date: item.date || defaults.date || today(),
     time: item.time || defaults.time || '',
-    partySize: adults + children,
+    partySize: adults + seniorPwdCount + children,
     reservationId: item.id
   });
   const selectedTime = item.time || defaults.time || '';
   const reservationTimeSlots = window.CostTrackLogic.reservationTimeSlots();
   const timeOptions = `<option value="" disabled ${selectedTime ? '' : 'selected'}>Choose a time</option>${reservationTimeSlots.map(time => `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`).join('')}${selectedTime && !reservationTimeSlots.includes(selectedTime) ? `<option value="${esc(selectedTime)}" selected>${esc(selectedTime)} · existing</option>` : ''}`;
+  const packageItems = all('chargeItems').filter(charge => charge.type === 'package' && charge.isPackage && charge.isActive !== false);
+  const packageTiers = all('packageTiers').filter(tier => tier.isActive !== false);
+  const packageOptions = packageItems.map(charge => `<option value="${esc(charge.id)}" ${item.packageChargeItemId === charge.id ? 'selected' : ''}>${esc(charge.name)}</option>`).join('');
+  const tierOptions = packageTiers.map(tier => `<option value="${esc(tier.id)}" ${item.packageTierId === tier.id ? 'selected' : ''}>${esc(tier.name)} · ${money(tier.basePrice)} / pax</option>`).join('');
+  const packageDisabled = isPastReservation ? 'disabled' : '';
+  const packageSection = `<fieldset class="product-form-section"><legend>Package booking (optional)</legend><div class="form-grid"><label>Package<select name="packageChargeItemId" ${packageDisabled}><option value="">No package</option>${packageOptions}</select></label><label>Package tier<select name="packageTierId" ${packageDisabled}><option value="">Choose a tier</option>${tierOptions}</select></label><label>Booked pax<input name="packagePaxCount" type="number" min="1" max="1000" step="1" value="${esc(item.packagePaxCount || '')}" ${packageDisabled}></label></div><small class="field-help">Package price is charged as food revenue. Additional guests are suggested on the bill.</small></fieldset>`;
   const historyNotice = isPastReservation
     ? `<div class="reservation-history-notice"><strong>${canCorrectPast ? 'Historical correction' : 'Past reservation · view only'}</strong><span>${canCorrectPast ? 'Only the guest name, contact details, occasion, seating preference, and special-request notes can be corrected. Date, time, party size, table, and status are locked. Your reason is recorded in the audit log.' : 'Past bookings are kept for reference and cannot be changed from this account.'}</span></div>`
     : '';
   const correctionReason = canCorrectPast
     ? `<label>Correction reason<textarea name="correctionReason" minlength="10" maxlength="500" required placeholder="Explain why this historical detail needs correction"></textarea><small class="field-help">Required; enter at least 10 characters.</small></label>`
     : '';
-  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" required autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(item.date || defaults.date || today())}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="20" value="${adults}" required ${lockHistoricalFields || lockReadOnlyFields}></label><label>Children<input name="children" type="number" min="0" max="20" value="${children}" required ${lockHistoricalFields || lockReadOnlyFields}></label></div><div class="form-grid"><label>Table<select name="table" ${lockHistoricalFields || lockReadOnlyFields}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label></div><label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}`;
+  const sourceOptions = ['', 'Website', 'Phone', 'Facebook', 'Walk-in', 'Other']
+    .map(source => `<option value="${esc(source)}" ${String(item.source || '') === source ? 'selected' : ''}>${source || 'Not specified'}</option>`)
+    .join('');
+  const lockReservationDetails = lockHistoricalFields || lockReadOnlyFields;
+  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><small class="field-help">${item.type === 'Walk-in' ? 'Contact details are optional for walk-ins.' : 'Enter a phone number or email address.'}</small><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(item.date || defaults.date || today())}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="1000" step="1" value="${adults}" required ${lockReservationDetails}></label><label>Senior / PWD<input name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="${seniorPwdCount}" required ${lockReservationDetails}></label><label>Kids<input name="children" type="number" min="0" max="1000" step="1" value="${children}" required ${lockReservationDetails}></label></div><div class="form-grid"><label>Table<select name="table" ${lockReservationDetails}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label><label>Source<select name="source" ${lockReservationDetails}>${sourceOptions}</select></label></div>${packageSection}<label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}`;
   const title = isPastReservation ? canCorrectPast ? 'Correct past reservation' : 'Past reservation details' : item.id ? 'Update reservation' : 'New reservation';
   const submitLabel = isReadOnly ? '' : item.id ? canCorrectPast ? 'Save correction' : 'Save changes' : 'Create reservation';
   modal(title, formContent, submitLabel);
   document.querySelector('#modalForm').dataset.type = 'reservation';
   document.querySelector('#modalForm').dataset.id = item.id || '';
+  document.querySelector('#modalForm').dataset.reservationType = item.type || 'Reservation';
   if (isReadOnly) {
     const root = document.querySelector('#modalRoot');
     root.querySelector('[data-action="close-modal"]').textContent = 'Close';
@@ -1764,6 +1921,8 @@ function walkInTableOptions(partySize = 0, date = today(), time = null) {
   const reservations = all('reservations');
   const tables = window.CostTrackLogic.isReservationTimeWithinOpenHours(walkInTime)
     ? all('restaurantTables').filter(table =>
+      table.status !== 'Needs cleaning'
+      &&
       Number(table.seats) >= Number(partySize || 0)
       && !reservations.some(item => item.table === table.id && item.date <= date && item.status === 'Seated')
       && !window.CostTrackLogic.tableHasReservationConflict(table.id, date, walkInTime, reservations, '', today())
@@ -1785,12 +1944,24 @@ function walkInForm() {
   }
   const available = walkInTableOptions();
   const tableMessage = `<small class="field-help walk-in-table-message ${available.tables.length ? 'is-hidden' : ''}">No available tables are currently suitable for this party.</small>`;
-  modal('Record walk-in', `<div class="form-grid"><label>Party size<input name="partySize" type="number" min="1" max="1000" required></label><label>Meal period<select name="mealPeriod"><option>All Day</option><option>Lunch</option><option>Dinner</option></select></label><label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label><label>Contact phone<input name="phone" type="tel" required></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Tables are listed only when no party is seated and no reservation overlaps the next two hours. Walk-ins are recorded as seated reservations. A phone number is required.</small></label>`, 'Record walk-in');
-  document.querySelector('#modalForm').dataset.type = 'walk-in';
+  const counts = [
+    ['Adults', 'adults'],
+    ['Senior / PWD', 'seniorPwdCount'],
+    ['Kids', 'children']
+  ];
+  const countFields = counts.map(([label, name]) =>
+    `<label>${label}<input name="${name}" type="number" min="0" max="1000" step="1" value="0" required></label>`
+  ).join('');
+  modal('Record walk-in', `<div class="form-grid">${countFields}<label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label></div><div class="form-grid"><label>Guest name (optional)<input name="name" maxlength="160" value="Walk-in guest" autocomplete="name"></label><label>Phone (optional)<input name="phone" type="tel" maxlength="40" autocomplete="tel"></label><label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="email"></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Seated time and meal period are recorded automatically. Tables must fit the total covers and have no overlapping two-hour booking.</small></label>`, 'Record walk-in');
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'walk-in';
+  const submit = form.querySelector('.modal-submit');
+  if (submit) submit.disabled = !available.tables.length;
 }
 function refreshWalkInTables(form) {
   const select = form?.elements?.table;
-  const partySize = Number(form?.elements?.partySize?.value || 0);
+  const partySize = ['adults', 'seniorPwdCount', 'children']
+    .reduce((sum, name) => sum + Number(form?.elements?.[name]?.value || 0), 0);
   if (!select) return;
   const available = walkInTableOptions(partySize);
   const selected = select.value;
@@ -1926,7 +2097,7 @@ function tableManagementPage() {
   const counts = tables.reduce((result, table) => {
     result[availabilityByTable.get(table.id).status] += 1;
     return result;
-  }, { Available: 0, Reserved: 0, Occupied: 0 });
+  }, { Available: 0, Reserved: 0, Occupied: 0, 'Needs cleaning': 0 });
   const matchingTables = tables.filter(table => {
     const availability = availabilityByTable.get(table.id);
     const capacity = Number(table.seats);
@@ -1946,7 +2117,7 @@ function tableManagementPage() {
   const canManage = ['Administrator', 'Manager'].includes(state.role);
   const capacityOptions = ['All', 'Small', 'Medium', 'Large']
     .map(value => `<option value="${value}" ${capacityFilter === value ? 'selected' : ''}>${value === 'All' ? 'All capacities' : value === 'Small' ? '1–2 seats' : value === 'Medium' ? '3–4 seats' : '5+ seats'}</option>`).join('');
-  const statusOptions = ['All', 'Available', 'Reserved', 'Occupied']
+  const statusOptions = ['All', 'Available', 'Reserved', 'Occupied', 'Needs cleaning']
     .map(value => `<option value="${value}" ${statusFilter === value ? 'selected' : ''}>${value === 'All' ? 'All statuses' : value}</option>`).join('');
   const typeOptions = ['All', 'Family', 'Casual', 'Unassigned']
     .map(value => `<option value="${value}" ${typeFilter === value ? 'selected' : ''}>${value === 'All' ? 'All table types' : value === 'Unassigned' ? 'Unclassified' : value}</option>`).join('');
@@ -1959,7 +2130,7 @@ function tableManagementPage() {
     const area = table.area || 'Unassigned';
     const booking = availability.primaryBooking;
     const historyExists = reservations.some(item => item.table === table.id);
-    const assignable = reservations.some(item =>
+    const assignable = table.status !== 'Needs cleaning' && reservations.some(item =>
       item.date === date
       && !item.table
       && window.CostTrackLogic.isReservationTimeWithinOpenHours(item.time)
@@ -1976,7 +2147,7 @@ function tableManagementPage() {
       ? `<small class="table-additional-bookings">+${availability.bookings.length - (booking ? 1 : 0)} more booking${availability.bookings.length - (booking ? 1 : 0) === 1 ? '' : 's'} on this date</small>`
       : '';
     const areaBadge = area !== 'Unassigned' ? `<span class="table-area-badge">${esc(area)}</span>` : '';
-    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>${historyExists ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>' : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`}` : ''}</div></article>`;
+    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>${historyExists ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>' : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`}` : ''}</div></article>`;
   };
   const groups = [
     { type: 'Family', area: 'Unassigned', label: 'Family tables' },
@@ -2003,7 +2174,7 @@ function tableManagementPage() {
     ? `<span class="table-management-header-actions"><button type="button" class="ghost-btn" data-action="apply-table-layout" ${layoutReady ? 'disabled' : ''}>${layoutReady ? 'Layout configured' : 'Set up restaurant layout'}</button><button type="button" class="primary-btn" data-action="open-table-form">+ Add table</button></span>`
     : '';
 
-  return `${pageHeader('Front of house', 'Table management', 'Manage the client’s seating layout and see availability derived from reservations and walk-ins.', headerActions)}<div class="table-management-summary"><div class="table-summary-card"><small>All tables</small><strong>${tables.length}</strong></div><div class="table-summary-card"><small>Total seats</small><strong>${totalSeats}</strong></div><div class="table-summary-card status-good"><small>Available</small><strong>${counts.Available}</strong></div><div class="table-summary-card status-low"><small>Reserved</small><strong>${counts.Reserved}</strong></div><div class="table-summary-card status-out"><small>Occupied</small><strong>${counts.Occupied}</strong></div></div><section class="panel table-management-panel"><div class="table-management-toolbar"><label>Date<input type="date" min="${today()}" value="${esc(date)}" data-table-date></label><label>Status<select data-table-status>${statusOptions}</select></label><label>Capacity<select data-table-capacity>${capacityOptions}</select></label><label>Table type<select data-table-type>${typeOptions}</select></label><label>Area<select data-table-area>${areaOptions}</select></label><label class="table-management-search">Search<input id="tableManagementSearch" type="search" value="${esc(state.tableManagementQuery)}" placeholder="Table or guest" aria-label="Search tables or guests"></label></div><p class="table-management-note">Availability is derived from active reservation and walk-in records, not the table’s cached status. Reservations occupy two-hour windows, with back-to-back bookings allowed; the latest start is 7:00 PM. A seated party remains Occupied after the two-hour limit until staff marks them Completed. The page refreshes status after live updates and every minute.</p>${cards}</section>`;
+  return `${pageHeader('Front of house', 'Table management', 'Manage the client’s seating layout and see availability derived from reservations and walk-ins.', headerActions)}<div class="table-management-summary"><div class="table-summary-card"><small>All tables</small><strong>${tables.length}</strong></div><div class="table-summary-card"><small>Total seats</small><strong>${totalSeats}</strong></div><div class="table-summary-card status-good"><small>Available</small><strong>${counts.Available}</strong></div><div class="table-summary-card status-low"><small>Reserved</small><strong>${counts.Reserved}</strong></div><div class="table-summary-card status-out"><small>Occupied</small><strong>${counts.Occupied}</strong></div><div class="table-summary-card status-out"><small>Needs cleaning</small><strong>${counts['Needs cleaning']}</strong></div></div><section class="panel table-management-panel"><div class="table-management-toolbar"><label>Date<input type="date" min="${today()}" value="${esc(date)}" data-table-date></label><label>Status<select data-table-status>${statusOptions}</select></label><label>Capacity<select data-table-capacity>${capacityOptions}</select></label><label>Table type<select data-table-type>${typeOptions}</select></label><label>Area<select data-table-area>${areaOptions}</select></label><label class="table-management-search">Search<input id="tableManagementSearch" type="search" value="${esc(state.tableManagementQuery)}" placeholder="Table or guest" aria-label="Search tables or guests"></label></div><p class="table-management-note">Availability is derived from active reservations and walk-ins. A table set to Needs cleaning stays unavailable until a Manager or Administrator marks it available. Reservations occupy two-hour windows; a seated party remains Occupied until completion.</p>${cards}</section>`;
 }
 async function applyRestaurantTableLayout() {
   if (!['Administrator', 'Manager'].includes(state.role)) {
@@ -2091,7 +2262,7 @@ function reservationCalendarEvents() {
   };
   return reservations.map(item => {
     const minutes = parseTime12h(item.time);
-    const guests = Number(item.actualCovers || item.guests || Number(item.adults || 0) + Number(item.children || 0));
+    const guests = Number(item.actualCovers || item.guests || reservationCategoryCount(item));
     const start = minutes === null
       ? item.date
       : `${item.date}T${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}:00`;
@@ -2210,6 +2381,14 @@ function calendarPage() {
     .map(type => `<option value="${type}" ${state.reservationCalendarType === type ? 'selected' : ''}>${type === 'All' ? 'All booking types' : type}</option>`).join('');
   return `${pageHeader('Front of house', 'Reservation calendar', 'Browse bookings by month, week, day, or agenda. Select a date to start a reservation, or select a booking to edit it.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel full-calendar-panel"><div class="full-calendar-filters"><label>Status<select data-reservation-calendar-filter="status">${statusOptions}</select></label><label>Type<select data-reservation-calendar-filter="type">${typeOptions}</select></label><label class="full-calendar-search">Search<input id="reservationCalendarSearch" type="search" value="${esc(state.reservationCalendarQuery)}" placeholder="Guest, email, phone, or table" aria-label="Search reservations"></label><div class="calendar-status-legend" aria-label="Reservation status colors"><span><i class="calendar-status-dot status-low"></i> Pending</span><span><i class="calendar-status-dot status-good"></i> Confirmed / seated / completed</span><span><i class="calendar-status-dot status-out"></i> Cancelled / no-show</span></div></div><small class="full-calendar-note">Reservations have a two-hour window; the latest start is 7:00 PM so the stay ends by closing at 9:00 PM. Calendar events show the two-hour window, and timed views display 10:00 AM–9:00 PM.</small><div id="reservationFullCalendar" aria-label="Reservations calendar"></div></div>`;
 }
+function restoreModalSubmit(form, label) {
+  const submit = form.querySelector('.modal-submit');
+  if (!submit) return;
+  submit.disabled = false;
+  submit.classList.remove('is-loading');
+  submit.removeAttribute('aria-busy');
+  submit.textContent = label;
+}
 async function handleSubmit(form) {
   const data = Object.fromEntries(new FormData(form));
   const type = form.dataset.type;
@@ -2227,6 +2406,89 @@ async function handleSubmit(form) {
   }[type];
   if (requiredAction && !window.CostTrackLogic.canPerformInventoryAction(state.role, requiredAction)) {
     return toast('You do not have permission to perform this action.', 'error');
+  }
+  if (['shift', 'shift-close', 'cash-movement', 'reservation-deposit', 'deposit-decision'].includes(type)) {
+    try {
+      let refreshAllData = true;
+      let relatedRefreshWarning = '';
+      if (type === 'shift') {
+        await window.supabaseRecord.posOpenShift(Number(data.openingCash), String(data.notes || '').trim());
+      } else if (type === 'shift-close') {
+        const result = await window.supabaseRecord.posCloseShift(editId, Number(data.countedCash), String(data.notes || '').trim());
+        if (result?.blocked) {
+          await refreshPosCollections();
+          toast(result.message || 'Resolve open bills and approvals before closing the shift.', 'error');
+          const submit = form.querySelector('.modal-submit');
+          if (submit) {
+            submit.disabled = false;
+            submit.classList.remove('is-loading');
+            submit.removeAttribute('aria-busy');
+            submit.textContent = 'Reconcile and close';
+          }
+          return;
+        }
+        const variance = Number(result.cash_variance || 0);
+        successMessage = variance < 0
+          ? `Shift closed. Shortage: ${money(Math.abs(variance))}.`
+          : variance > 0 ? `Shift closed. Overage: ${money(variance)}.` : 'Shift closed with no variance.';
+      } else if (type === 'cash-movement') {
+        await window.supabaseRecord.posRecordCashMovement(
+          editId, data.movementType, Number(data.amount), String(data.reason || '').trim(), form.dataset.movementKey
+        );
+        successMessage = 'Cash movement recorded.';
+      } else if (type === 'reservation-deposit') {
+        const result = await window.supabaseRecord.posRecordReservationDeposit(
+          editId, Number(data.amount), String(data.notes || '').trim(), form.dataset.depositKey
+        );
+        const deposit = window.supabaseRecord.mapRecord('reservationDeposits', result?.deposit);
+        if (deposit) rememberLocalChange('reservationDeposits', deposit.id);
+        upsertLocalRecord('reservationDeposits', deposit);
+        refreshAllData = false;
+        successMessage = 'Cash deposit recorded as Held.';
+      } else {
+        const result = await window.supabaseRecord.posReservationDepositDecision(
+          editId, form.dataset.decision, String(data.reason || '').trim()
+        );
+        const deposit = window.supabaseRecord.mapRecord('reservationDeposits', result?.deposit);
+        if (deposit) rememberLocalChange('reservationDeposits', deposit.id);
+        upsertLocalRecord('reservationDeposits', deposit);
+        refreshAllData = false;
+        const refundShift = form.dataset.decision === 'refund'
+          ? all('shifts').find(shift => shift.status === 'Open' && shift.openedBy === state.user?.id)
+          : null;
+        if (refundShift) {
+          try {
+            const movements = await window.supabaseRecord.loadRelated('cashMovements', 'shiftId', refundShift.id);
+            replaceLocalRelatedRecords('cashMovements', movement => movement.shiftId === refundShift.id, movements);
+          } catch (refreshError) {
+            console.error('Refund was saved, but the cashier movement list could not be refreshed.', refreshError);
+            relatedRefreshWarning = ' Shift movement details could not refresh; reload the page.';
+          }
+        }
+        successMessage = form.dataset.decision === 'refund' ? 'Deposit refunded.' : 'Deposit forfeited.';
+      }
+      if (refreshAllData) await syncWithSupabase();
+      else setPostSaveSyncState();
+      state.modalDirty = false;
+      closeModal();
+      toast(`${successMessage}${relatedRefreshWarning}`, relatedRefreshWarning ? 'error' : 'success');
+      render();
+    } catch (error) {
+      console.error(`POS ${type} failed.`, error);
+      const submit = form.querySelector('.modal-submit');
+      if (submit) {
+        submit.disabled = false;
+        submit.classList.remove('is-loading');
+        submit.removeAttribute('aria-busy');
+        submit.textContent = type === 'shift' ? 'Open shift'
+          : type === 'shift-close' ? 'Reconcile and close'
+            : type === 'cash-movement' ? 'Record movement'
+              : type === 'reservation-deposit' ? 'Record deposit'
+                : form.dataset.decision === 'refund' ? 'Refund deposit' : 'Forfeit deposit';
+      }
+      toast(friendlyRpcError(error), 'error');
+    }
+    return;
   }
   if (type === 'bill') {
     const extraLines = [...form.querySelectorAll('[data-extra-line]')].flatMap(line => {
@@ -2268,14 +2530,20 @@ async function handleSubmit(form) {
         discountId,
         discountReason,
         extraLines,
-        initialDeposit: editId ? 0 : Number(data.initialDeposit || 0),
+        tableId: data.tableId || null,
+        chargeExtraPax: Boolean(form.elements.chargeExtraPax?.checked),
         idempotencyKey: editId ? null : form.dataset.createKey
       });
-      await refreshPosCollections();
+      const savedBill = window.supabaseRecord.mapRecord('posBills', result?.bill);
+      if (!savedBill) throw new Error('The bill was saved but the server did not return its updated details.');
+      rememberLocalChange('posBills', savedBill.id);
+      upsertLocalRecord('posBills', savedBill);
+      const savedLines = (result.lines || []).map(line => window.supabaseRecord.mapRecord('billLines', line));
+      savedLines.forEach(line => rememberLocalChange('billLines', line.id));
+      replaceLocalRelatedRecords('billLines', line => line.billId === savedBill.id, savedLines);
       state.modalDirty = false;
       closeModal();
-      const savedBill = result?.bill || {};
-      toast(`${savedBill.bill_number || 'Bill'} saved. Subtotal ${money(savedBill.subtotal)} · Balance ${money(savedBill.balance_due)}.`);
+      toast(`${savedBill.billNumber || 'Bill'} saved. Subtotal ${money(savedBill.subtotal)} · Balance ${money(savedBill.balanceDue)}.`);
       render();
     } catch (error) {
       console.error('POS bill save failed.', error);
@@ -2292,16 +2560,55 @@ async function handleSubmit(form) {
   }
   if (type === 'bill-close') {
     try {
+      const billBeforeClose = all('posBills').find(bill => bill.id === editId);
+      rememberLocalChange('posBills', editId);
+      if (billBeforeClose?.reservationId) rememberLocalChange('reservations', billBeforeClose.reservationId);
+      if (billBeforeClose?.tableId) rememberLocalChange('restaurantTables', billBeforeClose.tableId);
       const result = await window.supabaseRecord.posCloseBill(
         editId,
         Number(data.tenderedAmount),
         form.dataset.paymentKey
       );
-      await refreshPosCollections();
+      const closedBill = window.supabaseRecord.mapRecord('posBills', result?.bill);
+      if (!closedBill) throw new Error('The bill was closed but the server did not return its updated details.');
+      rememberLocalChange('posBills', closedBill.id);
+      upsertLocalRecord('posBills', closedBill);
+      const payment = window.supabaseRecord.mapRecord('billPayments', result?.payment);
+      if (payment) {
+        rememberLocalChange('billPayments', payment.id);
+        upsertLocalRecord('billPayments', payment);
+      }
+      let relatedRefreshWarning = '';
+      try {
+        const [payments, reservation, table, deposits] = await Promise.all([
+          window.supabaseRecord.loadRelated('billPayments', 'billId', closedBill.id),
+          closedBill.reservationId ? window.supabaseRecord.loadRecord('reservations', closedBill.reservationId) : null,
+          closedBill.tableId ? window.supabaseRecord.loadRecord('restaurantTables', closedBill.tableId) : null,
+          closedBill.reservationId ? window.supabaseRecord.loadRelated('reservationDeposits', 'reservationId', closedBill.reservationId) : null
+        ]);
+        payments.forEach(item => rememberLocalChange('billPayments', item.id));
+        replaceLocalRelatedRecords('billPayments', item => item.billId === closedBill.id, payments);
+        if (reservation) {
+          rememberLocalChange('reservations', reservation.id);
+          upsertLocalRecord('reservations', reservation);
+        }
+        if (table) {
+          rememberLocalChange('restaurantTables', table.id);
+          upsertLocalRecord('restaurantTables', table);
+        }
+        if (closedBill.reservationId && deposits) {
+          deposits.forEach(item => rememberLocalChange('reservationDeposits', item.id));
+          replaceLocalRelatedRecords('reservationDeposits', item => item.reservationId === closedBill.reservationId, deposits);
+        }
+      } catch (refreshError) {
+        console.error('Bill closed, but related records could not be refreshed.', refreshError);
+        relatedRefreshWarning = ' The bill closed, but linked reservation, table, or deposit details could not refresh; reload the page.';
+      }
+      setPostSaveSyncState();
       state.modalDirty = false;
       closeModal();
       const changeAmount = Number(result?.payment?.change_amount || 0);
-      toast(`Bill closed. Change due: ${money(changeAmount)}.`);
+      toast(`Bill closed. Change due: ${money(changeAmount)}.${relatedRefreshWarning}`, relatedRefreshWarning ? 'error' : 'success');
       render();
     } catch (error) {
       console.error('POS bill close failed.', error);
@@ -2318,8 +2625,14 @@ async function handleSubmit(form) {
   }
   if (type === 'bill-void-request') {
     try {
-      await window.supabaseRecord.posRequestBillVoid(editId, data.voidReason.trim());
-      await refreshPosCollections();
+      const result = await window.supabaseRecord.posRequestBillVoid(editId, data.voidReason.trim());
+      const approval = window.supabaseRecord.mapRecord('billApprovals', result?.approval);
+      const bill = window.supabaseRecord.mapRecord('posBills', result?.bill);
+      if (approval) rememberLocalChange('billApprovals', approval.id);
+      if (bill) rememberLocalChange('posBills', bill.id);
+      upsertLocalRecord('billApprovals', approval);
+      upsertLocalRecord('posBills', bill);
+      setPostSaveSyncState();
       state.modalDirty = false;
       closeModal();
       toast('Void request sent to a Manager or Administrator.');
@@ -2339,11 +2652,37 @@ async function handleSubmit(form) {
   }
   if (type === 'bill-approval-decision') {
     try {
-      await window.supabaseRecord.posDecideBillApproval(editId, form.dataset.decision, data.decisionReason.trim());
-      await refreshPosCollections();
+      const result = await window.supabaseRecord.posDecideBillApproval(editId, form.dataset.decision, data.decisionReason.trim());
+      const approval = window.supabaseRecord.mapRecord('billApprovals', result?.approval);
+      const bill = window.supabaseRecord.mapRecord('posBills', result?.bill);
+      if (approval) rememberLocalChange('billApprovals', approval.id);
+      if (bill) rememberLocalChange('posBills', bill.id);
+      upsertLocalRecord('billApprovals', approval);
+      upsertLocalRecord('posBills', bill);
+      let relatedRefreshWarning = '';
+      if (approval?.requestType === 'void' && approval.status === 'Approved' && bill) {
+        try {
+          const requests = [];
+          if (bill.reservationId) {
+            requests.push(window.supabaseRecord.loadRelated('reservationDeposits', 'reservationId', bill.reservationId)
+              .then(records => replaceLocalRelatedRecords('reservationDeposits', item => item.reservationId === bill.reservationId, records)));
+          }
+          const refundShift = all('shifts').find(shift => shift.status === 'Open' && shift.openedBy === state.user?.id);
+          if (refundShift) {
+            requests.push(window.supabaseRecord.loadRelated('cashMovements', 'shiftId', refundShift.id)
+              .then(records => replaceLocalRelatedRecords('cashMovements', item => item.shiftId === refundShift.id, records)));
+          }
+          await Promise.all(requests);
+        } catch (refreshError) {
+          console.error('Void approval was saved, but related deposit or shift details could not be refreshed.', refreshError);
+          relatedRefreshWarning = ' Linked deposit or shift details could not refresh; reload the page.';
+        }
+      }
+      setPostSaveSyncState();
       state.modalDirty = false;
       closeModal();
-      toast(form.dataset.decision === 'approve' ? 'Approval recorded.' : 'Request rejected.');
+      const approvalMessage = form.dataset.decision === 'approve' ? 'Approval recorded.' : 'Request rejected.';
+      toast(`${approvalMessage}${relatedRefreshWarning}`, relatedRefreshWarning ? 'error' : 'success');
       render();
     } catch (error) {
       console.error('POS approval decision failed.', error);
@@ -2452,48 +2791,68 @@ async function handleSubmit(form) {
     if (!record.code || !record.name) return toast('Charge code and name are required.', 'error');
     await save('chargeItems', editId ? all('chargeItems').map(item => item.id === editId ? { ...item, ...record } : item) : [record, ...all('chargeItems')]);
     successMessage = editId ? 'Charge item updated.' : 'Charge item created.';
-  } else if (type === 'shift') {
-    const record = {
-      id: editId || id('POSS'),
-      code: String(data.shiftCode || '').trim() || `SHIFT-${new Date().toISOString().slice(0,10).replace(/-/g,'')}`,
-      openedBy: state.user?.id || null,
-      openedAt: data.openedAt || new Date().toISOString(),
-      closedAt: data.closedAt || null,
-      status: data.status || 'Open',
-      openingFloat: Number(data.openingFloat || 0),
-      cashSales: Number(data.cashSales || 0),
-      cardSales: Number(data.cardSales || 0),
-      declaredCash: Number(data.declaredCash || 0),
-      notes: String(data.notes || '').trim()
-    };
-    await save('shifts', editId ? all('shifts').map(item => item.id === editId ? { ...item, ...record } : item) : [record, ...all('shifts')]);
-    successMessage = editId ? 'Shift updated.' : 'Shift opened.';
   } else if (type === 'rate') {
     const record = { id: editId || id('RATE'), mealPeriod: data.mealPeriod, dayType: data.dayType, adultRate: Number(data.adultRate), childRate: Number(data.childRate), seniorPwdRate: Number(data.seniorPwdRate), effectiveFrom: data.effectiveFrom, effectiveTo: data.effectiveTo || null, isActive: data.isActive === 'true' };
     await save('buffetRates', editId ? all('buffetRates').map(item => item.id === editId ? { ...item, ...record } : item) : [record, ...all('buffetRates')]);
   } else if (type === 'walk-in') {
-    const partySize = Number(data.partySize);
+    let counts;
+    try {
+      counts = window.CostTrackLogic.normalizeReservationGuestCounts(
+        data.adults,
+        data.seniorPwdCount,
+        data.children
+      );
+    } catch (error) {
+      restoreModalSubmit(form, 'Record walk-in');
+      return toast(error.message, 'error');
+    }
     const now = new Date();
     const date = today();
     const time = window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
     const selectedTable = all('restaurantTables').find(table => table.id === data.table);
     if (!window.CostTrackLogic.isReservationTimeWithinOpenHours(time)) {
+      restoreModalSubmit(form, 'Record walk-in');
       return toast('Walk-ins must start early enough to finish by closing. The latest seating time is 7:00 PM.', 'error');
     }
-    if (!selectedTable || Number(selectedTable.seats) < partySize) return toast('Choose an available table with enough seats for this party.', 'error');
+    if (!selectedTable || Number(selectedTable.seats) < counts.total) {
+      restoreModalSubmit(form, 'Record walk-in');
+      return toast('Choose an available table with enough seats for this party.', 'error');
+    }
     const reservations = all('reservations');
     const hasUnresolvedSeating = reservations.some(item =>
       item.table === selectedTable.id && item.date <= date && item.status === 'Seated'
     );
     if (hasUnresolvedSeating
       || window.CostTrackLogic.tableHasReservationConflict(selectedTable.id, date, time, reservations, '', today())) {
+      restoreModalSubmit(form, 'Record walk-in');
       return toast('That table is no longer available for a two-hour walk-in. Choose another table.', 'error');
     }
-    const record = { id: id('RS'), name: 'Walk-in guest', email: '', phone: data.phone, date, time, guests: partySize, adults: partySize, children: 0, type: 'Walk-in', mealPeriod: data.mealPeriod, status: 'Seated', seatedAt: now.toISOString(), actualCovers: partySize, table: data.table, request: data.notes || '', preference: '' };
+    const record = {
+      id: id('RS'),
+      name: String(data.name || '').trim() || 'Walk-in guest',
+      email: String(data.email || '').trim(),
+      phone: String(data.phone || '').trim(),
+      date,
+      time,
+      mealPeriod: reservationMealPeriod({ time }),
+      guests: counts.total,
+      adults: counts.adults,
+      seniorPwdCount: counts.seniorPwdCount,
+      children: counts.children,
+      type: 'Walk-in',
+      source: 'Walk-in',
+      status: 'Seated',
+      seatedAt: now.toISOString(),
+      actualCovers: counts.total,
+      table: data.table,
+      request: data.notes || '',
+      preference: ''
+    };
     try {
       await saveRecord('reservations', record);
       await refetchCollection('restaurantTables');
     } catch (error) {
+      restoreModalSubmit(form, 'Record walk-in');
       toast(friendlyRpcError(error), 'error');
       return;
     }
@@ -2514,13 +2873,22 @@ async function handleSubmit(form) {
     await save('revenueRecords', editId ? all('revenueRecords').map(item => item.id === editId ? record : item) : [record, ...all('revenueRecords')]);
   } else if (type === 'reservation') {
     const existing = editId ? all('reservations').find(item => item.id === editId) : null;
-    if (editId && !existing) return toast('This reservation is no longer available. Reload the page and try again.', 'error');
+    if (editId && !existing) {
+      restoreModalSubmit(form, 'Save changes');
+      return toast('This reservation is no longer available. Reload the page and try again.', 'error');
+    }
     const isPastReservation = Boolean(existing?.date && existing.date < today());
+    const retryLabel = isPastReservation ? 'Save correction' : editId ? 'Save changes' : 'Create reservation';
+    const restoreReservationSubmit = () => restoreModalSubmit(form, retryLabel);
     let record;
     if (isPastReservation) {
-      if (!['Administrator', 'Manager'].includes(state.role)) return toast('Past reservations are view-only for your role.', 'error');
+      if (!['Administrator', 'Manager'].includes(state.role)) {
+        restoreReservationSubmit();
+        return toast('Past reservations are view-only for your role.', 'error');
+      }
       const correctionReason = String(data.correctionReason || '').trim();
       if (correctionReason.length < 10 || correctionReason.length > 500) {
+        restoreReservationSubmit();
         return toast('Enter a correction reason between 10 and 500 characters.', 'error');
       }
       const correctedFields = {
@@ -2532,6 +2900,7 @@ async function handleSubmit(form) {
         request: String(data.request || '').trim()
       };
       if (!Object.entries(correctedFields).some(([key, value]) => value !== String(existing[key] || '').trim())) {
+        restoreReservationSubmit();
         return toast('Change at least one guest detail or note before saving a correction.', 'error');
       }
       record = {
@@ -2543,15 +2912,47 @@ async function handleSubmit(form) {
     } else {
       const dateOrTimeChanged = !existing || data.date !== existing.date || data.time !== existing.time;
       if (dateOrTimeChanged && !window.CostTrackLogic.isReservationTimeWithinOpenHours(data.time)) {
+        restoreReservationSubmit();
         return toast('Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.', 'error');
       }
-      const adults = data.adults === undefined ? Number(data.guests || 0) : Number(data.adults);
-      const children = Number(data.children || 0);
+      let counts;
+      try {
+        counts = window.CostTrackLogic.normalizeReservationGuestCounts(
+          data.adults === undefined ? Number(data.guests || 0) : data.adults,
+          data.seniorPwdCount || 0,
+          data.children || 0
+        );
+      } catch (error) {
+        restoreReservationSubmit();
+        return toast(error.message, 'error');
+      }
+      const email = String(data.email || '').trim();
+      const phone = String(data.phone || '').trim();
+      const reservationType = existing?.type || 'Reservation';
+      if (reservationType !== 'Walk-in' && !email && !phone) {
+        restoreReservationSubmit();
+        return toast('Enter a phone number or email address for this reservation.', 'error');
+      }
+      const packageChargeItemId = String(data.packageChargeItemId || '');
+      const packageTierId = String(data.packageTierId || '');
+      const packagePaxCount = data.packagePaxCount === '' ? null : Number(data.packagePaxCount);
+      if ((packageChargeItemId || packageTierId || packagePaxCount != null)
+        && (!packageChargeItemId || !packageTierId || !Number.isInteger(packagePaxCount) || packagePaxCount < 1 || packagePaxCount > 1000)) {
+        restoreReservationSubmit();
+        return toast('Choose a package and tier and enter a booked pax count between 1 and 1,000.', 'error');
+      }
       if (data.table) {
         const selectedTable = all('restaurantTables').find(table => table.id === data.table);
-        if (!selectedTable) return toast('The selected table is no longer available. Reload and try again.', 'error');
-        if (Number(selectedTable.seats) < adults + children) return toast('Choose a table with enough seats for this party.', 'error');
+        if (!selectedTable) {
+          restoreReservationSubmit();
+          return toast('The selected table is no longer available. Reload and try again.', 'error');
+        }
+        if (Number(selectedTable.seats) < counts.total) {
+          restoreReservationSubmit();
+          return toast('Choose a table with enough seats for this party.', 'error');
+        }
         if (window.CostTrackLogic.tableHasReservationConflict(data.table, data.date, data.time, all('reservations'), editId, today())) {
+          restoreReservationSubmit();
           return toast('That table already has an overlapping two-hour booking.', 'error');
         }
       }
@@ -2561,9 +2962,17 @@ async function handleSubmit(form) {
           data,
           editId || form.dataset.reservationId || (form.dataset.reservationId = id('RS'))
         ),
-        adults,
-        children,
-        guests: adults + children,
+        name: String(data.name || '').trim() || (reservationType === 'Walk-in' ? 'Walk-in guest' : ''),
+        email,
+        phone,
+        adults: counts.adults,
+        seniorPwdCount: counts.seniorPwdCount,
+        children: counts.children,
+        guests: counts.total,
+        source: data.source || '',
+        packageChargeItemId,
+        packageTierId,
+        packagePaxCount,
         table: data.table || '',
         correctionReason: existing?.correctionReason || ''
       };
@@ -2684,6 +3093,9 @@ async function handleSubmit(form) {
 async function transitionReservation(itemId, nextStatus) {
   const reservation = all('reservations').find(item => item.id === itemId);
   if (!reservation) return toast('Reservation not found.', 'error');
+  if (nextStatus === 'Completed') {
+    return toast('Reservations are completed automatically when their linked bill is closed and fully settled.', 'error');
+  }
   if (reservation.date < today()) return toast('Past reservations are kept for history and cannot change status.', 'error');
   const valid = { Pending: ['Confirmed', 'Cancelled'], Confirmed: ['Seated', 'No-show', 'Cancelled'], Seated: ['Completed'] };
   if (!valid[reservation.status]?.includes(nextStatus)) return toast('That reservation status transition is not valid.', 'error');
@@ -2700,26 +3112,9 @@ async function transitionReservation(itemId, nextStatus) {
     await saveRecord('reservations', updated);
     if (reservation.table) await refetchCollection('restaurantTables');
     toast(`Reservation marked ${nextStatus}.`);
-    if (nextStatus === 'Completed' && canCreateDraft() && confirm('Create revenue draft?')) {
-      await createRevenueDraft(itemId);
-    }
     render();
   } catch (error) {
     toast(friendlyRpcError(error), 'error');
-  }
-}
-async function createRevenueDraft(reservationId) {
-  if (!canCreateDraft() || !window.supabaseRecord?.createRevenueDraft) return toast('Revenue draft creation is unavailable.', 'error');
-  const button = document.querySelector(`[data-action="create-revenue-draft"][data-id="${CSS.escape(reservationId)}"]`);
-  if (button) { button.disabled = true; button.textContent = 'Creating…'; }
-  try {
-    await window.supabaseRecord.createRevenueDraft(reservationId);
-    toast(state.role === 'Receptionist' ? 'Revenue draft created successfully.' : 'Revenue draft created. A manager or administrator must confirm it.');
-    await syncWithSupabase();
-  } catch (error) {
-    console.error('Revenue draft creation failed.', error);
-    toast(friendlyRpcError(error), 'error');
-    if (button) { button.disabled = false; button.textContent = 'Create revenue draft'; }
   }
 }
 function confirmRevenueForm(record) {
@@ -2754,14 +3149,26 @@ function billExtraLineMarkup(line = {}, disabled = false) {
 }
 function billForm(item = {}) {
   const editing = Boolean(item.id);
+  if (editing && state.role === 'Receptionist' && item.createdBy !== state.user?.id) {
+    return toast('Receptionists can only view bills they created.', 'error');
+  }
+  if (!editing && !all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id)) {
+    return toast('Open your cashier shift before creating a bill.', 'error');
+  }
   const editable = !editing || (item.status === 'Open'
     && (state.role !== 'Receptionist' || item.createdBy === state.user?.id));
   const disabled = editable ? '' : 'disabled';
   const billLines = editing
     ? all('billLines').filter(line => line.billId === item.id && line.lineType === 'charge_item' && !line.isVoided)
     : [];
+  const packageLines = editing
+    ? all('billLines').filter(line => line.billId === item.id && line.lineType === 'package' && !line.isVoided)
+    : [];
   const extraLines = billLines.length ? billLines : (editable ? [{}] : []);
-  const reservations = all('reservations').map(res => `<option value="${esc(res.id)}" ${item.reservationId === res.id ? 'selected' : ''}>${esc(res.name || 'Guest')} · ${esc(res.date)} ${esc(res.time)}</option>`).join('');
+  const selectedReservation = all('reservations').find(res => res.id === item.reservationId);
+  const reservations = all('reservations').filter(res => res.status === 'Seated' || res.id === item.reservationId)
+    .map(res => `<option value="${esc(res.id)}" ${item.reservationId === res.id ? 'selected' : ''}>${esc(res.name || 'Guest')} · ${esc(res.date)} ${esc(res.time)}${res.status === 'Seated' ? ' · Seated' : ''}</option>`).join('');
+  const tableOptions = all('restaurantTables').map(table => `<option value="${esc(table.id)}" ${item.tableId === table.id || (!item.tableId && selectedReservation?.table === table.id) ? 'selected' : ''}>${esc(table.id)} · ${Number(table.seats)} seats</option>`).join('');
   const discounts = all('discounts').filter(discount =>
     (discount.isActive !== false && (discount.appliesTo || 'bill') === 'bill') || discount.id === item.discountId
   ).map(discount => `<option value="${esc(discount.id)}" ${item.discountId === discount.id ? 'selected' : ''}>${esc(discount.name)} · ${esc(discount.discountType)} ${Number(discount.value || 0)}${discount.discountType === 'percent' ? '%' : ''}</option>`).join('');
@@ -2772,18 +3179,48 @@ function billForm(item = {}) {
     : '';
   const totals = editing ? `<section class="panel"><div class="panel-title">Server-calculated totals</div><div class="form-grid">
       <div>Subtotal <strong>${money(item.subtotal)}</strong></div><div>Service charge <strong>${money(item.serviceCharge)}</strong></div>
-      <div>Discount <strong>${money(item.discountTotal)}</strong></div><div>Deposits (payments) <strong>${money(item.depositTotal)}</strong></div>
+      <div>Discount <strong>${money(item.discountTotal)}</strong></div><div>Less: Deposit <strong>${money(item.depositTotal)}</strong></div>
       <div>Cash paid <strong>${money(item.paidTotal)}</strong></div><div>Balance due <strong>${money(item.balanceDue)}</strong></div>
+      ${packageLines.map(line => `<div class="full">Package <strong>${esc(line.description)} · ${Number(line.quantity)} × ${money(line.unitPrice)}</strong></div>`).join('')}
       ${revenueTotals}
       <div>Customers served <strong>${Number(item.customersServed || 0)}</strong></div>
     </div>${pendingApproval ? `<p class="field-help">Full discount approval pending (${esc(pendingApproval.requestedAt)}).</p>` : ''}</section>` : '<p class="field-help">All totals and prices are calculated by Supabase when you save.</p>';
+  const canRequestVoid = editing && ['Open', 'Closed'].includes(item.status)
+    && (state.role !== 'Receptionist' || item.createdBy === state.user?.id);
   const actionButtons = editing
-    ? `<div class="pos-bill-actions">${editable ? `<button type="button" class="ghost-btn" data-action="close-bill" data-id="${esc(item.id)}">Take cash &amp; close</button><button type="button" class="ghost-btn" data-action="request-bill-void" data-id="${esc(item.id)}">Request void</button>` : ''}<button type="button" class="ghost-btn" data-action="print-bill" data-id="${esc(item.id)}">Print billing statement</button></div>`
+    ? `<div class="pos-bill-actions">${editable ? `<button type="button" class="ghost-btn" data-action="close-bill" data-id="${esc(item.id)}">Take cash &amp; close</button>` : ''}${canRequestVoid ? `<button type="button" class="ghost-btn" data-action="request-bill-void" data-id="${esc(item.id)}">Request void</button>` : ''}<button type="button" class="ghost-btn" data-action="print-bill" data-id="${esc(item.id)}">Print billing statement</button></div>`
+    : '';
+  const extraPaxRate = Number(all('posSettings').find(setting => setting.key === 'pos_extra_pax_rate')?.value || 0);
+  const extraPaxCount = selectedReservation?.packagePaxCount
+    ? Math.max(0, Number(selectedReservation.actualCovers || selectedReservation.guests || 0) - Number(selectedReservation.packagePaxCount))
+    : 0;
+  const extraPaxSection = selectedReservation?.packageChargeItemId && extraPaxCount > 0
+    ? `<label class="full pos-extra-pax-choice"><input type="checkbox" name="chargeExtraPax" ${disabled}> Add ${extraPaxCount} extra pax${extraPaxRate > 0 ? ` at ${money(extraPaxRate)} each` : ''}<small class="field-help">${extraPaxRate > 0 ? 'Optional charge; the server calculates the amount.' : 'No extra-pax rate is configured. Continue without a charge or ask an Administrator to set one.'}</small></label>`
+    : '';
+  const heldReservationDeposits = selectedReservation
+    ? all('reservationDeposits').filter(deposit => deposit.reservationId === selectedReservation.id
+      && deposit.status === 'Held' && !deposit.billId)
+    : [];
+  const heldReservationDepositTotal = heldReservationDeposits.reduce(
+    (total, deposit) => total + Number(deposit.amount || 0), 0
+  );
+  const selectedPackageItem = selectedReservation?.packageChargeItemId
+    ? all('chargeItems').find(charge => charge.id === selectedReservation.packageChargeItemId)
+    : null;
+  const selectedPackageTier = selectedReservation?.packageTierId
+    ? all('packageTiers').find(tier => tier.id === selectedReservation.packageTierId)
+    : null;
+  const reservationPrefill = !editing && selectedReservation
+    ? `<section class="panel pos-reservation-prefill"><strong>Reservation prefill</strong><div>${selectedPackageItem && selectedPackageTier
+      ? `Package line: ${esc(selectedPackageItem.name)} · ${esc(selectedPackageTier.name)} × ${Number(selectedReservation.packagePaxCount || 0)} pax · ${money(Number(selectedPackageTier.basePrice || 0) * Number(selectedReservation.packagePaxCount || 0))} (server adds this on save).`
+      : 'No package is booked.'}</div><div>Held deposit: ${money(heldReservationDepositTotal)}${heldReservationDepositTotal ? ' (a payment, applied at close; not a discount)' : ''}</div><div>Table: ${esc(selectedReservation.table || 'None assigned')}</div></section>`
     : '';
   const content = `<p class="field-help">${editing ? `Bill ${esc(item.billNumber)} · ${esc(item.status)}${item.createdAt ? ` · Created ${esc(item.createdAt)}` : ''}` : 'Cash-only billing. Sales do not deduct inventory. Comped guests count as served at zero.'}</p>
+    ${reservationPrefill}
     <div class="form-grid">
-      <label>Customer name<input name="customerName" value="${esc(item.customerName || 'Walk-in')}" maxlength="160" ${disabled} required></label>
-      <label>Reservation (optional)<select name="reservationId" ${disabled}><option value="">Walk-in / no reservation</option>${reservations}</select></label>
+      <label>Customer name<input name="customerName" value="${esc(item.customerName || selectedReservation?.name || 'Walk-in')}" maxlength="160" ${disabled} required></label>
+      <label>Seated reservation<select name="reservationId" ${disabled || editing ? 'disabled' : ''}><option value="">Walk-in / no reservation</option>${reservations}</select>${editing ? `<input type="hidden" name="reservationId" value="${esc(item.reservationId || '')}">` : ''}</label>
+      <label>Table (optional)<select name="tableId" ${disabled}><option value="">No table</option>${tableOptions}</select></label>
     </div>
     <fieldset class="product-form-section"><legend>Head counts</legend><div class="form-grid">
       <label>Adult × ${money(item.adultRate || 449)}<input name="adultCount" type="number" min="0" max="1000" step="1" value="${Number(item.adultCount || 0)}" ${disabled} required></label>
@@ -2791,12 +3228,12 @@ function billForm(item = {}) {
       <label>Kids × ${money(item.kidsRate || 225)}<input name="kidsCount" type="number" min="0" max="1000" step="1" value="${Number(item.kidsCount || 0)}" ${disabled} required></label>
       <label>Comped × ₱0.00<input name="compedCount" type="number" min="0" max="1000" step="1" value="${Number(item.compedCount || 0)}" ${disabled} required></label>
     </div></fieldset>
+    ${extraPaxSection}
     <fieldset class="product-form-section"><legend>Extras</legend><div class="field-help">Extra item prices are snapshotted from the charge catalog. Stock is never changed.</div><div class="pos-extra-lines">${extraLines.map(line => billExtraLineMarkup(line, !editable)).join('')}</div>${editable ? '<button type="button" class="ghost-btn compact-btn" data-action="add-bill-extra">+ Add extra</button>' : ''}</fieldset>
     <fieldset class="product-form-section"><legend>Discount</legend><div class="form-grid">
       <label>Discount<select name="discountId" ${disabled}><option value="">No discount</option>${discounts}</select></label>
       <label class="full">Reason (required when a discount is selected)<textarea name="discountReason" rows="2" maxlength="500" ${disabled}>${esc(item.discountReason || '')}</textarea></label>
     </div><small class="field-help">Full-bill discounts require Manager/Administrator approval before close.</small></fieldset>
-    ${editing ? '' : '<label>Deposit already paid (optional)<input name="initialDeposit" type="number" min="0" max="10000000" step="0.01" value="0" required><small class="field-help">Recorded as a deposit payment, not a discount.</small></label>'}
     <label>Notes<textarea name="notes" rows="2" maxlength="1000" ${disabled}>${esc(item.notes || '')}</textarea></label>
     ${totals}${actionButtons}`;
   modal(editing ? `${editable ? 'Edit' : 'View'} bill ${item.billNumber || ''}` : 'Create bill',
@@ -2806,9 +3243,17 @@ function billForm(item = {}) {
   if (editing) form.dataset.id = item.id;
   else form.dataset.createKey = id('POSCREATE');
 }
-function billCloseForm(bill) {
+async function billCloseForm(bill) {
+  let preview;
+  try {
+    preview = await window.supabaseRecord.posBillClosePreview(bill.id);
+  } catch (error) {
+    console.error('Bill close preview failed.', error);
+    return toast(friendlyRpcError(error), 'error');
+  }
+  const minimum = Number(preview.balance_after_deposit || 0);
   modal(`Take cash · ${esc(bill.billNumber)}`,
-    `<p>Balance due: <strong>${money(bill.balanceDue)}</strong></p><label>Cash tendered<input name="tenderedAmount" type="number" min="${Number(bill.balanceDue || 0).toFixed(2)}" step="0.01" value="${Number(bill.balanceDue || 0).toFixed(2)}" required><small class="field-help">The server records the applied payment and calculates change.</small></label>`,
+    `<div class="pos-payment-summary"><div>Balance before deposit <strong>${money(preview.balance_due)}</strong></div><div>Less: Deposit <strong>${money(preview.deposit_to_apply)}</strong></div><div>Balance due <strong>${money(minimum)}</strong></div>${Number(preview.deposit_remainder || 0) > 0 ? `<p class="field-help">Deposit remainder held for follow-up: ${money(preview.deposit_remainder)}.</p>` : ''}</div><label>Cash tendered<input name="tenderedAmount" type="number" min="${minimum.toFixed(2)}" step="0.01" value="${minimum.toFixed(2)}" required><small class="field-help">The server applies eligible deposits, records the cash payment, and calculates change.</small></label>`,
     'Confirm cash and close', 'pos-payment-modal');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'bill-close';
@@ -2817,7 +3262,7 @@ function billCloseForm(bill) {
 }
 function billVoidRequestForm(bill) {
   modal(`Request void · ${esc(bill.billNumber)}`,
-    '<p>A Manager or Administrator must approve this request. Closed bills cannot be voided here.</p><label>Reason<textarea name="voidReason" maxlength="500" rows="3" required></textarea></label>',
+    `<p>A Manager or Administrator must approve this request. ${bill.status === 'Closed' ? 'Any cash paid will be refunded from a Manager’s open shift, and applied deposits return to Held.' : ''}</p><label>Reason<textarea name="voidReason" maxlength="500" rows="3" required></textarea></label>`,
     'Request void', 'pos-approval-modal');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'bill-void-request';
@@ -2838,9 +3283,12 @@ function billApprovalDecisionForm(approval, decision) {
 function printBillingStatement(billId) {
   const bill = all('posBills').find(item => item.id === billId);
   if (!bill) return toast('This bill is no longer available.', 'error');
+  if (state.role === 'Receptionist' && bill.createdBy !== state.user?.id) {
+    return toast('Receptionists can only print bills they created.', 'error');
+  }
   const lines = all('billLines').filter(line => line.billId === bill.id && !line.isVoided);
   const payments = all('billPayments').filter(payment => payment.billId === bill.id);
-  const mealLines = [
+  const mealLines = lines.some(line => line.lineType === 'package') ? [] : [
     ['Adult', bill.adultCount, bill.adultRate],
     ['Senior / PWD', bill.seniorCount, bill.seniorRate],
     ['Kids', bill.kidsCount, bill.kidsRate],
@@ -2868,7 +3316,7 @@ function printBillingStatement(billId) {
     <div><span>Service charge</span><strong>${money(bill.serviceCharge)}</strong></div>
     <div><span>Discount</span><strong>−${money(bill.discountTotal)}</strong></div>
     ${bill.discountReason ? `<div><span>Discount reason</span><span>${esc(bill.discountReason)}</span></div>` : ''}
-    <div><span>Deposit payments</span><strong>−${money(bill.depositTotal)}</strong></div>
+    <div><span>Less: Deposit</span><strong>−${money(bill.depositTotal)}</strong></div>
     <div><span>Cash payment applied</span><strong>−${money(bill.paidTotal)}</strong></div>
     ${cashPayment ? `<div><span>Cash tendered</span><strong>${money(cashPayment.tenderedAmount)}</strong></div><div><span>Change</span><strong>${money(cashPayment.changeAmount)}</strong></div>` : ''}
     <div class="balance"><span>Balance due</span><span>${money(bill.balanceDue)}</span></div></div>
@@ -2879,25 +3327,135 @@ function printBillingStatement(billId) {
   printWindow.document.write(doc);
   printWindow.document.close();
 }
-function shiftForm(item = {}) {
-  const value = key => item?.[key] ?? '';
-  const content = `<div class="form-grid"><label>Shift code<input name="shiftCode" value="${esc(value('code') || `SHIFT-${new Date().toISOString().slice(0,10).replace(/-/g,'')}`)}" required></label><label>Status<select name="status"><option value="Open" ${value('status') === 'Open' ? 'selected' : ''}>Open</option><option value="Closed" ${value('status') === 'Closed' ? 'selected' : ''}>Closed</option><option value="Needs review" ${value('status') === 'Needs review' ? 'selected' : ''}>Needs review</option></select></label><label>Opened at<input name="openedAt" type="datetime-local" value="${esc(value('openedAt') ? value('openedAt').slice(0,16) : new Date().toISOString().slice(0,16))}"></label><label>Closed at<input name="closedAt" type="datetime-local" value="${esc(value('closedAt') ? value('closedAt').slice(0,16) : '')}"></label><label>Opening float<input name="openingFloat" type="number" min="0" step="0.01" value="${Number(value('openingFloat') || 0).toFixed(2)}"></label><label>Cash sales<input name="cashSales" type="number" min="0" step="0.01" value="${Number(value('cashSales') || 0).toFixed(2)}"></label><label>Card sales<input name="cardSales" type="number" min="0" step="0.01" value="${Number(value('cardSales') || 0).toFixed(2)}"></label><label>Declared cash<input name="declaredCash" type="number" min="0" step="0.01" value="${Number(value('declaredCash') || 0).toFixed(2)}"></label><label class="full">Notes<textarea name="notes" rows="3">${esc(value('notes'))}</textarea></label></div>`;
-  modal(item.id ? 'Edit shift' : 'Open shift', content, item.id ? 'Save shift' : 'Open shift');
+function shiftForm() {
+  if (all('shifts').some(item => item.status === 'Open' && item.openedBy === state.user?.id)) {
+    return toast('You already have an open shift.', 'error');
+  }
+  modal('Open cashier shift',
+    '<label>Starting cash<input name="openingCash" type="number" min="0" step="0.01" value="0.00" required></label><label>Notes<textarea name="notes" rows="2" maxlength="500"></textarea></label>',
+    'Open shift');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'shift';
-  if (item.id) form.dataset.id = item.id;
+}
+function cashMovementForm(shift) {
+  modal(`Cash movement · ${esc(shift.code)}`,
+    '<div class="form-grid"><label>Movement<select name="movementType" required><option value="paid_in">Paid in</option><option value="paid_out">Paid out</option></select></label><label>Amount<input name="amount" type="number" min="0.01" step="0.01" required></label></div><label>Reason<textarea name="reason" minlength="1" maxlength="500" required></textarea></label>',
+    'Record movement');
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'cash-movement';
+  form.dataset.id = shift.id;
+  form.dataset.movementKey = id('POSMOV');
+}
+function reservationDepositForm(reservation) {
+  modal(`Cash deposit · ${esc(reservation.name || 'Reservation')}`,
+    `<p>Cash received for reservation ${esc(reservation.date)} ${esc(reservation.time)}. It will be held as a payment, never a discount.</p><label>Cash amount<input name="amount" type="number" min="0.01" step="0.01" required></label><label>Notes<textarea name="notes" maxlength="500"></textarea></label>`,
+    'Record deposit');
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'reservation-deposit';
+  form.dataset.id = reservation.id;
+  form.dataset.depositKey = id('POSDEP');
+}
+function depositDecisionForm(deposit, decision) {
+  const label = decision === 'refund' ? 'Refund deposit' : 'Forfeit deposit';
+  modal(label, `<p>${money(deposit.amount)} · ${esc(deposit.status)}</p><label>Reason<textarea name="reason" minlength="1" maxlength="500" required></textarea></label>`, label);
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'deposit-decision';
+  form.dataset.id = deposit.id;
+  form.dataset.decision = decision;
+}
+async function showReservationDepositHistory(reservationId) {
+  try {
+    const history = await window.supabaseRecord.posReservationDepositHistory(reservationId);
+    const deposits = (history.deposits || []).map(deposit =>
+      `<tr><td>${esc(deposit.created_at || '')}</td><td>${money(deposit.receipt_amount || deposit.amount)}</td><td>${money(deposit.amount)}</td><td>${esc(deposit.status)}</td><td>${esc(deposit.notes || '—')}</td></tr>`
+    ).join('');
+    const actions = (history.actions || []).map(action =>
+      `<tr><td>${esc(action.acted_at || '')}</td><td>${esc(action.action_type)}</td><td>${money(action.amount)}</td><td>${esc(action.reason || '—')}</td></tr>`
+    ).join('');
+    const content = `<h3>Deposits</h3><div class="table-scroll"><table><thead><tr><th>Received</th><th>Original amount</th><th>Current amount</th><th>Status</th><th>Notes</th></tr></thead><tbody>${deposits || '<tr><td colspan="5" class="empty-state">No deposits recorded.</td></tr>'}</tbody></table></div><h3>Deposit activity</h3><div class="table-scroll"><table><thead><tr><th>Time</th><th>Action</th><th>Amount</th><th>Reason</th></tr></thead><tbody>${actions || '<tr><td colspan="4" class="empty-state">No deposit activity recorded.</td></tr>'}</tbody></table></div>`;
+    modal('Reservation deposit history', content, null);
+  } catch (error) {
+    console.error('Reservation deposit history could not be loaded.', error);
+    toast(friendlyRpcError(error), 'error');
+  }
+}
+function posSettingForm(setting) {
+  if (state.role !== 'Administrator'
+    || !['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(setting.key)) {
+    return toast('Only an Administrator can change this POS setting.', 'error');
+  }
+  const isHours = setting.key === 'pos_max_shift_hours';
+  modal(`Configure ${isHours ? 'maximum shift hours' : 'extra-pax rate'}`,
+    `<label>${isHours ? 'Hours before a long-shift alert' : 'Cash price per extra pax'}<input name="value" type="number" min="${isHours ? '1' : '0'}" ${isHours ? 'max="72"' : ''} step="${isHours ? '1' : '0.01'}" value="${esc(setting.value)}" required></label>`,
+    'Save setting');
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'pos-setting';
+  form.dataset.id = setting.id;
+}
+async function shiftSummaryForm(shiftId) {
+  try {
+    const summary = await window.supabaseRecord.posShiftSummary(shiftId);
+    const shift = summary.shift;
+    modal(`Shift · ${esc(shift.shift_code)}`,
+      `<div class="detail-grid"><div><small>Status</small><strong>${esc(shift.status)}</strong></div><div><small>Starting cash</small><strong>${money(shift.opening_float)}</strong></div><div><small>Cash bill payments</small><strong>${money(summary.cash_payments)}</strong></div><div><small>Cash deposits received</small><strong>${money(summary.deposit_receipts)}</strong></div><div><small>Paid in</small><strong>${money(summary.paid_in)}</strong></div><div><small>Paid out</small><strong>${money(summary.paid_out)}</strong></div><div><small>Cash refunds</small><strong>${money(summary.cash_refunds)}</strong></div><div><small>Expected cash</small><strong>${money(summary.expected_cash)}</strong></div><div><small>Open bills</small><strong>${Number(summary.open_bill_count || 0)}</strong></div><div><small>Pending approvals</small><strong>${Number(summary.pending_approval_count || 0)}</strong></div>${shift.declared_cash == null ? '' : `<div><small>Counted cash</small><strong>${money(shift.declared_cash)}</strong></div><div><small>Variance</small><strong class="${Number(shift.cash_variance) < 0 ? 'cash-variance-short' : 'cash-variance-over'}">${Number(shift.cash_variance) > 0 ? '+' : ''}${money(shift.cash_variance)}</strong></div>`}</div>`,
+      null);
+  } catch (error) {
+    console.error('Shift summary could not be loaded.', error);
+    toast(friendlyRpcError(error), 'error');
+  }
+}
+async function shiftCloseForm(shift) {
+  try {
+    const summary = await window.supabaseRecord.posShiftSummary(shift.id);
+    const expected = Number(summary.expected_cash || 0);
+    modal(`Close shift · ${esc(shift.code)}`,
+      `<div class="pos-payment-summary"><div>Expected cash <strong>${money(expected)}</strong></div><div>Open bills <strong>${Number(summary.open_bill_count || 0)}</strong></div><div>Pending approvals <strong>${Number(summary.pending_approval_count || 0)}</strong></div><p class="field-help">Variance = counted cash − expected cash. Open bills block shift close.</p></div><label>Counted cash<input name="countedCash" type="number" min="0" step="0.01" value="${expected.toFixed(2)}" required></label><div class="pos-variance-preview">Variance <strong data-shift-variance>${money(0)}</strong></div><label>Closing notes<textarea name="notes" rows="2" maxlength="500"></textarea></label>`,
+      'Reconcile and close', 'pos-payment-modal');
+    const form = document.querySelector('#modalForm');
+    form.dataset.type = 'shift-close';
+    form.dataset.id = shift.id;
+  } catch (error) {
+    console.error('Shift close preview failed.', error);
+    toast(friendlyRpcError(error), 'error');
+  }
+}
+async function printShiftReport(shiftId) {
+  try {
+    const summary = await window.supabaseRecord.posShiftSummary(shiftId);
+    const shift = summary.shift;
+    const movements = all('cashMovements').filter(item => item.shiftId === shiftId);
+    const variance = shift.declared_cash == null ? null : Number(shift.declared_cash) - Number(summary.expected_cash);
+    const amounts = [['Starting cash',shift.opening_float],['Cash bill payments',summary.cash_payments],['Cash deposits received',summary.deposit_receipts],['Paid in',summary.paid_in],['Paid out',summary.paid_out],['Cash refunds',summary.cash_refunds],['Expected cash',summary.expected_cash],['Counted cash',shift.declared_cash]];
+    const doc = `<!doctype html><html><head><meta charset="utf-8"><title>Shift report ${esc(shift.shift_code)}</title><style>body{font:14px Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 20px}h1{font-size:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row{display:flex;justify-content:space-between;border-bottom:1px solid #ddd;padding:8px 0}@media print{body{margin:0 auto}}</style></head><body><h1>Cashier shift report · ${esc(shift.shift_code)}</h1><p>${esc(shift.status)} · Opened ${esc(shift.opened_at || '')} · Closed ${esc(shift.closed_at || 'Open')}</p><section class="grid">${amounts.filter(([,value])=>value!=null).map(([label,value])=>`<div class="row"><span>${label}</span><strong>${money(value)}</strong></div>`).join('')}</section>${variance == null ? '' : `<p>Variance: <strong>${variance > 0 ? '+' : ''}${money(variance)}</strong></p>`}<h2>Cash movements</h2><ul>${movements.map(item=>`<li>${esc(item.movementType)} · ${money(item.amount)} · ${esc(item.reason)}</li>`).join('') || '<li>None</li>'}</ul><script>window.onload=()=>window.print();</script></body></html>`;
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return toast('Allow pop-ups to print the shift report.', 'error');
+    printWindow.document.open();
+    printWindow.document.write(doc);
+    printWindow.document.close();
+  } catch (error) {
+    console.error('Shift report could not be loaded.', error);
+    toast(friendlyRpcError(error), 'error');
+  }
 }
 
 document.addEventListener('click', event => {
   const actionElement = event.target.closest('[data-action]');
   const action = actionElement?.dataset.action;
-  if (!['open-table-form', 'edit-table', 'assign-table', 'delete-table', 'apply-table-layout'].includes(action)) return;
+  if (!['open-table-form', 'edit-table', 'assign-table', 'delete-table', 'apply-table-layout', 'mark-table-clean'].includes(action)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   if (action === 'open-table-form') return tableForm();
   if (action === 'apply-table-layout') return applyRestaurantTableLayout();
   const table = all('restaurantTables').find(item => item.id === actionElement.dataset.id);
   if (!table) return toast('This table is no longer available. Reload and try again.', 'error');
+  if (action === 'mark-table-clean') {
+    if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Managers and Administrators can update table cleaning status.', 'error');
+    if (table.status !== 'Needs cleaning') return toast('This table no longer needs cleaning.', 'error');
+    save('restaurantTables', all('restaurantTables').map(item => item.id === table.id ? { ...item, status: 'Available' } : item))
+      .then(() => { toast(`${table.id} marked available.`); render(); })
+      .catch(error => toast(friendlyRpcError(error), 'error'));
+    return;
+  }
   if (action === 'edit-table') return tableForm(table);
   if (action === 'assign-table') return tableAssignmentForm(table);
   return deleteRecord('table', table.id);
@@ -2936,8 +3494,8 @@ document.addEventListener('click', async event => {
   if (action === 'request-bill-void') {
     if (state.modalDirty) return toast('Save or discard your bill edits before requesting a void.', 'error');
     const bill = all('posBills').find(item => item.id === actionElement.dataset.id);
-    if (bill?.status === 'Open') return billVoidRequestForm(bill);
-    return toast('Only open bills can be submitted for void approval.', 'error');
+    if (bill && ['Open', 'Closed'].includes(bill.status)) return billVoidRequestForm(bill);
+    return toast('Only open or closed bills can be submitted for void approval.', 'error');
   }
   if (action === 'print-bill') {
     if (state.modalDirty) return toast('Save or discard your bill edits before printing.', 'error');
@@ -2949,8 +3507,65 @@ document.addEventListener('click', async event => {
     return toast('This approval request is no longer available.', 'error');
   }
   if (action === 'new-shift') return shiftForm();
-  if (action === 'open-shift') return shiftForm(all('shifts').find(item => item.id === event.target.closest('[data-action]').dataset.id));
+  if (action === 'open-shift') return shiftSummaryForm(actionElement.dataset.id);
+  if (action === 'close-shift') {
+    const shift = all('shifts').find(item => item.id === actionElement.dataset.id);
+    if (shift?.status === 'Open') return shiftCloseForm(shift);
+    return toast('Only open shifts can be closed.', 'error');
+  }
+  if (action === 'cash-movement') {
+    const shift = all('shifts').find(item => item.id === actionElement.dataset.id);
+    if (shift?.status === 'Open' && shift.openedBy === state.user?.id) return cashMovementForm(shift);
+    return toast('Cash movements can be recorded only on your own open shift.', 'error');
+  }
+  if (action === 'print-shift') return printShiftReport(actionElement.dataset.id);
+  if (action === 'record-deposit') {
+    const reservation = all('reservations').find(item => item.id === actionElement.dataset.id);
+    if (!all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id)) {
+      return toast('Open your cashier shift before recording a deposit.', 'error');
+    }
+    if (reservation) return reservationDepositForm(reservation);
+    return toast('This reservation is no longer available.', 'error');
+  }
+  if (action === 'deposit-decision') {
+    const deposit = all('reservationDeposits').find(item => item.id === actionElement.dataset.id);
+    if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Managers and Administrators can refund or forfeit deposits.', 'error');
+    if (deposit?.status === 'Held') return depositDecisionForm(deposit, actionElement.dataset.decision);
+    return toast('Only Held deposits can be refunded or forfeited.', 'error');
+  }
+  if (action === 'deposit-history') return showReservationDepositHistory(actionElement.dataset.id);
+  if (action === 'open-reservation-bill') {
+    const reservation = all('reservations').find(item => item.id === actionElement.dataset.id);
+    if (!reservation || reservation.status !== 'Seated') return toast('Only seated reservations can open a bill.', 'error');
+    if (all('posBills').some(bill => bill.reservationId === reservation.id && bill.status === 'Open')) {
+      return toast('This reservation already has an open bill.', 'error');
+    }
+    return billForm({
+      customerName: reservation.name,
+      reservationId: reservation.id,
+      tableId: reservation.table || '',
+      adultCount: Number(reservation.adults || 0),
+      seniorCount: Number(reservation.seniorPwdCount || 0),
+      kidsCount: Number(reservation.children || 0),
+      compedCount: 0
+    });
+  }
+  if (action === 'read-pos-notification') {
+    try {
+      await window.supabaseRecord.posMarkNotificationRead(actionElement.dataset.id);
+      await syncWithSupabase();
+    } catch (error) {
+      console.error('POS notification could not be marked read.', error);
+      toast(friendlyRpcError(error), 'error');
+    }
+    return;
+  }
   if (action === 'new-charge-item') return chargeItemForm();
+  if (action === 'edit-pos-setting') {
+    const setting = all('posSettings').find(item => item.id === actionElement.dataset.id);
+    if (setting) return posSettingForm(setting);
+    return toast('This POS setting is no longer available.', 'error');
+  }
   if (action === 'edit-charge-item') return chargeItemForm(all('chargeItems').find(item => item.id === event.target.closest('[data-action]').dataset.id));
   if (action === 'open-rate') return rateForm();
   if (action === 'edit-rate') return rateForm(all('buffetRates').find(item => item.id === event.target.closest('[data-action]').dataset.id));
@@ -2963,7 +3578,6 @@ document.addEventListener('click', async event => {
       .catch(() => {});
   }
   if (action === 'reservation-transition') return transitionReservation(event.target.closest('[data-action]').dataset.id, event.target.closest('[data-action]').dataset.transition);
-  if (action === 'create-revenue-draft') return createRevenueDraft(event.target.closest('[data-action]').dataset.id);
   if (action === 'delete-reservation') return deleteRecord('reservation', event.target.closest('[data-action]').dataset.id);
   if (action === 'confirm-revenue') {
     const record = all('revenueRecords').find(item => item.id === event.target.closest('[data-action]').dataset.id);
@@ -3081,6 +3695,16 @@ document.addEventListener('input', event => {
   search?.focus();
   search?.setSelectionRange(position, position);
 });
+document.addEventListener('input', event => {
+  const form = event.target.closest('#modalForm[data-type="shift-close"]');
+  if (!form || event.target.name !== 'countedCash') return;
+  const variance = Number(event.target.value || 0) - Number(form.elements.countedCash.defaultValue || 0);
+  const output = form.querySelector('[data-shift-variance]');
+  if (!output) return;
+  output.textContent = `${variance > 0 ? '+' : ''}${money(variance)}`;
+  output.classList.toggle('cash-variance-over', variance > 0);
+  output.classList.toggle('cash-variance-short', variance < 0);
+});
 document.addEventListener('change', event => {
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
   if (event.target.closest('#modalForm[data-type="receiving"]')) {
@@ -3155,17 +3779,29 @@ async function syncWithSupabase() {
   };
   const collections = collectionsByRole[state.role] || [];
   setSyncState('syncing', 'Loading the latest restaurant data.', 'Syncing…');
+  supabaseSyncEnabled = false;
   state.productionBoard = { date: '', rows: [], loading: false, loaded: false, error: '' };
   state.productionHistoryOpen = false;
   state.productionHistory = {
     from: '', to: '', timeFrom: '', timeTo: '', dish: 'All', status: 'All',
     rows: [], loading: false, loaded: false, error: ''
   };
-  KEYS.forEach(key => { collectionState[key] = []; });
-  for (const key of collections) {
-    const remoteRecords = await window.supabaseRecord.load(key);
-    collectionState[key] = remoteRecords;
+  const pendingCollections = Object.fromEntries(KEYS.map(key => [key, []]));
+  if (['Administrator', 'Manager'].includes(state.role)) {
+    try {
+      await window.supabaseRecord.posRefreshNotifications();
+    } catch (error) {
+      throw new Error(`Manager notifications failed to refresh: ${error.message}`);
+    }
   }
+  for (const key of collections) {
+    try {
+      pendingCollections[key] = await window.supabaseRecord.load(key);
+    } catch (error) {
+      throw new Error(`Could not load the "${key}" collection for ${state.role}: ${error.message}`);
+    }
+  }
+  KEYS.forEach(key => { collectionState[key] = pendingCollections[key]; });
   supabaseSyncEnabled = true;
   invalidateReportData();
   setPostSaveSyncState();
@@ -3201,7 +3837,7 @@ async function openAuthenticatedSession(session) {
     console.error('Initial cloud load failed.', syncError);
     setSyncState('error', syncError.message);
     document.querySelector('#loadingState').classList.add('is-hidden');
-    toast('Cloud data could not be loaded. Check access or connection, then retry.', 'error');
+    toast(`Cloud data could not be loaded: ${syncError.message}`, 'error');
   }
   render();
 }
@@ -3233,7 +3869,7 @@ async function retryCloudSync(failureState = 'error') {
   } catch (error) {
     console.error('Cloud sync retry failed.', error);
     setSyncState(failureState, error.message);
-    toast('Cloud sync retry failed. Please try again.', 'error');
+    toast(`Cloud sync retry failed: ${error.message}`, 'error');
   }
 }
 document.querySelector('#syncStatus').addEventListener('click', () => {
@@ -3683,6 +4319,17 @@ window.setInterval(() => {
   if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
   window.scrollTo(0, scrollY);
 }, 60 * 1000);
+window.setInterval(async () => {
+  if (!state.user || document.hidden || !['Administrator', 'Manager'].includes(state.role)) return;
+  try {
+    await window.supabaseRecord.posRefreshNotifications();
+    persistCollection('posNotifications', await window.supabaseRecord.load('posNotifications'));
+    if (state.view === 'shifts' && !document.querySelector('#modalForm')) render();
+  } catch (error) {
+    console.error('POS notifications could not be refreshed.', error);
+    setSyncState('reconnecting', error.message);
+  }
+}, 5 * 60 * 1000);
 
 function actions(type, itemId) {
   const labels = { view: 'View', edit: 'Edit', delete: 'Delete' };
@@ -3959,7 +4606,10 @@ document.addEventListener('input', event => {
   }
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
   if (event.target.closest('#modalForm[data-type="receiving"]')) updateReceivingTotals(event.target.closest('#modalForm'));
-  if (event.target.name === 'partySize' && event.target.closest('#modalForm[data-type="walk-in"]')) refreshWalkInTables(event.target.closest('#modalForm'));
+  if (['adults', 'seniorPwdCount', 'children'].includes(event.target.name)
+    && event.target.closest('#modalForm[data-type="walk-in"]')) {
+    refreshWalkInTables(event.target.closest('#modalForm'));
+  }
   if (event.target.closest('#modalForm[data-type="revenue"]')) updateRevenuePreview(event.target.closest('#modalForm'));
   if (event.target.matches('[data-custom-portions]')) {
     event.target.closest('.production-dish-card')?.querySelector('[data-use-custom-portions="true"]')?.removeAttribute('data-request-id');
@@ -4167,6 +4817,34 @@ document.addEventListener('submit', async event => {
     if (['batchYield', 'prepTarget'].includes(control.name) && control.value !== '' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number.'); valid = false; }
     if (form.dataset.type === 'revenue' && ['adult_customers', 'child_customers', 'senior_pwd_customers'].includes(control.name) && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number of customers.'); valid = false; }
   });
+  if (['reservation', 'walk-in'].includes(form.dataset.type)) {
+    const countNames = ['adults', 'seniorPwdCount', 'children'];
+    const counts = countNames.map(name => form.elements[name]);
+    const invalidCounts = counts.filter(control =>
+      !Number.isInteger(Number(control?.value)) || Number(control?.value) < 0
+    );
+    if (invalidCounts.length) {
+      invalidCounts.forEach(control => showFieldError(control, 'Guest counts must be non-negative whole numbers.'));
+      valid = false;
+    } else {
+      try {
+        window.CostTrackLogic.normalizeReservationGuestCounts(
+          ...counts.map(control => control?.value || 0)
+        );
+      } catch (error) {
+        showFieldError(counts[0], error.message);
+        valid = false;
+      }
+    }
+    if (form.dataset.type === 'reservation' && form.dataset.reservationType !== 'Walk-in') {
+      const email = String(form.elements.email?.value || '').trim();
+      const phone = String(form.elements.phone?.value || '').trim();
+      if (!email && !phone) {
+        showFieldError(form.elements.phone, 'Enter a phone number or email address.');
+        valid = false;
+      }
+    }
+  }
   if (form.dataset.type === 'bill') {
     const countNames = ['adultCount', 'seniorCount', 'kidsCount', 'compedCount'];
     const counts = countNames.map(name => Number(form.elements[name]?.value || 0));

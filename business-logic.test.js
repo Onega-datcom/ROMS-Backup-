@@ -7,6 +7,63 @@ const g = { name: 'Gram', abbreviation: 'g', dimension: 'weight', conversionToBa
 const liter = { name: 'Liter', abbreviation: 'L', dimension: 'volume', conversionToBase: 1000 };
 const asOfDate = '2026-11-11';
 
+test('Lunch reservations fall back to the active All Day rate', () => {
+  const rates = [{
+    mealPeriod: 'All Day',
+    dayType: 'weekday',
+    adultRate: 449,
+    childRate: 225,
+    effectiveFrom: '2026-01-01',
+    effectiveTo: null,
+    isActive: true
+  }];
+  const rate = logic.activeBuffetRate(rates, 'Lunch', '2026-11-11', 'WEEKDAY');
+
+  assert.equal(rate, rates[0]);
+  assert.equal(logic.reservationRevenue({ guests: 2, adults: 2, children: 0 }, rate), 898);
+});
+
+test('missing buffet rate is represented without throwing', () => {
+  const rate = logic.activeBuffetRate([], 'Lunch', '2026-11-11', 'weekday');
+
+  assert.equal(rate, undefined);
+  assert.equal(logic.reservationRevenue({ guests: 2, adults: 2, children: 0 }, rate), null);
+});
+
+test('reservation estimates and validated counts include Senior/PWD guests', () => {
+  const counts = logic.normalizeReservationGuestCounts('4', '1', '2');
+  assert.deepEqual(counts, { adults: 4, seniorPwdCount: 1, children: 2, total: 7 });
+  assert.equal(
+    logic.reservationRevenue(
+      { guests: 7, adults: 4, seniorPwdCount: 1, children: 2 },
+      { adultRate: 449, seniorPwdRate: 360, childRate: 225 }
+    ),
+    2606
+  );
+  assert.throws(() => logic.normalizeReservationGuestCounts(0, 0, 0), /between 1 and 1,000/);
+  assert.throws(() => logic.normalizeReservationGuestCounts(1, -1, 1), /non-negative whole numbers/);
+  assert.throws(() => logic.normalizeReservationGuestCounts(1, 0.5, 1), /non-negative whole numbers/);
+});
+
+test('buffet rate lookup matches weekday, weekend, and holiday day types case-insensitively', () => {
+  const rates = ['weekday', 'weekend', 'holiday'].map(dayType => ({
+    mealPeriod: 'All Day',
+    dayType: dayType.toUpperCase(),
+    adultRate: 449,
+    childRate: 225,
+    effectiveFrom: '2026-01-01',
+    effectiveTo: null,
+    isActive: true
+  }));
+
+  for (const dayType of ['weekday', 'weekend', 'holiday']) {
+    assert.equal(
+      logic.activeBuffetRate(rates, 'Lunch', '2026-11-11', dayType),
+      rates.find(rate => rate.dayType.toLowerCase() === dayType)
+    );
+  }
+});
+
 test('converts compatible units and rejects incompatible dimensions', () => {
   assert.equal(logic.convertQuantity(4000, g, kg), 4);
   assert.throws(() => logic.convertQuantity(1, kg, liter), /dimensions differ/);

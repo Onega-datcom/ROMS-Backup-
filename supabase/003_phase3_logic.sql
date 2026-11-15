@@ -429,8 +429,8 @@ commit;
 -- ingredients.cost equals it; insert Adjustment/Waste and verify cost unchanged.
 -- Lifecycle: as Receptionist, Pending -> Confirmed -> Seated with actual_covers
 -- > 0; verify timestamps/table status; attempt Seated -> Pending and expect denial.
--- Draft: as Receptionist call create_revenue_draft('RSV-...') twice; both calls
--- return the same id/status and never expose amounts.
+-- Historical draft example retired by migration 010. Do not call
+-- create_revenue_draft; it is no longer executable by application roles.
 -- Confirm: as Manager call confirm_revenue('REV-...', '{}'::jsonb); as
 -- Receptionist call it and expect an authorization error.
 -- Void: as Manager update status='Voided' and expect denial; as Administrator

@@ -1,0 +1,182 @@
+# CostTrack POS Specification
+
+## Four-phase plan and status
+
+1. **Phase 1 — POS foundation: DONE.** Migrations, charge catalog, package tiers and inclusions, discounts, settings, RLS, role matrix, and sidebar entries.
+2. **Phase 2 — Cashier and bills: DONE and confirmed.** Server-calculated bills, head counts, extras, discounts and approvals, cash payment/change, idempotent close, void approvals, and the billing statement. Phase 2 is confirmed and tested; do not change it unless Phase 3 requires it.
+3. **Phase 3 — Shifts, deposits, reservations, and table integration: IMPLEMENTED; original 007/008 acceptance was user-confirmed. The user reports running follow-up 009 and the updated acceptance script, but did not report its result here. Current browser issues remain under investigation.** Do not start Phase 4 until the user confirms Phase 3 after validation.
+4. **Phase 4 — Revenue and reporting integration: NOT STARTED.** Revenue from closed bills, dashboard/reports, food vs non-food, comped counts, leftover KPI, notifications, and reconciliation of legacy reservation drafts. Do not start until the user confirms Phase 3.
+
+### Walk-in and reservation enhancement — Phase A
+
+Phase A is implemented in migrations 011 and 012. Migration 011 adds `senior_pwd_count` (default 0) and optional `source` to reservations. Migration 012 replaces the existing guest-total check so it includes adults + Senior/PWD + kids. Walk-ins may omit contact details; other reservations still require a phone number or email. Walk-in table-capacity checks use the category total, and seated walk-ins store it as actual covers. The public reservation RPC retains its signature and continues to create Pending bookings; its generated `RSV-` references are tagged Website and have Senior/PWD count 0.
+
+Run `supabase/011_reservation_guest_counts.sql` after `supabase/010_pos_single_source_security.sql`, then run `supabase/012_reservation_guest_count_constraint.sql`. Run `supabase/011_reservation_guest_counts_acceptance.sql` afterward; it ends with `ROLLBACK`. Roll back in reverse order: `supabase/012_reservation_guest_count_constraint_rollback.sql`, then `supabase/011_reservation_guest_counts_rollback.sql`.
+
+## Platform and boundaries
+
+- CostTrack is a buffet restaurant system using plain HTML/CSS/JavaScript and Supabase Auth, PostgreSQL, RLS, and RPC.
+- POS is cash-only, has no tax/BIR behavior, makes no external API calls, and never deducts inventory from sales.
+- Printed statement title: **BILLING STATEMENT (not an official receipt)**.
+- Reuse the existing UI design system and existing reservation/table statuses.
+- The database/RPC computes all monetary values. The browser may preview them only.
+- Numbered migration files continue after the latest applied migration and have matching rollback files. Phase A uses 011 after 010. Every SQL INSERT must have matching target columns and values.
+- Acceptance SQL must execute in a transaction ending with ROLLBACK and leave no inserted test data.
+
+## Phase 3 migration and rollback order
+
+1. Run `supabase/007_pos_shifts_and_notifications.sql`.
+2. Run `supabase/008_pos_reservations_deposits_and_close.sql`.
+3. Run `supabase/009_pos_reservation_completion_and_deposit_history.sql`.
+4. Run `supabase/010_pos_single_source_security.sql`.
+5. Run `supabase/011_reservation_guest_counts.sql`, then `supabase/012_reservation_guest_count_constraint.sql`.
+6. Run `supabase/010_pos_single_source_acceptance.sql`, `supabase/008_pos_phase3_acceptance.sql`, and `supabase/011_reservation_guest_counts_acceptance.sql` as the database owner. The first two retain their existing profile prerequisites; all acceptance scripts end with `ROLLBACK`.
+7. To roll back Phase A, run `supabase/012_reservation_guest_count_constraint_rollback.sql`, then `supabase/011_reservation_guest_counts_rollback.sql`. The rollback preserves rows; the restored legacy guest-total and contact constraints remain unvalidated if Senior/PWD counts or contactless Walk-ins exist. To roll back 010 and Phase 3, then run `supabase/010_pos_single_source_security_rollback.sql`, `supabase/009_pos_reservation_completion_and_deposit_history_rollback.sql`, `supabase/008_pos_reservations_deposits_and_close_rollback.sql`, and `supabase/007_pos_shifts_and_notifications_rollback.sql`. The 008 rollback intentionally stops if Phase 3 operational data exists; export/resolve it first. The 007 rollback retains additive columns/settings and notification records.
+
+## Roles and permissions
+
+Enforce access in UI, routes, RLS, and RPC:
+
+- **Receptionist / cashier:** opens and closes their own shift; creates bills; records reservation deposits; books packages; requests voids and 100% discounts. Cannot approve requests or view revenue/profit.
+- **Manager:** all Receptionist operations; approves requests; closes any shift; refunds or forfeits deposits.
+- **Administrator:** all operations.
+- **Inventory Clerk and Chef / Kitchen Staff:** no POS access.
+
+## Phase 3 requirements
+
+### Shifts and cash movements
+
+- One open shift per cashier. A bill cannot be created without an open shift.
+- Open shift with starting cash.
+- Cash movements are Paid in or Paid out and require a reason.
+- Expected cash = starting cash + cash payments kept (not tendered cash) + cash deposits received + paid in - paid out - cash refunds.
+- Close shift using counted cash. Show expected, counted, and variance; render shortage as red with a minus sign, and overage as green with a plus sign.
+- Block shift close while it has Open bills or bills awaiting approval.
+- Provide printable shift report and shift history. Receptionists see only their own shifts; Managers and Administrators see all.
+
+### Reservation deposits
+
+- Receptionist records cash deposits against reservations. Statuses: Held, Applied, Refunded, Forfeited.
+- Deposits are payments, never discounts. Show them on a bill as “Less: Deposit” and subtract them from balance due.
+- A deposit exceeding the bill must leave a flagged remainder; never silently lose the excess.
+- Refund and forfeiture require a Manager action and a reason.
+- Voiding a paid bill restores the deposit to Held.
+
+### Reservation package bookings
+
+- A reservation may store the package, tier (pax), and pax count, using Phase 1 package tiers.
+- Package revenue counts as food revenue as a whole.
+- If actual guests exceed the booked tier pax, suggest extra-pax lines at the Administrator-set rate. If no rate exists, warn and let the cashier decide.
+
+### Seated reservation billing and table links
+
+- A Seated reservation offers “Open bill” and prefills head counts, package line, and deposit.
+- A reservation cannot be manually completed; closing and fully settling its linked bill completes it atomically.
+- A reservation cannot have two open bills.
+- Closing its bill completes the reservation and updates actual covers.
+- A bill may link to a table. Closing it sets the table to the existing system “needs cleaning” status. Bills without a table do not affect table status.
+- Do not invent new table status names.
+
+### Atomic/idempotent close and notifications
+
+- Bill close is one atomic, idempotent transaction covering payment, bill freeze, deposit application, reservation completion, and table update. Any failure rolls everything back. Repeated close is a no-op.
+- Notify Managers and Administrators about bills still open at shift close, shifts open beyond a configurable number of hours, and pending approvals. Notifications must not duplicate.
+
+### Phase A reservation behavior
+
+- Staff reservations require at least one contact method (phone or email); no email is fabricated. Walk-ins may omit both.
+- Reservation counts are adults, Senior/PWD, and kids. Senior/PWD defaults to 0 for existing rows and public bookings.
+- Walk-in counts must be non-negative whole numbers totaling 1–1,000. Seating time is automatic, meal period defaults from the current time, and an empty guest name becomes “Walk-in guest.”
+- Walk-in table options and database capacity validation use total covers. Existing two-hour table availability and overlap rules remain in force.
+- Reservation source is optional and may be Website, Phone, Facebook, Walk-in, or Other. The public booking RPC continues to use its existing signature; generated public references are tagged Website.
+- Reservation rate estimates include Senior/PWD using the active buffet-rate catalog; an unavailable rate remains “No rate set.”
+
+## Phase A verification
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Senior/PWD estimate and whole-number/total validation | PASS | `node --test business-logic.test.js supabase-config.test.js`: the 4/1/2 estimate is PHP 2,606; zero, negative, and fractional counts are rejected. |
+| Reservation row mapping | PASS | The same test run verifies `senior_pwd_count` and `source` map in both directions. |
+| Migration and database acceptance | FAIL, correction ready | The screenshot showed `reservations_guest_count_check` still required `guests = adults + children`. Migration 012 replaces it with the three-category total. Apply 012, then rerun the acceptance script; database verification is still pending. The script checks contactless 4/1/2 seating, 7-seat capacity, invalid counts, phone-only staff booking, and a public Pending Website booking, then rolls back. |
+| Browser form flow | NOT RUN | Manual browser verification is required; see the acceptance steps below. |
+
+### Phase A manual verification
+
+Sign in as a Receptionist. Record a walk-in with 4 adults, 1 Senior/PWD, 2 kids at a table with at least 7 seats, leaving name at “Walk-in guest” and both contact fields blank. Confirm the table picker uses seven covers and the save creates a Seated walk-in with counts 4/1/2, actual covers 7, automatic seating time, and the current meal period. Try zero total guests, a negative count, a fractional count such as 0.5, and a table with fewer than seven seats; each must block saving with an inline error and leave the button usable. Create a staff reservation using only a phone number and a nonzero Senior/PWD count; verify Source can be selected. Submit a request from the landing page and verify it remains Pending, shows Senior/PWD 0, and appears with Source Website. Open a seated reservation bill and verify its Senior/PWD count is prefilled.
+
+### Phase A assumptions
+
+- The existing public RPC generates references with the `RSV-` prefix. The source trigger uses that existing prefix to tag public requests as Website without changing the RPC signature or body.
+- Existing reservation rows are preserved; the added Senior/PWD column defaults to 0 without rewriting adult/kid counts.
+- For non-Walk-in reservations, database capacity checks continue to prefer recorded actual covers when present. Walk-in seating uses the newly entered category-count total.
+
+## Explicit exclusions
+
+Do not build Phase 4 revenue creation, dashboard/report changes, tax, or payment methods other than cash during Phase 3.
+
+## UI requirements
+
+- Labels above inputs, validation, loading states, double-click protection, toasts, empty states, touch targets of at least 44px, and responsive layout.
+- Shift and Cashier screens should be quick to use; opening a bill from a reservation should take few taps.
+- Bill-save requests stop waiting after 15 seconds and show an explicit error. The browser aborts the request when possible, but the server may still finish; retrying the same form reuses its idempotency key.
+
+## Worked example
+
+- 40 adults × 449 = 17,960
+- 10 seniors × 360 = 3,600
+- 8 kids × 225 = 1,800
+- 2 comped = 0
+- Leftover = 200
+- Subtotal = 23,560
+- Deposit = 2,000
+- Balance due = 21,560
+- Cash tendered = 22,000
+- Change = 440
+- Expected shift cash = starting cash + PHP 21,560 when the PHP 2,000 deposit was received in a different shift; if that deposit is received in this shift, add the PHP 2,000 cash receipt too.
+
+## Phase 3 verification results
+
+The user reported that the original 007/008 acceptance run succeeded. The database checks below remain marked NOT RUN for the updated 009 guard and the new 010 security migration/acceptance rerun.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Worked example and expected cash | NOT RUN | Acceptance SQL asserts subtotal 23,560, deposit 2,000, cash payment 21,560, change 440, and expected cash includes cash deposit receipts received in that shift. PostgreSQL execution is pending. |
+| Receptionist bill privacy, Manager/Admin full reads, final policy set, retired draft RPC | NOT RUN | `supabase/010_pos_single_source_acceptance.sql` tests direct bill/line/payment queries under authenticated role claims and checks `pg_policies` plus execute privileges. Database connection unavailable here. |
+| Own bill save/close/void and seated-reservation bill | NOT RUN | `supabase/008_pos_phase3_acceptance.sql` exercises the RPC flow; it must be rerun after migration 010. Browser print still requires manual verification. |
+| Non-POS policy preservation | NOT RUN | The 010 acceptance script checks reservation, table, ingredient, receiving, production, and waste policy entries; database execution is pending. |
+| Shift variance: 0, -60, +40 | NOT RUN | Acceptance SQL closes shifts through the RPC and asserts each variance. |
+| Paid in/out and required reason | NOT RUN | Acceptance SQL checks expected cash and rejects a blank movement reason. |
+| One open shift per cashier | NOT RUN | Acceptance SQL attempts a second open shift and expects rejection. |
+| Shift close blocked by open bills | NOT RUN | Acceptance SQL attempts close while an open bill exists and expects `blocked`. |
+| Deposit apply/remainder/void restore | NOT RUN | Acceptance SQL checks Applied status, the Held excess, and Held restoration after paid-bill void approval. |
+| Repeated close creates one payment | NOT RUN | Acceptance SQL closes the same bill twice and checks the cash-payment count. Browser double-click testing remains manual. |
+| Seated reservation bill, duplicate rejection, completion, covers, table status | NOT RUN | Acceptance SQL asserts duplicate-bill rejection and close-side updates. Browser prefill remains manual. |
+| Receptionist refund/approval/cross-shift denial | NOT RUN | Acceptance SQL invokes these RPCs under Receptionist claims and expects privilege errors. |
+| Manual completion blocked without a settled bill | NOT RUN | Updated acceptance SQL attempts Seated → Completed without a closed bill and expects SQLSTATE `55000`; run it after migration 009. |
+| Manager/Admin notifications and duplicate prevention | NOT RUN | Acceptance SQL refreshes pending-approval notifications twice and checks one per role; it also checks open-bill shift-close notifications. |
+| Mid-close failure rolls back partial writes | NOT RUN | Acceptance SQL catches an underpayment error after deposit allocation and verifies no payment or deposit mutation remained. |
+| Existing Phase 2 and non-POS features | NOT RUN | No Supabase migration or browser regression run has been performed. |
+| SQL INSERT column/value arity | PASS | Migrations 010 and 011 contain no data INSERTs. The Phase A acceptance fixture INSERTs were statically checked for matching target columns and values; PostgreSQL execution remains pending. |
+| PostgreSQL migration/acceptance execution | NOT RUN | The database client reports “Connection not found”; no migration or acceptance SQL was executed here. |
+| JavaScript syntax and test suite | PASS | `node --check app.js`, `node --check business-logic.js`, `node --check supabase-config.js`, and `node --test business-logic.test.js supabase-config.test.js` completed successfully; 25/25 tests passed. |
+
+### Manual verification still required
+
+After migrations 007 through 010 succeed, run `010_pos_single_source_acceptance.sql` and `008_pos_phase3_acceptance.sql`, then confirm both end cleanly with `ROLLBACK`. In the browser, verify Receptionist A sees only their own bills, can save/close/print/request a void for an owned bill, and can open a Seated-reservation bill. Also verify the reservation prefill (head counts, package, deposit preview), deposit history and Manager action reasons, extra-pax warning/choice, successful cash close and change, one-payment behavior under a double click, shortage/overage colors, shift history permissions, both printouts, Manager refund/forfeit and approvals, and table cleanup. Regression-test Phase 2 bills, reservations, floor plan, ingredients, receiving, production, waste, and all role routes.
+
+## Assumptions
+
+- Phase 3 must preserve the tested Phase 2 billing interfaces and behavior; extend them only where required for shift, deposit, reservation, and table integration.
+- “Cash payments kept” means payment amount applied to the bill; the difference between cash tendered and applied amount is change and is not shift cash.
+- Voiding any bill with applied cash requires manager approval and refund handling; the refunded amount is a cash outflow. Unpaid bills may be voided through the existing approval workflow.
+- Deposit excess remains a separately tracked Held remainder until a Manager refunds, forfeits, or applies it; it cannot be discarded during bill close.
+- Notifications are in-app records for Managers and Administrators, deduplicated by notification type and source record.
+- A reservation package is a catalog item of type `package`; its selected Phase 1 pax tier supplies the per-pax price. The package line is the sale amount, while bill head counts remain service/customer counts and are not charged a second time.
+- The current checked-in table UI derives Available/Reserved/Occupied from reservations and contains no explicit cleaning-status constant. Use the user-specified stored status label `Needs cleaning` after bill close without adding other status names.
+- Extra pax use the Administrator setting `pos_extra_pax_rate`; zero means no configured rate. The cashier can continue without an extra-pax line when no rate is configured.
+- The worked example’s unexplained PHP 200 “leftover” is represented in acceptance SQL as a food charge item so its stated subtotal of PHP 23,560 is preserved; no tax or gratuity is inferred.
+- Existing open Phase 2 bills with no shift link are treated as belonging to their creator for shift-close blocking and are linked when that bill is saved or closed. Existing closed bills are not retroactively assigned to a shift.
+- A cash refund is recorded against the Manager/Administrator’s own open shift so the cash outflow is reconcilable; refunding requires that shift to be open.
+- Acceptance SQL runs under simulated authenticated profile claims in a database-owner session and rolls back all test mutations. Its assumptions and expected error codes still need confirmation in the target Supabase project.
+- The legacy `public.create_revenue_draft(text)` function is retired: migration 010 revokes execution from `PUBLIC`, `anon`, and `authenticated`, and the current UI has no call path. The historical function body in migration 003 is retained for migration history only. The reservation card's rate-based estimate remains a non-posting display. Phase 4 must use closed POS bills as its revenue source, tie each source bill to revenue at most once with a unique bill reference, and explicitly reconcile legacy reservation drafts so they are not added a second time.
+- Deposits can be recorded only during the cashier’s open shift; their full amount/status and action reasons are available from the reservation’s deposit-history view.

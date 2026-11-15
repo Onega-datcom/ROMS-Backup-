@@ -303,18 +303,77 @@
   }
 
   function reservationRevenue(reservation, rates = {}) {
-    const covers = reservation.actualCovers ?? reservation.guests ?? (Number(reservation.adults || 0) + Number(reservation.children || 0));
-    const adults = Number(reservation.adults || covers || 0);
-    const children = Number(reservation.children || 0);
-    if (!Number.isInteger(covers) || covers < 0 || ![adults, children].every(value => Number.isInteger(value) && value >= 0)) {
+    const seniorPwdCount = Number(reservation.seniorPwdCount ?? reservation.senior_pwd_count ?? 0);
+    const children = Number(reservation.children ?? 0);
+    const statedCovers = reservation.actualCovers
+      ?? reservation.actual_covers
+      ?? reservation.guests
+      ?? null;
+    const adults = reservation.adults == null
+      ? Math.max(0, Number(statedCovers ?? seniorPwdCount + children) - seniorPwdCount - children)
+      : Number(reservation.adults);
+    const covers = Number(statedCovers ?? adults + seniorPwdCount + children);
+    if (!Number.isInteger(covers) || covers < 0
+      || ![adults, seniorPwdCount, children].every(value => Number.isInteger(value) && value >= 0)) {
       throw new RangeError('Reservation guest counts must be non-negative whole numbers.');
     }
+    if (rates == null) return null;
     const adultRate = Number(rates.adult_rate ?? rates.adultRate);
     const childRate = Number(rates.child_rate ?? rates.childRate);
-    if (![adultRate, childRate].every(value => Number.isFinite(value) && value >= 0)) {
-      throw new RangeError('No active buffet rate exists for this reservation.');
+    const seniorPwdRate = Number(
+      rates.senior_pwd_rate
+      ?? rates.seniorPwdRate
+      ?? (seniorPwdCount === 0 ? 0 : NaN)
+    );
+    if (![adultRate, childRate, seniorPwdRate].every(value => Number.isFinite(value) && value >= 0)) {
+      return null;
     }
-    return covers === adults + children ? adults * adultRate + children * childRate : covers * adultRate;
+    return adults * adultRate + seniorPwdCount * seniorPwdRate + children * childRate;
+  }
+
+  function normalizeReservationGuestCounts(adults, seniorPwdCount, children) {
+    const counts = [Number(adults), Number(seniorPwdCount), Number(children)];
+    if (!counts.every(value => Number.isInteger(value) && value >= 0)) {
+      throw new RangeError('Guest counts must be non-negative whole numbers.');
+    }
+    const total = counts.reduce((sum, value) => sum + value, 0);
+    if (total < 1 || total > 1000) {
+      throw new RangeError('A reservation must include between 1 and 1,000 guests.');
+    }
+    return {
+      adults: counts[0],
+      seniorPwdCount: counts[1],
+      children: counts[2],
+      total
+    };
+  }
+
+  function activeBuffetRate(rates, mealPeriod, date, dayType) {
+    const targetMealPeriod = String(mealPeriod || 'All Day').trim().toLowerCase();
+    const targetDayType = String(dayType || '').trim().toLowerCase();
+    const eligible = (rates || []).filter(rate => {
+      const rateDayType = String(rate.dayType ?? rate.day_type ?? '').trim().toLowerCase();
+      const effectiveFrom = rate.effectiveFrom ?? rate.effective_from ?? '';
+      const effectiveTo = rate.effectiveTo ?? rate.effective_to ?? null;
+      return rate.isActive !== false
+        && rate.is_active !== false
+        && rateDayType === targetDayType
+        && effectiveFrom <= date
+        && (!effectiveTo || effectiveTo >= date);
+    });
+    const latest = matches => matches.sort((left, right) =>
+      String(right.effectiveFrom ?? right.effective_from ?? '')
+        .localeCompare(String(left.effectiveFrom ?? left.effective_from ?? ''))
+    )[0];
+    const exact = eligible.filter(rate =>
+      String(rate.mealPeriod ?? rate.meal_period ?? '').trim().toLowerCase() === targetMealPeriod
+    );
+    const selected = latest(exact);
+    if (selected) return selected;
+    if (targetMealPeriod === 'all day') return undefined;
+    return latest(eligible.filter(rate =>
+      String(rate.mealPeriod ?? rate.meal_period ?? '').trim().toLowerCase() === 'all day'
+    ));
   }
 
   function parseReservationTime(value) {
@@ -474,7 +533,13 @@
             reservation.table === match.id
             && reservation.date >= asOfDate
             && ['Pending', 'Confirmed', 'Seated'].includes(reservation.status)
-            && Number(reservation.actualCovers ?? reservation.guests ?? 0) > template.seats
+            && Number(
+              reservation.actualCovers
+              ?? reservation.guests
+              ?? Number(reservation.adults || 0)
+                + Number(reservation.seniorPwdCount ?? reservation.senior_pwd_count ?? 0)
+                + Number(reservation.children || 0)
+            ) > template.seats
           );
           if (blockingReservations.length) {
             conflicts.push({
@@ -521,6 +586,7 @@
     batchStatus,
     buildReservationRecord,
     canPerformInventoryAction,
+    activeBuffetRate,
     convertQuantity,
     createRevenueRecord,
     createStockMovement,
@@ -533,6 +599,7 @@
     planConsumption,
     productionProgress,
     reservationRevenue,
+    normalizeReservationGuestCounts,
     reservationEndTime,
     reservationStayLimitReached,
     reservationTimeSlots,
