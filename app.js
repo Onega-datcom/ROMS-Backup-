@@ -93,7 +93,7 @@ function persistReservationFilters() {
   }));
 }
 const roleAccess = {
-  'Administrator': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'roles', 'settings', 'reservations', 'calendar', 'tables'],
+  'Administrator': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'reservations', 'calendar', 'tables'],
   'Manager': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'reservations', 'calendar', 'tables'],
   'Inventory Clerk': ['ingredients', 'receiving', 'counts', 'reports'],
   'Chef / Kitchen Staff': ['recipes', 'production', 'waste'],
@@ -493,7 +493,7 @@ const sidebarGroups = [
   { id: 'production', label: 'Kitchen Operations', icon: 'chef-hat', items: [['recipes', 'book', 'Recipes'], ['production', 'chef-hat', 'Production Board'], ['waste', 'trash', 'Waste Logs']] },
   { id: 'revenue-management', label: 'Revenue Management', icon: 'chart', items: [['revenue', 'chart', 'Revenue Tracking']] },
   { id: 'analytics', label: 'Analytics & Reports', icon: 'chart', items: [['reports', 'chart', 'Reports & analytics']] },
-  { id: 'system', label: 'System Management', icon: 'settings', items: [['users', 'users', 'User Management'], ['roles', 'shield', 'Role Management'], ['settings', 'settings', 'System Settings']] }
+  { id: 'system', label: 'System Management', icon: 'users', items: [['users', 'users', 'User Management']] }
 ];
 
 const shellIconPaths = {
@@ -1274,16 +1274,76 @@ function ratesPage() {
   });
 }
 function usersPage() {
-  const rows = all('users').filter(item => `${item.name} ${item.email} ${item.role}`.toLowerCase().includes(state.query.toLowerCase()))
-    .map(item => `<tr><td><div class="cell-title"><span class="avatar user-avatar">${esc((item.name || item.email || '?').split(' ').map(part => part[0]).join('').slice(0, 2))}</span><strong>${esc(item.name || 'Team member')}</strong></div></td><td>${esc(item.email)}</td><td><span class="tag">${esc(item.role)}</span></td><td><span class="status status-good">Active</span></td><td></td></tr>`);
-  return tablePage({
-    eyebrow: 'Administration',
-    title: state.view === 'roles' ? 'Role management' : state.view === 'settings' ? 'System settings' : 'User management',
-    subtitle: 'User accounts and roles are managed through Supabase Auth and protected profiles.',
-    search: 'users',
-    headers: ['User', 'Email', 'Role', 'Status', ''],
-    rows
+  const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
+  state.userRoleFilter = state.userRoleFilter || 'All';
+  const search = String(state.query || '').toLowerCase();
+  const users = all('users').filter(item => state.userRoleFilter === 'All' || item.role === state.userRoleFilter);
+  const filtered = users.filter(item => `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase().includes(search));
+  if (!document.documentElement.dataset.userDetailsRowsBound) {
+    document.documentElement.dataset.userDetailsRowsBound = 'true';
+    document.addEventListener('click', event => {
+      const row = event.target.closest('.user-management-page .user-row');
+      if (!row || state.role !== 'Administrator') return;
+      const user = all('users').find(item => String(item.id) === row.dataset.userId);
+      if (user) openForm('user', user);
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const row = event.target.closest('.user-management-page .user-row');
+      if (!row || event.target !== row || state.role !== 'Administrator') return;
+      event.preventDefault();
+      const user = all('users').find(item => String(item.id) === row.dataset.userId);
+      if (user) openForm('user', user);
+    });
+  }
+  const rows = users.map(item => {
+    const searchText = `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase();
+    return `<tr class="user-row" data-user-id="${esc(item.id)}" data-user-search="${esc(searchText)}" ${searchText.includes(search) ? '' : 'hidden'} tabindex="0" aria-label="View details for ${esc(item.name || item.email || 'user')}">
+      <td data-label="User"><div class="cell-title"><span class="avatar user-avatar">${esc((item.name || item.email || '?').split(' ').map(part => part[0]).join('').slice(0, 2))}</span><strong>${esc(item.name || 'Team member')}</strong></div></td>
+      <td data-label="Email">${esc(item.email || '')}</td>
+      <td data-label="Role"><span class="user-role-label">${esc(item.role || 'Unassigned')}</span></td>
+    </tr>`;
   });
+  const emptyState = `<tr class="user-empty-row" ${filtered.length ? 'hidden' : ''}><td colspan="3"><div class="user-empty-state"><strong>No users found.</strong><p>Try a different search or role filter.</p></div></td></tr>`;
+  return `<section class="user-management-page">
+    ${pageHeader('Administration', 'User Management', 'Manage user profiles, roles, and access permissions.')}
+    <div class="toolbar user-management-toolbar">
+      <div class="search-box">⌕<input id="tableSearch" dir="ltr" placeholder="Search users..." value="${esc(state.query)}" aria-label="Search users"></div>
+      <label class="user-filter">Role<select data-user-filter="role" aria-label="Filter by role"><option value="All">All Roles</option>${roles.map(role => `<option value="${esc(role)}" ${state.userRoleFilter === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
+      <span class="record-count" id="userManagementCount">${filtered.length} users</span>
+    </div>
+    <div class="panel table-panel"><div class="table-scroll"><table class="users-table">
+      <thead><tr><th>User</th><th>Email</th><th>Role</th></tr></thead>
+      <tbody>${rows.length ? rows.join('') : emptyState}</tbody>
+    </table></div></div>
+  </section>
+  <style>
+    .user-management-page .user-management-toolbar { align-items: end; }
+    .user-management-page .user-filter { display: grid; gap: 4px; min-width: 150px; color: var(--muted); font-size: 11px; }
+    .user-management-page .user-filter select { min-width: 0; min-height: 40px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; color: var(--ink); }
+    .user-management-page #tableSearch { direction: ltr; text-align: left; unicode-bidi: normal; }
+    .user-management-page .users-table { min-width: 760px; }
+    .user-management-page .users-table tr[hidden] { display: none !important; }
+    .user-management-page .user-row { cursor: pointer; }
+    .user-management-page .user-row:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+    .user-management-page .user-row:hover { background: #f7fbf9; }
+    .user-management-page .user-role-label { font-weight: 600; }
+    .user-management-page .user-empty-state { display: grid; justify-items: center; gap: 8px; padding: 28px 12px; text-align: center; white-space: normal; }
+    .user-management-page .user-empty-state p { margin: 0 0 8px; color: var(--muted); }
+    .user-management-page .user-empty-row td::before { content: none; }
+    @media (max-width: 720px) {
+      .user-management-page .user-management-toolbar { align-items: stretch; }
+      .user-management-page .user-filter { min-width: 100%; }
+      .user-management-page .users-table { display: block; min-width: 0; }
+      .user-management-page .users-table thead { display: none; }
+      .user-management-page .users-table tbody { display: grid; gap: 12px; }
+      .user-management-page .users-table tr:not(.user-empty-row) { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+      .user-management-page .users-table td { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; white-space: normal; }
+      .user-management-page .users-table td::before { flex: 0 0 72px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+      .user-management-page .users-table td[data-label="User"] .cell-title { min-width: 0; }
+      .user-management-page .user-empty-row td { display: block; }
+    }
+  </style>`;
 }
 function options(items, valueKey = 'id', labelKey = 'name') { return items.map(x => `<option value="${x[valueKey]}">${esc(x[labelKey])}</option>`).join(''); }
 function updateWasteFormPreview(form) {
@@ -1390,7 +1450,35 @@ async function openForm(type, item) {
   }
   else if (type === 'production') modal('Log production batch', `<div class="form-grid"><label>Recipe<select name="recipeId" required>${options(all('recipes'))}</select></label><label>Batches<input name="quantity" type="number" min="1" step="1" required></label><label>Covers produced <small class="field-help">Optional</small><input name="coversProduced" type="number" min="0" step="1"></label><label>Mode<select name="mode"><option>Batch production</option><option>End-of-day sales summary</option></select></label><label>Date<input name="date" type="date" value="${today()}" required></label></div>`);
   else if (type === 'count') modal('Record physical count', `<div class="form-grid"><label>Ingredient<select name="ingredientId" required>${options(all('ingredients'))}</select></label><label>Expected quantity<input name="expected" type="number" min="0" step=".01" required></label><label>Actual count<input name="actual" type="number" min="0" step=".01" required></label><label>Count date<input name="date" type="date" value="${today()}" required></label></div>`);
-  else if (type === 'user') modal('Add workspace user', `<div class="form-grid"><label>Full name<input name="name" required></label><label>Work email<input name="email" type="email" required></label><label class="full">Role<select name="role"><option>Administrator</option><option>Manager</option><option>Inventory Clerk</option><option>Chef / Kitchen Staff</option><option>Receptionist</option></select></label></div>`, 'Add user');
+  else if (type === 'user') {
+    if (!item) return toast('Select a user to view their details.', 'error');
+    const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
+    modal('User Details', `<section class="user-details-section">
+      <h3 class="panel-title">User Information</h3>
+      <div class="form-grid"><label>Full Name<input type="text" value="${esc(item.name || '')}" readonly></label><label>Email<input type="email" value="${esc(item.email || '')}" readonly></label><label class="full">Current Role<input type="text" value="${esc(item.role || 'Unassigned')}" readonly></label></div>
+    </section>
+    <section class="user-details-section" style="margin-top: 20px">
+      <h3 class="panel-title">Role Management</h3>
+      <label>Role<select name="role" data-role-save-id="${esc(item.id)}" aria-label="Role for ${esc(item.name || item.email || 'user')}" required>${roles.map(role => `<option value="${esc(role)}" ${item.role === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
+    </section>`, 'Save Role', 'user-details-modal');
+    const form = document.querySelector('#modalForm');
+    form.id = 'userDetailsRoleForm';
+    form.dataset.userId = item.id;
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const control = form.querySelector('[data-role-save-id]');
+      const currentUser = all('users').find(user => String(user.id) === form.dataset.userId);
+      if (!currentUser || !control) return toast('This user is no longer available. Reload the page and try again.', 'error');
+      if (control.value === currentUser.role) {
+        closeModal();
+        return;
+      }
+      control.dataset.userRole = control.dataset.roleSaveId;
+      control.dispatchEvent(new Event('change', { bubbles: true }));
+      delete control.dataset.userRole;
+    });
+    return;
+  }
   document.querySelector('#modalForm').dataset.type = type; if (item) document.querySelector('#modalForm').dataset.id = item.id;
 }
 function emptyReceivingLine() {
@@ -2561,7 +2649,31 @@ document.addEventListener('submit', async event => {
   }
   if (formId === 'modalForm') { event.preventDefault(); handleSubmit(event.target); }
 });
-document.addEventListener('input', event => { if (event.target.id === 'tableSearch') { state.query = event.target.value; render(); const search = document.querySelector('#tableSearch'); search.focus(); search.setSelectionRange(state.query.length, state.query.length); } });
+document.addEventListener('input', event => {
+  const searchInput = event.target;
+  if (searchInput.id !== 'tableSearch') return;
+  state.query = searchInput.value;
+  if (state.view === 'users') {
+    const query = state.query.toLowerCase();
+    const rows = document.querySelectorAll('.user-management-page .user-row');
+    let visibleRows = 0;
+    rows.forEach(row => {
+      row.hidden = !row.dataset.userSearch.includes(query);
+      if (!row.hidden) visibleRows++;
+    });
+    const count = document.querySelector('#userManagementCount');
+    const emptyState = document.querySelector('.user-management-page .user-empty-row');
+    if (count) count.textContent = `${visibleRows} users`;
+    if (emptyState) emptyState.hidden = visibleRows > 0;
+    return;
+  }
+  const selectionStart = searchInput.selectionStart ?? searchInput.value.length;
+  const selectionEnd = searchInput.selectionEnd ?? selectionStart;
+  render();
+  const replacement = document.querySelector('#tableSearch');
+  replacement?.focus();
+  replacement?.setSelectionRange(selectionStart, selectionEnd);
+});
 document.addEventListener('input', event => {
   if (event.target.id !== 'tableManagementSearch') return;
   state.tableManagementQuery = event.target.value;
@@ -3124,13 +3236,13 @@ function render() {
   }
   document.querySelector('#sidebar').innerHTML = nav();
   renderShellChrome();
-  const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management', roles: 'System Management', settings: 'System Management' };
-  const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', users: 'User management', roles: 'Role management', settings: 'System settings', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management' };
+  const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management' };
+  const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', users: 'User Management', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management' };
   const activeGroup = sidebarGroups.find(group => group.items.some(([view]) => view === state.view));
   const crumbLabel = state.view === 'dashboard' ? 'Overview' : (moduleNames[state.view] || 'Workspace');
   const crumbTarget = activeGroup?.items.find(([view]) => canAccess(view))?.[0] || 'dashboard';
   document.querySelector('.breadcrumb').innerHTML = `<a class="crumb-parent" href="#${crumbTarget}" data-view="${crumbTarget}">${esc(crumbLabel)}</a><span aria-hidden="true">›</span><strong id="pageCrumb" tabindex="-1">${esc(pageNames[state.view] || state.view)}</strong>`;
-  const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), users: () => usersPage(), roles: () => usersPage(), settings: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
+  const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), users: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
   const renderPage = pages[state.view];
   if (!renderPage) {
     console.error(`No page renderer is registered for "${state.view}".`);
@@ -3179,8 +3291,7 @@ function actions(type, itemId) {
   const icon = name => name === 'view' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>' : name === 'edit' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.8 4.3 4.3-.8L19 8.5 15.5 5 4 16.5Z"/><path d="m14 6.5 3.5 3.5"/></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg>';
   const viewable = ['ingredient', 'recipe'].includes(type);
   const editable = (type === 'ingredient' && window.CostTrackLogic.canPerformInventoryAction(state.role, 'product.manage'))
-    || (type === 'recipe' && window.CostTrackLogic.canPerformInventoryAction(state.role, 'recipe.manage'))
-    || (type === 'user' && state.role === 'Administrator');
+    || (type === 'recipe' && window.CostTrackLogic.canPerformInventoryAction(state.role, 'recipe.manage'));
   return `<div class="row-actions">${viewable ? `<button type="button" data-action="view-${type}" data-id="${itemId}" aria-label="${labels.view}"><span class="tooltip">${labels.view}</span>${icon('view')}</button>` : ''}${editable ? `<button type="button" data-action="edit-${type}" data-id="${itemId}" aria-label="${labels.edit}"><span class="tooltip">${labels.edit}</span>${icon('edit')}</button>` : ''}</div>`;
 }
 
@@ -3418,25 +3529,39 @@ document.addEventListener('change', event => {
     if (reservationCalendar) reservationCalendar.refetchEvents();
     return;
   }
-  if (event.target.id === 'tableSearch') { state.query = event.target.value; render(); }
+  if (event.target.id === 'tableSearch') {
+    state.query = event.target.value;
+    if (state.view !== 'users') render();
+  }
+  if (event.target.matches('[data-user-filter="role"]')) {
+    state.userRoleFilter = event.target.value;
+    render();
+    return;
+  }
   if (event.target.matches('[data-user-role]')) {
     const control = event.target;
     const userId = control.dataset.userRole;
     const previous = all('users').find(item => item.id === userId)?.role;
-    if (!confirm(`Change this user's role to ${control.value}?`)) {
+    if (state.role !== 'Administrator' || !previous) {
       control.value = previous || control.value;
-      return;
+      return toast('Only Administrators can change user roles.', 'error');
     }
+    if (control.value === previous) return;
+    control.disabled = true;
     window.supabaseClient.from('profiles').update({ role: control.value }).eq('id', userId).then(({ error }) => {
       if (error) {
         control.value = previous || control.value;
+        control.disabled = false;
         toast(friendlyRpcError(error), 'error');
         return;
       }
-      toast('User role updated.');
-      return syncWithSupabase();
+      return syncWithSupabase().then(() => {
+        if (control.closest('#userDetailsRoleForm')) closeModal();
+        toast('Role updated successfully.');
+      });
     }).catch(error => {
       control.value = previous || control.value;
+      control.disabled = false;
       toast(friendlyRpcError(error), 'error');
     });
   }
@@ -3454,7 +3579,6 @@ document.addEventListener('input', event => {
   if (event.target.matches('[data-custom-portions]')) {
     event.target.closest('.production-dish-card')?.querySelector('[data-use-custom-portions="true"]')?.removeAttribute('data-request-id');
   }
-  if (event.target.id === 'tableSearch') { state.query = event.target.value; render(); document.querySelector('#tableSearch')?.focus(); }
 });
 window.addEventListener('beforeunload', event => {
   if (!state.modalDirty) return;
