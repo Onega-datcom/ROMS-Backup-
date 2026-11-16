@@ -402,12 +402,26 @@
   const RESTAURANT_OPEN_MINUTES = 10 * 60;
   const RESTAURANT_CLOSE_MINUTES = 21 * 60;
 
-  function reservationTimeSlots() {
+  function reservationStartTimeIsInPast(date, time, now = new Date()) {
+    const dateMatch = String(date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const startMinutes = parseReservationTime(time);
+    if (!dateMatch || startMinutes === null || !(now instanceof Date) || !Number.isFinite(now.getTime())) return false;
+
+    const reservationDate = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+    const currentDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    if (reservationDate < currentDate) return true;
+    if (reservationDate > currentDate) return false;
+
+    const currentMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60 + now.getMilliseconds() / 60000;
+    return startMinutes < currentMinutes;
+  }
+
+  function reservationTimeSlots(date, now = new Date()) {
     const slots = [];
     for (let minutes = RESTAURANT_OPEN_MINUTES; minutes + MAX_TABLE_STAY_MINUTES <= RESTAURANT_CLOSE_MINUTES; minutes += 30) {
       slots.push(formatReservationTime(minutes));
     }
-    return slots;
+    return date ? slots.filter(time => !reservationStartTimeIsInPast(date, time, now)) : slots;
   }
 
   function isReservationTimeWithinOpenHours(value) {
@@ -595,6 +609,7 @@
     formatReservationTime,
     isReservationTimeWithinOpenHours,
     parseReservationTime,
+    reservationStartTimeIsInPast,
     planRestaurantTableLayout,
     planConsumption,
     productionProgress,

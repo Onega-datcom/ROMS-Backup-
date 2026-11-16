@@ -14,8 +14,17 @@ const menu = [
 ];
 const money = value => `₱${value.toLocaleString('en-PH')}`;
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
-function publicReservationTimeOptions() {
-  return window.CostTrackLogic.reservationTimeSlots().map(time => `<option value="${time}">${time}</option>`).join('');
+function publicReservationTimeOptions(date, selectedTime = '') {
+  return window.CostTrackLogic.reservationTimeSlots(date)
+    .map(time => `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`)
+    .join('');
+}
+function refreshPublicReservationTimeOptions(form) {
+  const select = form.elements.time;
+  const selectedTime = select.value;
+  const slots = window.CostTrackLogic.reservationTimeSlots(form.elements.date.value);
+  select.innerHTML = `<option value="" selected disabled>Choose a time</option>${publicReservationTimeOptions(form.elements.date.value, selectedTime)}`;
+  if (slots.includes(selectedTime)) select.value = selectedTime;
 }
 const publicReservationCooldownMs = 60 * 1000;
 const publicReservationCooldownKey = 'isobel_public_reservation_cooldown';
@@ -25,6 +34,7 @@ function publicReservationCooldownRemaining() {
 function publicReservationError(error) {
   const message = String(error?.message || error || '');
   if (/rate limit|unable to process reservation request/i.test(message)) return 'We received several requests from this contact recently. Please wait a minute and try again.';
+  if (/reservation start time has already passed|cannot be scheduled in the past/i.test(message)) return 'That reservation time has already passed. Choose a later time.';
   if (/reservation time must be within restaurant hours|two-hour reservation window/i.test(message)) return 'Choose a start time from 10:00 AM through 7:00 PM so your two-hour seating window ends by closing at 9:00 PM.';
   return 'We could not submit your reservation. Please check your details and try again.';
 }
@@ -42,7 +52,7 @@ function dishCard(d) { return `<article><img src="${d[4]}" alt="${d[0]}"><div><s
 function about() { return shell('about', `<section class="inner-hero"><small>Our story</small><h1>Rooted in home.<br><em>Made for here.</em></h1><p>ISOBEL is a love letter to the flavors, people, and places that shaped us.</p></section><section class="split"><div><small>The beginning</small><h2>A table set<br>with <em>intention.</em></h2><p>ISOBEL began with a simple belief: the best meals are the ones that bring people closer. Our kitchen takes the comfort of Filipino cooking and gives it a fresh, thoughtful point of view.</p><p>Every detail is an invitation to slow down and stay awhile.</p></div><img src="https://images.unsplash.com/photo-1552566626-52f8b828add9?auto=format&fit=crop&w=1000&q=85" alt="ISOBEL dining space"></section><section class="values"><small>What guides us</small><div class="value-grid">${[['01','Generosity','We believe a table should always have room for one more.'],['02','Integrity','We honor ingredients, traditions, and the hands behind them.'],['03','Joy','We make space for the little celebrations that make life delicious.']].map(v=>`<div><span>${v[0]}</span><h3>${v[1]}</h3><p>${v[2]}</p></div>`).join('')}</div></section>`); }
 function menuPage() { return shell('menu', `<section class="inner-hero menu-hero"><small>The menu</small><h1>Flavors with<br><em>a point of view.</em></h1><p>Filipino favorites, reimagined with seasonal ingredients and a little ISOBEL magic.</p></section><section class="section menu-page"><div class="filters">${['All dishes','Main Course','Appetizers','Desserts','Beverages','Buffet Specials'].map((c,i)=>`<button class="${i?'':'active'}" data-filter="${c}">${c}</button>`).join('')}</div><div class="menu-grid">${menu.map(dishCard).join('')}</div></section>`); }
 function buffet() { const packs = [['Silver','499',['Main dishes','Desserts','Unlimited drinks']],['Gold','799',['Premium menu selection','Seafood options','Desserts','Unlimited drinks']],['Platinum','999',['Full buffet experience','Premium menu','VIP seating','Unlimited drinks']]]; return shell('buffet', `<section class="inner-hero buffet-hero"><small>Gather generously</small><h1>There is always<br><em>room for more.</em></h1><p>Our buffet packages are made for birthdays, reunions, and the stories that happen around a full table.</p></section><section class="section"><small>Choose your experience</small><h2>Made for <em>your gathering.</em></h2><div class="packages">${packs.map((p,i)=>`<article class="${i===1?'featured':''}"><small>${p[0]} package</small><h3>₱${p[1]} <i>per person</i></h3><p>A generous spread for easy, joyful gatherings.</p><ul>${p[2].map(f=>`<li>✓ ${f}</li>`).join('')}</ul><button class="${i===1?'primary':'outline'}" data-page="reservation">Choose ${p[0]} ↗</button></article>`).join('')}</div></section>`); }
-function reservation() { return shell('reservation', `<section class="form-hero"><div><small>A seat at our table</small><h1>Reserve your<br><em>moment.</em></h1><p>Tell us a little about your visit and we will take care of the rest.</p></div><img src="https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1000&q=85" alt="Set restaurant table"></section><section class="form-layout"><form id="reservationForm"><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><small>Reservation details</small><h2>Let's make it <em>special.</em></h2><div class="form-row"><label>Full name<input name="name" required placeholder="Your full name"></label><label>Contact number<input name="phone" required placeholder="09XX XXX XXXX"></label></div><div class="form-row"><label>Email address<input name="email" type="email" required placeholder="you@email.com"></label><label>Number of guests<select name="guests"><option value="2">2 guests</option><option value="3">3 guests</option><option value="4">4 guests</option><option value="5">5 guests</option><option value="6">6+ guests</option></select></label></div><div class="form-row"><label>Reservation date<input name="date" type="date" required></label><label>Reservation time<select name="time" required><option value="" selected disabled>Choose a time</option>${publicReservationTimeOptions()}</select><small>Each reservation has a two-hour seating window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM.</small></label></div><label>Occasion<select name="occasion"><option>Birthday</option><option>Anniversary</option><option>Family gathering</option><option>Business meeting</option></select></label><label>Special requests<textarea name="requests" rows="4" placeholder="Dietary requirements or seating preferences"></textarea></label><button class="primary">Request reservation ↗</button></form><aside><small>Good to know</small><h3>We hold your table for 15 minutes after your reservation time.</h3><p>For parties of 8 or more, contact us directly so we can make your gathering just right.</p><button class="link" data-page="status">Check reservation status →</button></aside></section>`); }
+function reservation() { return shell('reservation', `<section class="form-hero"><div><small>A seat at our table</small><h1>Reserve your<br><em>moment.</em></h1><p>Tell us a little about your visit and we will take care of the rest.</p></div><img src="https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1000&q=85" alt="Set restaurant table"></section><section class="form-layout"><form id="reservationForm"><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><small>Reservation details</small><h2>Let's make it <em>special.</em></h2><div class="form-row"><label>Full name<input name="name" required placeholder="Your full name"></label><label>Contact number<input name="phone" required placeholder="09XX XXX XXXX"></label></div><div class="form-row"><label>Email address<input name="email" type="email" required placeholder="you@email.com"></label><label>Number of guests<select name="guests"><option value="2">2 guests</option><option value="3">3 guests</option><option value="4">4 guests</option><option value="5">5 guests</option><option value="6">6+ guests</option></select></label></div><div class="form-row"><label>Reservation date<input name="date" type="date" required></label><label>Reservation time<select name="time" required><option value="" selected disabled>Choose a time</option>${publicReservationTimeOptions()}</select><small>Each reservation has a two-hour seating window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM. Past times today are unavailable.</small></label></div><label>Occasion<select name="occasion"><option>Birthday</option><option>Anniversary</option><option>Family gathering</option><option>Business meeting</option></select></label><label>Special requests<textarea name="requests" rows="4" placeholder="Dietary requirements or seating preferences"></textarea></label><button class="primary">Request reservation ↗</button></form><aside><small>Good to know</small><h3>We hold your table for 15 minutes after your reservation time.</h3><p>For parties of 8 or more, contact us directly so we can make your gathering just right.</p><button class="link" data-page="status">Check reservation status →</button></aside></section>`); }
 function status() { return shell('status', `<section class="inner-hero status-hero"><small>Your reservation</small><h1>We saved you<br><em>a seat.</em></h1><p>Enter your reservation reference below to see the latest update.</p></section><section class="status-section"><form id="statusForm"><label>Reservation number<input name="reference" value="RES-2026-001" placeholder="RES-2026-001"></label><button class="primary">Check status ↗</button></form><div id="statusResult"></div></section>`); }
 function gallery() { const pics = [['Dining area','https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1000&q=85'],['Private rooms','https://images.unsplash.com/photo-1550966871-3ed3cdb5ed0c?auto=format&fit=crop&w=1000&q=85'],['Signature dishes','https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=1000&q=85'],['The buffet','https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1000&q=85'],['Good company','https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1000&q=85'],['Little celebrations','https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?auto=format&fit=crop&w=1000&q=85']]; return shell('gallery', `<section class="inner-hero gallery-hero"><small>A glimpse inside</small><h1>Gather beautifully.<br><em>Stay awhile.</em></h1></section><section class="gallery">${pics.map(p=>`<figure><img src="${p[1]}" alt="${p[0]}"><figcaption>${p[0]} <b>↗</b></figcaption></figure>`).join('')}</section>`); }
 function contact() { return shell('contact', `<section class="inner-hero"><small>Come find us</small><h1>Let's make<br><em>plans.</em></h1><p>Questions, celebrations, or just a hello—we would love to hear from you.</p></section><section class="contact"><div><small>ISOBEL restaurant</small><h2>Good food is<br><em>better shared.</em></h2><div class="contact-lines"><div><b>Visit us</b><span>Sample Restaurant Address</span><span>Batangas, Philippines</span></div><div><b>Call or email</b><span>(043) XXX-XXXX</span><span>contact@isobelrestaurant.com</span></div><div><b>Hours</b><span>Monday – Sunday</span><span>10:00 AM – 9:00 PM</span></div></div></div><form id="contactForm"><small>Send a note</small><label>Name<input required placeholder="Your name"></label><label>Email<input type="email" required placeholder="you@email.com"></label><label>Message<textarea required rows="5" placeholder="How can we help?"></textarea></label><button class="primary">Send message ↗</button></form></section>`); }
@@ -50,7 +60,12 @@ const pages = { home, about, menu: menuPage, buffet, reservation, status, galler
 function render(page = location.hash.slice(1) || 'home') {
   app.innerHTML = pages[page] ? pages[page]() : pages.home();
   const date = document.querySelector('#reservationForm [name="date"]');
-  if (date) date.min = localDateStr(new Date());
+  if (date) {
+    date.min = localDateStr(new Date());
+    date.closest('form').addEventListener('change', event => {
+      if (event.target.matches('[name="date"]')) refreshPublicReservationTimeOptions(event.currentTarget);
+    });
+  }
   const statusForm = document.querySelector('#statusForm');
   if (statusForm) {
     statusForm.querySelector('input[name="reference"]').value = '';
@@ -69,6 +84,18 @@ function bind() {
   reservationForm?.addEventListener('submit', async event => {
     event.preventDefault();
     const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    if (window.CostTrackLogic.reservationStartTimeIsInPast(form.get('date'), form.get('time'))) {
+      let message = formElement.querySelector('.form-error');
+      if (!message) {
+        message = document.createElement('p');
+        message.className = 'form-error';
+        message.setAttribute('role', 'alert');
+        formElement.prepend(message);
+      }
+      message.textContent = 'That reservation time has already passed. Choose a later time.';
+      return;
+    }
     if (publicReservationCooldownRemaining()) {
       const seconds = Math.ceil(publicReservationCooldownRemaining() / 1000);
       let cooldownMessage = formElement.querySelector('.form-error');
@@ -81,7 +108,6 @@ function bind() {
       cooldownMessage.textContent = `Please wait ${seconds} seconds before submitting another reservation.`;
       return;
     }
-    const form = new FormData(formElement);
     const submit = formElement.querySelector('button[type="submit"],button:not([type])');
     submit.disabled = true;
     submit.setAttribute('aria-busy', 'true');

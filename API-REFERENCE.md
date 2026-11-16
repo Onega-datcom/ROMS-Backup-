@@ -118,6 +118,7 @@ RPC functions used by the application:
 | `costtrack_start_production_batches` | Start production batches |
 | `costtrack_load_production_history` | Load production history |
 | `costtrack_complete_production_batch` | Complete a production batch |
+| `pos_seat_and_open_walkin` | Atomically create a Seated Walk-in and its Open POS bill |
 
 Full RPC endpoint inventory:
 
@@ -139,6 +140,7 @@ Full RPC endpoint inventory:
 | `/rest/v1/rpc/costtrack_start_production_batches` | Start selected production batches |
 | `/rest/v1/rpc/costtrack_load_production_history` | Load filtered production history |
 | `/rest/v1/rpc/costtrack_complete_production_batch` | Mark a production batch ready and apply its completion logic |
+| `/rest/v1/rpc/pos_seat_and_open_walkin` | Validate and atomically seat a Walk-in and open its server-priced bill |
 
 ## POS access rules
 
@@ -158,6 +160,22 @@ Receptionist bill visibility is enforced twice: RLS filters database reads by `c
 
 The former `create_revenue_draft(text)` function is not an available API. Migration 010 revokes execution from `PUBLIC`, `anon`, and `authenticated`; no current UI code calls it. Revenue integration is deferred to Phase 4, where closed POS bills will be the source of truth.
 
+### Atomic Walk-in billing and Phase C safeguards (migrations 013–016)
+
+`pos_seat_and_open_walkin` is executable by authenticated Administrator, Manager, and Receptionist users. It requires the caller’s own open cashier shift and accepts `p_customer_name`, `p_phone`, `p_email`, `p_reservation_date`, `p_reservation_time`, `p_table_id`, `p_adult_count`, `p_senior_count`, `p_kids_count`, `p_notes`, and `p_idempotency_key`. It validates counts and seating/table constraints, inserts the Seated reservation, calls the existing Phase 3 bill RPC within the same transaction, records the cashier-scoped idempotency key, and returns JSON containing `reservation`, `bill`, `lines`, and `already_created`. A retry with the same cashier/key returns the original result. A failure at any point rolls back the reservation and bill.
+
+The browser exposes this operation as **Seat and open bill**; **Seat only** remains available. The operation has the existing 15-second timeout behavior, and retries from the same form reuse its key. Payment is still taken after the meal.
+
+Migration 013 also adds database guards for event packages attached to Walk-ins. A Manager or Administrator must provide a 10–500 character reason when adding or changing the package booking; the actor, reason, package, tier, pax, and timestamp are written to `pos_walkin_package_overrides`. A package bill line for a Walk-in must match both its current authorized reservation package and an override audit row. Direct table/RPC attempts by Receptionists cannot bypass this rule. Non-package extras remain available.
+
+The bill UI compares reservation and bill counts by adult, Senior/PWD, and kid categories. Differences require a cashier confirmation before save but are not blocked. Closing without a linked table shows a confirmation warning. **Add Leftover charge** reads the active `LEFTOVER` item from `pos_charge_items`; the server remains the source of price and totals. Exact, ₱500, and ₱1,000 payment shortcuts only set the tender input; `pos_close_bill_phase3` remains responsible for payment and change calculation. Bill-close requests and the follow-up related-record refresh have 15-second limits so the UI exits its loading state and reports a timeout or refresh warning. Retrying from the same payment form reuses its idempotency key.
+
+Migration 014 corrects the reservation guard so ordinary Walk-in inserts with no package are not treated as package overrides. Migration 015 permits a past Seated reservation to transition to Completed only when its linked bill has been closed and fully settled by the current actor in the same transaction; other historical edits remain protected. Run `supabase/015_past_reservation_bill_close.sql` after 014, then run the 013 and 015 acceptance scripts; both end with `ROLLBACK`. The 013 rollback removes the atomic entry point but intentionally retains idempotency/audit records and package enforcement. The 014 rollback restores the original guard defect and is not recommended. The 015 rollback restores the prior historical guard.
+
+Migration 016 adds `pos_resolve_stale_walkin(p_reservation_id text, p_reason text)`. It is executable by authenticated users but checks for the Manager or Administrator role in the database. It may complete only a past Seated Walk-in, requires a 10–500 character reason, and rejects any linked bill that is not Closed and fully settled, as well as any Held deposit. The operator must confirm that the party has left. The RPC changes the reservation status and completion timestamp only; it does not create, settle, or alter bills, payments, deposits, inventory, or table configuration. The reservation update is recorded by the existing audit log, while direct status updates remain blocked. Run `supabase/016_stale_walkin_completion.sql` after 015 and then `supabase/016_stale_walkin_completion_acceptance.sql`; the acceptance ends with `ROLLBACK`. Roll back 016 with `supabase/016_stale_walkin_completion_rollback.sql` before rolling back 015.
+
+Migration 017 rejects a new same-day reservation, or a changed reservation schedule, when its start time has passed in the restaurant's Asia/Manila time zone. Walk-ins are exempt because their start time is recorded as guests arrive; edits that leave an existing reservation's date and time unchanged remain allowed. The management and public reservation forms also filter out today's elapsed slots and validate again on submit. Run `supabase/017_prevent_past_reservation_times.sql` after 016, then run `supabase/017_prevent_past_reservation_times_acceptance.sql` after 10:00 AM Asia/Manila; the acceptance ends with `ROLLBACK`. Roll back with `supabase/017_prevent_past_reservation_times_rollback.sql` before rolling back 016.
+
 ## Reservation guest counts and source (Phase A)
 
 The `reservations` table stores:
@@ -171,7 +189,7 @@ The `reservations` table stores:
 
 Reservation totals and table-capacity checks use `adults + senior_pwd_count + children`. The browser validates whole-number counts; the database enforces a positive total and table capacity. Walk-ins may have no email or phone. Other reservations still require at least one of them, and the application does not fabricate contact details.
 
-The public booking endpoint remains `POST /rest/v1/rpc/public_create_reservation` with the existing `payload` JSON argument. Website requests remain Pending, use the existing contact/rate-limit validation, default `senior_pwd_count` to `0`, and are tagged `Website` by the database. Staff create or update reservations through the existing `reservations` table endpoint subject to RLS, triggers, and constraints; the optional source is selected from the supported list.
+The public booking endpoint remains `POST /rest/v1/rpc/public_create_reservation` with the existing `payload` JSON argument. Website requests remain Pending, use the existing contact/rate-limit validation, default `senior_pwd_count` to `0`, and are tagged `Website` by the database. Staff create or update reservations through the existing `reservations` table endpoint subject to RLS, triggers, and constraints; the optional source is selected from the supported list. From the Reservations page, confirming a pending booking can also assign an eligible table in the same update, or leave it unassigned when no table is chosen.
 
 Example:
 

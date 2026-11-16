@@ -116,7 +116,8 @@ function mapDatabaseRecord(collection, row) {
       actualCovers: row.actual_covers, correctionReason: row.last_correction_reason || '',
       packageChargeItemId: row.package_charge_item_id || '',
       packageTierId: row.package_tier_id || '',
-      packagePaxCount: row.package_pax_count == null ? '' : Number(row.package_pax_count)
+      packagePaxCount: row.package_pax_count == null ? '' : Number(row.package_pax_count),
+      packageOverrideReason: row.package_override_reason || ''
     };
   }
   if (collection === 'restaurantTables') {
@@ -314,7 +315,8 @@ function mapApplicationRecord(collection, record) {
     last_correction_reason: record.correctionReason || '',
     package_charge_item_id: record.packageChargeItemId || null,
     package_tier_id: record.packageTierId || null,
-    package_pax_count: record.packagePaxCount === '' || record.packagePaxCount == null ? null : Number(record.packagePaxCount)
+    package_pax_count: record.packagePaxCount === '' || record.packagePaxCount == null ? null : Number(record.packagePaxCount),
+    package_override_reason: record.packageOverrideReason || ''
   };
   if (collection === 'restaurantTables') return {
     id: record.id, seats: record.seats,
@@ -709,11 +711,76 @@ window.supabaseRecord = {
       window.clearTimeout(timeoutId);
     }
   },
+  async posSeatAndOpenWalkIn(payload) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient.rpc('pos_seat_and_open_walkin', {
+        p_customer_name: payload.customerName || 'Walk-in guest',
+        p_phone: payload.phone || '',
+        p_email: payload.email || '',
+        p_reservation_date: payload.date,
+        p_reservation_time: payload.time,
+        p_table_id: payload.tableId,
+        p_adult_count: payload.adultCount,
+        p_senior_count: payload.seniorCount,
+        p_kids_count: payload.kidsCount,
+        p_notes: payload.notes || '',
+        p_idempotency_key: payload.idempotencyKey
+      }).abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('Walk-in seat-and-bill request timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('Walk-in seat-and-bill request timed out after 15 seconds. The server may still finish it. Retry from this same form to reuse its idempotency key, or reload the Walk-in and bill lists before starting another request.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  },
   async posCloseBill(billId, tenderedAmount, idempotencyKey) {
-    const { data, error } = await window.supabaseClient.rpc('pos_close_bill_phase3', {
-      p_bill_id: billId,
-      p_tendered_amount: tenderedAmount,
-      p_idempotency_key: idempotencyKey
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient.rpc('pos_close_bill_phase3', {
+        p_bill_id: billId,
+        p_tendered_amount: tenderedAmount,
+        p_idempotency_key: idempotencyKey
+      }).abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('Bill close timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('Bill close timed out after 15 seconds. The server may still finish it. Retry from this same payment form to reuse its idempotency key, or reload Cashier and check the bill status before retrying.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  },
+  async posResolveStaleWalkIn(reservationId, reason) {
+    const { data, error } = await window.supabaseClient.rpc('pos_resolve_stale_walkin', {
+      p_reservation_id: reservationId,
+      p_reason: reason
     });
     throwIfError(error);
     return data;

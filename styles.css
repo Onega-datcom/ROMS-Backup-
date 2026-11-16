@@ -256,28 +256,6 @@ th:first-child {
   gap: 8px;
 }
 
-.table-layout-group + .table-layout-group {
-  margin-top: 24px;
-}
-
-.table-layout-group-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 0 10px;
-}
-
-.table-layout-group-heading h2 {
-  margin: 0;
-  font: 700 14px 'Plus Jakarta Sans', sans-serif;
-}
-
-.table-layout-group-heading span {
-  color: var(--muted);
-  font-size: 10px;
-}
-
 .table-management-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

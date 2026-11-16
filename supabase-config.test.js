@@ -89,11 +89,13 @@ test('reservation mapping preserves Senior/PWD count and source in both directio
     children: 2,
     source: 'Phone',
     status: 'Pending',
-    type: 'Reservation'
+    type: 'Reservation',
+    package_override_reason: 'Approved event exception'
   });
 
   assert.equal(mapped.seniorPwdCount, 1);
   assert.equal(mapped.source, 'Phone');
+  assert.equal(mapped.packageOverrideReason, 'Approved event exception');
   await record.upsert('reservations', {
     id: 'RS-1',
     date: '2026-11-11',
@@ -104,10 +106,12 @@ test('reservation mapping preserves Senior/PWD count and source in both directio
     children: 2,
     source: 'Phone',
     status: 'Pending',
-    type: 'Reservation'
+    type: 'Reservation',
+    packageOverrideReason: 'Approved event exception'
   });
   assert.equal(inserted.senior_pwd_count, 1);
   assert.equal(inserted.source, 'Phone');
+  assert.equal(inserted.package_override_reason, 'Approved event exception');
 });
 
 test('posSaveBill returns a successful RPC response without waiting for its timeout', async () => {
@@ -119,5 +123,113 @@ test('posSaveBill returns a successful RPC response without waiting for its time
   }));
 
   assert.equal(await record.posSaveBill({}), expected);
+  assert.equal(timers.size, 0);
+});
+
+test('posCloseBill sends the bill, tender, and idempotency key and clears its timeout', async () => {
+  let call;
+  const expected = { bill: { id: 'bill-1', status: 'Closed' } };
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
+  });
+
+  assert.equal(await record.posCloseBill('bill-1', 1496, 'same-payment-key'), expected);
+  assert.equal(call.name, 'pos_close_bill_phase3');
+  assert.equal(call.args.p_bill_id, 'bill-1');
+  assert.equal(call.args.p_tendered_amount, 1496);
+  assert.equal(call.args.p_idempotency_key, 'same-payment-key');
+  assert.equal(timers.size, 0);
+});
+
+test('posCloseBill aborts and reports when the RPC does not respond within 15 seconds', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({
+    abortSignal(requestSignal) {
+      signal = requestSignal;
+      return new Promise(() => {});
+    }
+  }));
+  const pending = record.posCloseBill('bill-1', 1496, 'retry-same-payment');
+  const [timeout] = timers.values();
+
+  timeout();
+
+  await assert.rejects(
+    pending,
+    /Bill close timed out after 15 seconds\..*same payment form.*idempotency key/
+  );
+  assert.equal(signal.aborted, true);
+  assert.equal(timers.size, 0);
+});
+
+test('posResolveStaleWalkIn sends the reservation and audit reason to its guarded RPC', async () => {
+  let call;
+  const expected = { reservation_id: 'walk-in-1', status: 'Completed' };
+  const { record } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return Promise.resolve({ data: expected, error: null });
+  });
+
+  assert.equal(await record.posResolveStaleWalkIn('walk-in-1', 'Guests confirmed departed.'), expected);
+  assert.equal(call.name, 'pos_resolve_stale_walkin');
+  assert.equal(call.args.p_reservation_id, 'walk-in-1');
+  assert.equal(call.args.p_reason, 'Guests confirmed departed.');
+});
+
+test('posSeatAndOpenWalkIn sends all counts and the stable idempotency key', async () => {
+  let call;
+  const expected = { reservation: { id: 'walk-in-1' }, bill: { id: 'bill-1' } };
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
+  });
+
+  assert.equal(await record.posSeatAndOpenWalkIn({
+    customerName: 'Walk-in guest',
+    phone: '',
+    email: '',
+    date: '2026-11-11',
+    time: '12:00 PM',
+    tableId: 'T05',
+    adultCount: 4,
+    seniorCount: 1,
+    kidsCount: 2,
+    notes: '',
+    idempotencyKey: 'same-walk-in-request'
+  }), expected);
+  assert.equal(call.name, 'pos_seat_and_open_walkin');
+  assert.equal(call.args.p_adult_count, 4);
+  assert.equal(call.args.p_senior_count, 1);
+  assert.equal(call.args.p_kids_count, 2);
+  assert.equal(call.args.p_idempotency_key, 'same-walk-in-request');
+  assert.equal(timers.size, 0);
+});
+
+test('posSeatAndOpenWalkIn aborts after the 15-second timeout', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({
+    abortSignal(requestSignal) {
+      signal = requestSignal;
+      return new Promise(() => {});
+    }
+  }));
+  const pending = record.posSeatAndOpenWalkIn({
+    idempotencyKey: 'retry-same-request'
+  });
+  const [timeout] = timers.values();
+
+  timeout();
+
+  await assert.rejects(pending, /Walk-in seat-and-bill request timed out after 15 seconds\..*same form.*idempotency key/);
+  assert.equal(signal.aborted, true);
   assert.equal(timers.size, 0);
 });

@@ -198,6 +198,20 @@ test('limits two-hour reservation windows to restaurant hours and generates half
   assert.equal(logic.reservationEndTime('7:00 PM'), '9:00 PM');
 });
 
+test('filters same-day reservation slots without blocking future dates', () => {
+  const now = new Date(2026, 10, 16, 12, 1, 0);
+  assert.equal(logic.reservationStartTimeIsInPast('2026-11-16', '12:00 PM', now), true);
+  assert.equal(logic.reservationStartTimeIsInPast('2026-11-16', '12:30 PM', now), false);
+  assert.equal(logic.reservationStartTimeIsInPast('2026-11-16', '12:30 PM', new Date(2026, 10, 16, 12, 30, 0)), false);
+  assert.equal(logic.reservationStartTimeIsInPast('2026-11-16', '12:30 PM', new Date(2026, 10, 16, 12, 30, 1)), true);
+  assert.equal(logic.reservationStartTimeIsInPast('2026-11-17', '10:00 AM', now), false);
+
+  const todaySlots = logic.reservationTimeSlots('2026-11-16', now);
+  assert.equal(todaySlots.includes('12:00 PM'), false);
+  assert.equal(todaySlots.includes('12:30 PM'), true);
+  assert.equal(logic.reservationTimeSlots('2026-11-17', now).length, 19);
+});
+
 test('preserves generated reservation IDs despite the form hidden ID and retains existing booking type', () => {
   const first = logic.buildReservationRecord(
     null,

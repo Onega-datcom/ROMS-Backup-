@@ -4,7 +4,7 @@
 
 1. **Phase 1 — POS foundation: DONE.** Migrations, charge catalog, package tiers and inclusions, discounts, settings, RLS, role matrix, and sidebar entries.
 2. **Phase 2 — Cashier and bills: DONE and confirmed.** Server-calculated bills, head counts, extras, discounts and approvals, cash payment/change, idempotent close, void approvals, and the billing statement. Phase 2 is confirmed and tested; do not change it unless Phase 3 requires it.
-3. **Phase 3 — Shifts, deposits, reservations, and table integration: IMPLEMENTED; original 007/008 acceptance was user-confirmed. The user reports running follow-up 009 and the updated acceptance script, but did not report its result here. Current browser issues remain under investigation.** Do not start Phase 4 until the user confirms Phase 3 after validation.
+3. **Phase 3 — Shifts, deposits, reservations, and table integration: IMPLEMENTED; the user confirmed the updated 013/015 acceptance checks, bill payment/closure, and shift closure. Migration 016 adds an audited stale-Walk-in correction; its deployment and acceptance are pending.** Do not start Phase 4 until the user confirms 016 validation.
 4. **Phase 4 — Revenue and reporting integration: NOT STARTED.** Revenue from closed bills, dashboard/reports, food vs non-food, comped counts, leftover KPI, notifications, and reconciliation of legacy reservation drafts. Do not start until the user confirms Phase 3.
 
 ### Walk-in and reservation enhancement — Phase A
@@ -31,7 +31,9 @@ Run `supabase/011_reservation_guest_counts.sql` after `supabase/010_pos_single_s
 4. Run `supabase/010_pos_single_source_security.sql`.
 5. Run `supabase/011_reservation_guest_counts.sql`, then `supabase/012_reservation_guest_count_constraint.sql`.
 6. Run `supabase/010_pos_single_source_acceptance.sql`, `supabase/008_pos_phase3_acceptance.sql`, and `supabase/011_reservation_guest_counts_acceptance.sql` as the database owner. The first two retain their existing profile prerequisites; all acceptance scripts end with `ROLLBACK`.
-7. To roll back Phase A, run `supabase/012_reservation_guest_count_constraint_rollback.sql`, then `supabase/011_reservation_guest_counts_rollback.sql`. The rollback preserves rows; the restored legacy guest-total and contact constraints remain unvalidated if Senior/PWD counts or contactless Walk-ins exist. To roll back 010 and Phase 3, then run `supabase/010_pos_single_source_security_rollback.sql`, `supabase/009_pos_reservation_completion_and_deposit_history_rollback.sql`, `supabase/008_pos_reservations_deposits_and_close_rollback.sql`, and `supabase/007_pos_shifts_and_notifications_rollback.sql`. The 008 rollback intentionally stops if Phase 3 operational data exists; export/resolve it first. The 007 rollback retains additive columns/settings and notification records.
+7. After the Phase 16 two-hour seating rules and Phase A migrations 011/012, run `supabase/013_walkin_atomic_billing_safeguards.sql`, `supabase/014_fix_walkin_insert_package_guard.sql`, `supabase/015_past_reservation_bill_close.sql`, `supabase/016_stale_walkin_completion.sql`, and `supabase/017_prevent_past_reservation_times.sql` in order. Then run the 013, 015, 016, and 017 acceptance scripts; each ends with `ROLLBACK`.
+8. Roll back 017 first with `supabase/017_prevent_past_reservation_times_rollback.sql`, then 016 with `supabase/016_stale_walkin_completion_rollback.sql`; 016 restores the 009/015 completion guards. Then, if needed, run `supabase/015_past_reservation_bill_close_rollback.sql` before `supabase/013_walkin_atomic_billing_safeguards_rollback.sql`. The 013 rollback intentionally retains package guard triggers, audit/idempotency tables, and the reservation reason column; it is not a full reversal. Do not run `supabase/014_fix_walkin_insert_package_guard_rollback.sql` unless you intend to restore the bug that rejects un-packaged Walk-ins.
+9. To roll back Phase A, run `supabase/012_reservation_guest_count_constraint_rollback.sql`, then `supabase/011_reservation_guest_counts_rollback.sql`. The rollback preserves rows; the restored legacy guest-total and contact constraints remain unvalidated if Senior/PWD counts or contactless Walk-ins exist. To roll back 010 and Phase 3, then run `supabase/010_pos_single_source_security_rollback.sql`, `supabase/009_pos_reservation_completion_and_deposit_history_rollback.sql`, `supabase/008_pos_reservations_deposits_and_close_rollback.sql`, and `supabase/007_pos_shifts_and_notifications_rollback.sql`. The 008 rollback intentionally stops if Phase 3 operational data exists; export/resolve it first. The 007 rollback retains additive columns/settings and notification records.
 
 ## Roles and permissions
 
@@ -71,7 +73,8 @@ Enforce access in UI, routes, RLS, and RPC:
 ### Seated reservation billing and table links
 
 - A Seated reservation offers “Open bill” and prefills head counts, package line, and deposit.
-- A reservation cannot be manually completed; closing and fully settling its linked bill completes it atomically.
+- A normal Seated reservation is completed by closing and fully settling its linked bill.
+- A Manager or Administrator may resolve a past Seated Walk-in only after confirming the party left and entering an audited reason. The RPC refuses linked bills that are not Closed and fully settled, and Held deposits; it changes no financial or inventory records. Other historical status edits remain blocked.
 - A reservation cannot have two open bills.
 - Closing its bill completes the reservation and updates actual covers.
 - A bill may link to a table. Closing it sets the table to the existing system “needs cleaning” status. Bills without a table do not affect table status.
@@ -90,6 +93,43 @@ Enforce access in UI, routes, RLS, and RPC:
 - Walk-in table options and database capacity validation use total covers. Existing two-hour table availability and overlap rules remain in force.
 - Reservation source is optional and may be Website, Phone, Facebook, Walk-in, or Other. The public booking RPC continues to use its existing signature; generated public references are tagged Website.
 - Reservation rate estimates include Senior/PWD using the active buffet-rate catalog; an unavailable rate remains “No rate set.”
+
+## Phase B/C — atomic Walk-in billing and safeguards
+
+Migration `013_walkin_atomic_billing_safeguards.sql` adds the atomic Walk-in RPC, cashier-scoped idempotency records, and database-enforced Walk-in package overrides. Run it after migrations 011 and 012. Before installing guards, it checks for existing Walk-in package bookings without a matching override audit and stops with an explicit error rather than silently breaking their future billing; review any such rows before rerunning. Migration 014 fixes the initial guard so an un-packaged Walk-in insert does not require a package override. Migration 015 allows the settlement RPC to complete a past Seated reservation only when its matching bill has been closed and fully settled in the same transaction. The 013 rollback disables/drops the RPC but intentionally retains idempotency/audit tables, the audit data, the package guard triggers, and the reservation reason column; removing those could orphan operational/audit records or reopen the package path.
+
+### Phase B — Seat and open bill
+
+- The Walk-in form offers **Seat and open bill** plus **Seat only**. Seat-and-open is available only when a table is available and the signed-in cashier has an open shift.
+- `pos_seat_and_open_walkin` validates the role, the cashier’s own open shift, category counts, table capacity/status, and the existing seating-hour and reservation-overlap rules. It creates a Seated Walk-in and its Open POS bill in the same transaction, using the same adult/Senior-PWD/kids counts, selected table, and Phase 3 server-priced bill logic.
+- A cashier/idempotency-key pair is unique. Retrying the same request returns its existing reservation and bill. The existing one-open-bill-per-reservation constraint still rejects a second bill.
+- A failed step rolls back both records and table-status changes. The browser request times out after 15 seconds and retains the same key on retry. Payment remains due after the meal; no pay-upfront path is added.
+
+### Phase C — billing safeguards and Walk-in packages
+
+- Reservation-linked bills display reservation and bill counts by category. Any category mismatch shows a warning and requires confirmation on save; it does not block saving.
+- Closing a bill without a table requires a warning confirmation; the database rules are unchanged.
+- **Add Leftover charge** uses the active `LEFTOVER` charge catalog row and its server-side catalog price. If no active item exists, the shortcut is not offered. The ordinary extras picker remains available.
+- The payment form keeps Exact as the default and offers ₱500 and ₱1,000 shortcuts when those tender amounts cover the balance. The server still calculates applied payment and change.
+- A Walk-in cannot be assigned an event package unless a Manager or Administrator changes its package booking with a 10–500 character reason. The database guard applies to direct writes as well as the UI. Each override is recorded with reservation, package/tier/pax, actor, reason, and timestamp. Receptionists cannot override. A package bill line must match the currently authorized Walk-in package and an audit record. À la carte extras and party trays remain permitted; party-tray client policy is still open.
+- Migration 013 does not load or change Package A/B or party-tray data and does not change Phase 2/3 pricing, deposits, cash, inventory, or revenue rules.
+
+Run `supabase/013_walkin_atomic_billing_safeguards_acceptance.sql` and `supabase/015_past_reservation_bill_close_acceptance.sql` as the database owner after migrations 013–015. Both run in transactions and end in `ROLLBACK`. Browser checks remain necessary for button/loading/print presentation and must include a 4-adult, 1-Senior/PWD, 2-kid Walk-in (expected subtotal ₱2,606), one leftover item from the catalog, the existing Phase 3 deposit/payment flow, and closing a bill linked to a past reservation.
+
+### Phase B/C assumptions and manual browser checks
+
+- The application supplies the current local seating date/time; the server also applies the existing two-hour opening-hours, date, and table-conflict checks. The database date allowance accounts for the browser/database timezone boundary; the UI only offers the current time.
+- Acceptance expects the existing seeded `LEFTOVER` catalog item to be active at ₱200. Production bill pricing continues to read the current catalog value, not this test value.
+- Package A/B and party-tray products/inclusions are not loaded. Party-tray restrictions remain a client question.
+
+As Receptionist, open a shift and record 4 adults, 1 Senior/PWD, and 2 kids at a table with at least 7 seats. Click **Seat and open bill** once, then try a quick double click/retry; verify one Seated reservation and one Open bill with counts 4/1/2 and subtotal ₱2,606. Add **Leftover charge** and verify subtotal ₱2,806. Record/apply a ₱500 reservation deposit, close after the meal with ₱2,500 tendered, and verify ₱2,306 applied and ₱194 change. Also verify the seat-only action; zero/negative/decimal counts and an undersized table; an unavailable shift; a forced database failure; and that the form stops loading and gives an error on failure. As a Manager, add/change a Walk-in package with a reason of at least 10 characters and verify the audit row; as Receptionist, confirm the package controls are unavailable. On a reservation-linked bill, change one guest category and verify the warning and save confirmation; close a no-table bill and verify its warning; test Exact/₱500/₱1,000 shortcuts and confirm the server-calculated change. Verify Phase 2/3 bill, deposit, void request, print, shift, table, and reservation flows remain usable.
+
+| Phase B/C verification | Result | Evidence |
+| --- | --- | --- |
+| JavaScript syntax and focused tests | PASS | `node --check app.js`, `node --check supabase-config.js`, and `node --test business-logic.test.js supabase-config.test.js`: 29/29 tests passed, including RPC payload/idempotency and 15-second save, walk-in, and bill-close timeout tests. |
+| Whitespace/diff check | PASS | `git diff --check` completed successfully. |
+| Migration and transactional database acceptance | NOT RUN after latest fixes | Migration 014 fixed the package-free Walk-in guard. Supabase later reported `Past reservations are read-only for this role` while closing a bill linked to a past reservation; migration 015 now narrowly permits that settled bill-close transition. Run both acceptance scripts after applying 015. |
+| Browser workflow and visual checks | NOT RUN | Apply migrations 013–015 and deploy the browser files, then retry bill close and the manual steps above. |
 
 ## Phase A verification
 

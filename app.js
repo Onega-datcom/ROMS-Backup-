@@ -336,12 +336,15 @@ function activeBuffetRate(item, date = item?.date || today()) {
 }
 function friendlyRpcError(error) {
   const message = String(error?.message || error || '');
+  if (/reservation start time has already passed|cannot be scheduled in the past/i.test(message)) return 'That reservation time has already passed. Choose a later time.';
   if (/reservation time must be within restaurant hours|two-hour reservation window/i.test(message)) return 'Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.';
   if (/production would make stock negative/i.test(message)) return 'Not enough inventory is available to complete this batch. Ask an Inventory Clerk to check the stock before marking it ready.';
   if (/table_type|restaurant_tables.*area/i.test(message) && /column|schema cache|does not exist/i.test(message)) return 'Apply the Phase 15 table layout migration in Supabase, then reload the app.';
   if (/reservations_active_assigned_table_uidx|overlapping two-hour reservation/i.test(message)) return 'That table already has an overlapping two-hour reservation.';
   if (/selected table does not have enough seats/i.test(message)) return 'This table does not have enough seats for the reservation.';
   if (/table capacity cannot be reduced/i.test(message)) return 'Capacity cannot be reduced below an active party already assigned to this table.';
+  if (/linked POS bill first/i.test(message)) return 'Resolve this Walk-in’s linked POS bill in Cashier; it must be Closed and fully settled before clearing the table.';
+  if (/held deposit/i.test(message)) return 'Refund or forfeit this Walk-in’s held deposit before clearing the table.';
   if (/tables linked to reservation history/i.test(message)) return 'This table is linked to reservation history and cannot be deleted.';
   if (/foreign key|violates.*constraint|referenced/i.test(message)) {
     if (/ingredient/i.test(message)) return 'This ingredient is used by recipes or inventory history and cannot be deleted.';
@@ -1867,6 +1870,39 @@ function refreshReservationTables(form) {
     toast('That table is not available for the selected date, time, or party size.', 'error');
   }
 }
+function reservationTimeOptionsMarkup(date, selectedTime, existingReservation) {
+  const slots = window.CostTrackLogic.reservationTimeSlots(date);
+  const keepExistingTime = Boolean(
+    existingReservation
+    && date === existingReservation.date
+    && selectedTime === existingReservation.time
+  );
+  const keepSelectedTime = Boolean(
+    selectedTime
+    && window.CostTrackLogic.isReservationTimeWithinOpenHours(selectedTime)
+    && !window.CostTrackLogic.reservationStartTimeIsInPast(date, selectedTime)
+  );
+  const keepTime = keepExistingTime || keepSelectedTime;
+  const hasSelectedSlot = slots.includes(selectedTime);
+  const placeholderSelected = !hasSelectedSlot && !(keepTime && selectedTime);
+  const slotOptions = slots.map(time =>
+    `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`
+  ).join('');
+  const selectedOption = selectedTime && !hasSelectedSlot && keepTime
+    ? `<option value="${esc(selectedTime)}" selected>${esc(selectedTime)} · ${keepExistingTime ? 'existing' : 'selected'}</option>`
+    : '';
+  return `<option value="" disabled ${placeholderSelected ? 'selected' : ''}>Choose a time</option>${slotOptions}${selectedOption}`;
+}
+function refreshReservationTimeOptions(form) {
+  const select = form.elements.time;
+  if (!select) return;
+  const existingReservation = all('reservations').find(item => item.id === form.dataset.id);
+  select.innerHTML = reservationTimeOptionsMarkup(
+    form.elements.date.value,
+    select.value,
+    existingReservation
+  );
+}
 function reservationForm(item = {}, defaults = {}) {
   const isPastReservation = Boolean(item.id && item.date && item.date < today());
   const canCorrectPast = isPastReservation && ['Administrator', 'Manager'].includes(state.role);
@@ -1876,33 +1912,43 @@ function reservationForm(item = {}, defaults = {}) {
   const adults = Number(item.adults ?? item.guests ?? 2);
   const seniorPwdCount = Number(item.seniorPwdCount || 0);
   const children = Number(item.children || 0);
+  const reservationDate = item.date || defaults.date || today();
+  const selectedTime = item.time || defaults.time || '';
   const tableOptions = reservationTableOptions({
     tableId: item.table,
-    date: item.date || defaults.date || today(),
-    time: item.time || defaults.time || '',
+    date: reservationDate,
+    time: selectedTime,
     partySize: adults + seniorPwdCount + children,
     reservationId: item.id
   });
-  const selectedTime = item.time || defaults.time || '';
-  const reservationTimeSlots = window.CostTrackLogic.reservationTimeSlots();
-  const timeOptions = `<option value="" disabled ${selectedTime ? '' : 'selected'}>Choose a time</option>${reservationTimeSlots.map(time => `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`).join('')}${selectedTime && !reservationTimeSlots.includes(selectedTime) ? `<option value="${esc(selectedTime)}" selected>${esc(selectedTime)} · existing</option>` : ''}`;
+  const timeOptions = reservationTimeOptionsMarkup(reservationDate, selectedTime, item);
   const packageItems = all('chargeItems').filter(charge => charge.type === 'package' && charge.isPackage && charge.isActive !== false);
   const packageTiers = all('packageTiers').filter(tier => tier.isActive !== false);
   const packageOptions = packageItems.map(charge => `<option value="${esc(charge.id)}" ${item.packageChargeItemId === charge.id ? 'selected' : ''}>${esc(charge.name)}</option>`).join('');
   const tierOptions = packageTiers.map(tier => `<option value="${esc(tier.id)}" ${item.packageTierId === tier.id ? 'selected' : ''}>${esc(tier.name)} · ${money(tier.basePrice)} / pax</option>`).join('');
-  const packageDisabled = isPastReservation ? 'disabled' : '';
-  const packageSection = `<fieldset class="product-form-section"><legend>Package booking (optional)</legend><div class="form-grid"><label>Package<select name="packageChargeItemId" ${packageDisabled}><option value="">No package</option>${packageOptions}</select></label><label>Package tier<select name="packageTierId" ${packageDisabled}><option value="">Choose a tier</option>${tierOptions}</select></label><label>Booked pax<input name="packagePaxCount" type="number" min="1" max="1000" step="1" value="${esc(item.packagePaxCount || '')}" ${packageDisabled}></label></div><small class="field-help">Package price is charged as food revenue. Additional guests are suggested on the bill.</small></fieldset>`;
+  const receptionistWalkIn = item.type === 'Walk-in' && state.role === 'Receptionist';
+  const packageDisabled = isPastReservation || receptionistWalkIn ? 'disabled' : '';
+  const packageOverrideField = item.type === 'Walk-in' && ['Manager', 'Administrator'].includes(state.role)
+    ? '<label class="full">Manager override reason<textarea name="packageOverrideReason" minlength="10" maxlength="500" rows="2"></textarea><small class="field-help">Required when adding or changing a Walk-in event package; saved to the package override audit log.</small></label>'
+    : '';
+  const packageRuleHelp = receptionistWalkIn
+    ? 'Event packages cannot be added to Walk-ins by Receptionists. A Manager or Administrator must enter an override reason.'
+    : 'Package price is charged as food revenue. Additional guests are suggested on the bill.';
+  const packageSection = `<fieldset class="product-form-section"><legend>Package booking (optional)</legend><div class="form-grid"><label>Package<select name="packageChargeItemId" ${packageDisabled}><option value="">No package</option>${packageOptions}</select></label><label>Package tier<select name="packageTierId" ${packageDisabled}><option value="">Choose a tier</option>${tierOptions}</select></label><label>Booked pax<input name="packagePaxCount" type="number" min="1" max="1000" step="1" value="${esc(item.packagePaxCount || '')}" ${packageDisabled}></label>${packageOverrideField}</div><small class="field-help">${packageRuleHelp}</small></fieldset>`;
   const historyNotice = isPastReservation
     ? `<div class="reservation-history-notice"><strong>${canCorrectPast ? 'Historical correction' : 'Past reservation · view only'}</strong><span>${canCorrectPast ? 'Only the guest name, contact details, occasion, seating preference, and special-request notes can be corrected. Date, time, party size, table, and status are locked. Your reason is recorded in the audit log.' : 'Past bookings are kept for reference and cannot be changed from this account.'}</span></div>`
     : '';
   const correctionReason = canCorrectPast
     ? `<label>Correction reason<textarea name="correctionReason" minlength="10" maxlength="500" required placeholder="Explain why this historical detail needs correction"></textarea><small class="field-help">Required; enter at least 10 characters.</small></label>`
     : '';
+  const staleWalkInResolution = canCorrectPast && item.type === 'Walk-in' && item.status === 'Seated'
+    ? `<div class="reservation-history-notice"><strong>Clear stale table occupancy</strong><span>Only mark this visit complete after confirming the guests have left. This does not create or settle a bill. Any linked bill must be Closed and fully settled, and held deposits must be resolved first; this action and reason are audited.</span><label>Completion reason<textarea name="staleWalkInCompletionReason" minlength="10" maxlength="500" rows="2"></textarea></label><button type="button" class="primary-btn" data-action="resolve-stale-walkin" data-id="${esc(item.id)}">Mark guests departed</button></div>`
+    : '';
   const sourceOptions = ['', 'Website', 'Phone', 'Facebook', 'Walk-in', 'Other']
     .map(source => `<option value="${esc(source)}" ${String(item.source || '') === source ? 'selected' : ''}>${source || 'Not specified'}</option>`)
     .join('');
   const lockReservationDetails = lockHistoricalFields || lockReadOnlyFields;
-  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><small class="field-help">${item.type === 'Walk-in' ? 'Contact details are optional for walk-ins.' : 'Enter a phone number or email address.'}</small><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(item.date || defaults.date || today())}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="1000" step="1" value="${adults}" required ${lockReservationDetails}></label><label>Senior / PWD<input name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="${seniorPwdCount}" required ${lockReservationDetails}></label><label>Kids<input name="children" type="number" min="0" max="1000" step="1" value="${children}" required ${lockReservationDetails}></label></div><div class="form-grid"><label>Table<select name="table" ${lockReservationDetails}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label><label>Source<select name="source" ${lockReservationDetails}>${sourceOptions}</select></label></div>${packageSection}<label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}`;
+  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><small class="field-help">${item.type === 'Walk-in' ? 'Contact details are optional for walk-ins.' : 'Enter a phone number or email address.'}</small><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(reservationDate)}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM. Past times today are unavailable.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="1000" step="1" value="${adults}" required ${lockReservationDetails}></label><label>Senior / PWD<input name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="${seniorPwdCount}" required ${lockReservationDetails}></label><label>Kids<input name="children" type="number" min="0" max="1000" step="1" value="${children}" required ${lockReservationDetails}></label></div><div class="form-grid"><label>Table<select name="table" ${lockReservationDetails}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label><label>Source<select name="source" ${lockReservationDetails}>${sourceOptions}</select></div>${packageSection}<label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}${staleWalkInResolution}`;
   const title = isPastReservation ? canCorrectPast ? 'Correct past reservation' : 'Past reservation details' : item.id ? 'Update reservation' : 'New reservation';
   const submitLabel = isReadOnly ? '' : item.id ? canCorrectPast ? 'Save correction' : 'Save changes' : 'Create reservation';
   modal(title, formContent, submitLabel);
@@ -1952,11 +1998,16 @@ function walkInForm() {
   const countFields = counts.map(([label, name]) =>
     `<label>${label}<input name="${name}" type="number" min="0" max="1000" step="1" value="0" required></label>`
   ).join('');
-  modal('Record walk-in', `<div class="form-grid">${countFields}<label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label></div><div class="form-grid"><label>Guest name (optional)<input name="name" maxlength="160" value="Walk-in guest" autocomplete="name"></label><label>Phone (optional)<input name="phone" type="tel" maxlength="40" autocomplete="tel"></label><label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="email"></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Seated time and meal period are recorded automatically. Tables must fit the total covers and have no overlapping two-hour booking.</small></label>`, 'Record walk-in');
+  const hasOpenShift = all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id);
+  modal('Record walk-in', `<div class="form-grid">${countFields}<label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label></div><div class="form-grid"><label>Guest name (optional)<input name="name" maxlength="160" value="Walk-in guest" autocomplete="name"></label><label>Phone (optional)<input name="phone" type="tel" maxlength="40" autocomplete="tel"></label><label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="email"></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Seated time and meal period are recorded automatically. Tables must fit the total covers and have no overlapping two-hour booking.</small></label><div class="walk-in-billing-action"><button type="submit" class="primary-btn" data-walk-in-action="seat-and-open"${available.tables.length && hasOpenShift ? '' : ' disabled'}>Seat and open bill</button><small class="field-help">${hasOpenShift ? 'The bill opens with these same head counts and remains unpaid until you close it.' : 'An open cashier shift is required to create the bill. You can seat only, or open a shift and try again.'}</small></div>`, 'Seat only');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'walk-in';
+  form.dataset.walkInKey = id('WALKIN');
+  form.dataset.hasOpenShift = String(hasOpenShift);
+  form.dataset.hasAvailableTable = String(Boolean(available.tables.length));
   const submit = form.querySelector('.modal-submit');
   if (submit) submit.disabled = !available.tables.length;
+  submit?.classList.replace('primary-btn', 'ghost-btn');
 }
 function refreshWalkInTables(form) {
   const select = form?.elements?.table;
@@ -1973,8 +2024,11 @@ function refreshWalkInTables(form) {
     message.textContent = 'No available tables are currently suitable for this party and seating window.';
     message.classList.toggle('is-hidden', Boolean(available.tables.length));
   }
+  form.dataset.hasAvailableTable = String(Boolean(available.tables.length));
   const submit = form.querySelector('.modal-submit');
   if (submit) submit.disabled = !available.tables.length;
+  const seatAndOpen = form.querySelector('[data-walk-in-action="seat-and-open"]');
+  if (seatAndOpen) seatAndOpen.disabled = !available.tables.length || form.dataset.hasOpenShift !== 'true';
 }
 document.addEventListener('click', event => {
   const shortcut = event.target.closest('[data-waste-reason]');
@@ -2038,36 +2092,33 @@ function revenuePage() {
 function reservationsPage() {
   const reservations = all('reservations');
   const selectedDate = state.calendarDate || today();
-  const selected = new Date(`${selectedDate}T12:00:00`);
-  const monthStart = new Date(selected.getFullYear(), selected.getMonth(), 1);
-  const calendarStart = new Date(monthStart);
-  calendarStart.setDate(1 - monthStart.getDay());
-  const calendarDays = Array.from({ length: 42 }, (_, index) => {
-    const date = new Date(calendarStart);
-    date.setDate(calendarStart.getDate() + index);
-    return date;
-  });
-  const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  const reservationsForDate = date => reservations.filter(item => item.date === date);
   const dateMatches = item => state.reservationDateFilter === 'Today' ? item.date === today() : state.reservationDateFilter === 'Upcoming' ? item.date >= today() : item.date === selectedDate;
   const baseItems = reservations.filter(dateMatches).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter) && (!state.query || `${item.name} ${item.email} ${item.phone}`.toLowerCase().includes(state.query.toLowerCase())));
-  const items = baseItems.filter(item => (state.reservationFilter === 'All' || item.status === state.reservationFilter) && (state.reservationMealPeriodFilter === 'All' || reservationMealPeriod(item) === state.reservationMealPeriodFilter)).sort((a, b) => (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
+  const items = baseItems
+    .filter(item => (state.reservationFilter === 'All' || item.status === state.reservationFilter) && (state.reservationMealPeriodFilter === 'All' || reservationMealPeriod(item) === state.reservationMealPeriodFilter))
+    .sort((a, b) => a.date.localeCompare(b.date) || (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
   const counts = status => status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
-  const filters = ['All', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled'].map(status => `<button class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`).join('') + ['All', 'Reservation', 'Walk-in'].map(type => `<button class="${state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`).join('') + `<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All meal periods</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select><button class="${state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button class="${state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button>`;
+  const statusFilters = ['All', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled']
+    .map(status => `<button type="button" class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
+    .join('');
+  const typeFilters = ['All', 'Reservation', 'Walk-in']
+    .map(type => `<button type="button" class="${state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
+    .join('');
+  const hasActiveFilters = state.reservationFilter !== 'All'
+    || state.reservationTypeFilter !== 'All'
+    || state.reservationMealPeriodFilter !== 'All'
+    || state.reservationDateFilter !== 'All'
+    || Boolean(String(state.query || '').trim())
+    || selectedDate !== today();
+  const clearFiltersButton = hasActiveFilters
+    ? '<button type="button" class="text-btn reservation-clear-filters" data-reservation-clear-filters>Clear filters</button>'
+    : '';
   const timeline = items.map(item => reservationCard(item, true)).join('');
-  const calendarCells = calendarDays.map(date => {
-    const key = dateKey(date);
-    const dayReservations = reservationsForDate(key).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter));
-    const isCurrentMonth = date.getMonth() === monthStart.getMonth();
-    const isSelected = key === selectedDate;
-    const isToday = key === today();
-    const displayedDayReservations = isSelected ? items : dayReservations;
-    const statusDots = [...new Set(displayedDayReservations.map(item => reservationStatusClass(item.status)))].map(status => `<i class="calendar-status-dot ${status}" aria-hidden="true"></i>`).join('');
-    const badgeCount = isSelected ? items.length : dayReservations.length;
-    return `<button type="button" class="calendar-day${isCurrentMonth ? '' : ' is-outside'}${isSelected ? ' is-selected' : ''}${isToday ? ' is-today' : ''}" data-calendar-date="${key}" aria-label="${reservationDateLabel(key)}${badgeCount ? `, ${badgeCount} reservations` : ''}" aria-pressed="${isSelected}"><span>${date.getDate()}</span>${badgeCount ? `<div class="calendar-day-meta">${statusDots}<b>${badgeCount}</b></div>` : ''}</button>`;
-  }).join('');
   const selectedCount = items.length;
-  const tableCards = all('restaurantTables').map(table => {
+  const tableCards = all('restaurantTables')
+    .slice()
+    .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: 'base' }))
+    .map(table => {
     const availability = liveTableAvailability(table, today(), reservations);
     const booking = availability.primaryBooking;
     const statusClass = availability.status === 'Available' ? 'status-good' : availability.status === 'Reserved' ? 'status-low' : 'status-out';
@@ -2080,7 +2131,7 @@ function reservationsPage() {
     return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}</div>`;
   }).join('');
   const listLabel = state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
-  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><div class="reservation-workspace"><section class="panel reservation-calendar-panel"><div class="panel-header"><div><div class="panel-title">Reservation calendar</div><div class="panel-subtitle">Select a date to view its bookings</div></div><button class="text-btn" data-calendar-today>Today</button></div><div class="calendar-month-toolbar"><button type="button" class="calendar-nav" data-calendar-month="-1" aria-label="Previous month">‹</button><strong>${selected.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</strong><button type="button" class="calendar-nav" data-calendar-month="1" aria-label="Next month">›</button></div><div class="calendar-weekdays">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => `<span>${day}</span>`).join('')}</div><div class="monthly-calendar">${calendarCells}</div><div class="calendar-legend"><span><i class="calendar-status-dot status-good"></i> Confirmed / completed</span><span><i class="calendar-status-dot status-low"></i> Pending</span><span><i class="calendar-status-dot status-out"></i> Cancelled</span></div></section><section class="panel reservation-table-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${selectedCount} reservation${selectedCount === 1 ? '' : 's'} scheduled</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-toolbar"><div class="reservation-filters">${filters}</div><input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Search guests..." aria-label="Search guests"></div><div class="reservation-timeline">${selectedCount ? timeline : `<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>`}</div></section></div>`;
+  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><section class="panel reservation-table-panel reservation-list-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${selectedCount} reservation${selectedCount === 1 ? '' : 's'} scheduled</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-list-controls"><label class="reservation-date-field">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div><label class="reservation-search-field">Search<input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Guest, email, or phone" aria-label="Search guests"></label>${clearFiltersButton}</div><div class="reservation-filter-bar"><div class="reservation-filter-group"><span class="reservation-filter-group-label">Status</span><div class="reservation-filters" role="group" aria-label="Filter by reservation status">${statusFilters}</div></div><div class="reservation-filter-group"><span class="reservation-filter-group-label">Type</span><div class="reservation-filters" role="group" aria-label="Filter by booking type">${typeFilters}</div></div><label class="reservation-meal-filter">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label></div><div class="reservation-timeline">${selectedCount ? timeline : `<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>`}</div></section>`;
 }
 function tableManagementPage() {
   const date = state.tableManagementDate || today();
@@ -2149,25 +2200,9 @@ function tableManagementPage() {
     const areaBadge = area !== 'Unassigned' ? `<span class="table-area-badge">${esc(area)}</span>` : '';
     return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>${historyExists ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>' : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`}` : ''}</div></article>`;
   };
-  const groups = [
-    { type: 'Family', area: 'Unassigned', label: 'Family tables' },
-    { type: 'Family', area: 'Front', label: 'Family tables · Front' },
-    { type: 'Family', area: 'Back', label: 'Family tables · Back' },
-    { type: 'Casual', area: 'Front', label: 'Casual tables · Front' },
-    { type: 'Casual', area: 'Back', label: 'Casual tables · Back' },
-    { type: 'Casual', area: 'Unassigned', label: 'Casual tables · Area not set' },
-    { type: 'Unassigned', area: 'Front', label: 'Unclassified · Front' },
-    { type: 'Unassigned', area: 'Back', label: 'Unclassified · Back' },
-    { type: 'Unassigned', area: 'Unassigned', label: 'Unclassified tables' }
-  ];
-  const cards = groups.map(group => {
-    const groupTables = matchingTables.filter(table =>
-      (table.tableType || 'Unassigned') === group.type
-      && (table.area || 'Unassigned') === group.area);
-    if (!groupTables.length) return '';
-    const groupSeats = groupTables.reduce((sum, table) => sum + Number(table.seats || 0), 0);
-    return `<section class="table-layout-group"><div class="table-layout-group-heading"><h2>${group.label}</h2><span>${groupTables.length} table${groupTables.length === 1 ? '' : 's'} · ${groupSeats} seats</span></div><div class="table-management-grid">${groupTables.map(renderCard).join('')}</div></section>`;
-  }).join('') || `<div class="empty-table"><strong>${tables.length ? 'No tables match these filters' : 'No tables have been added yet'}</strong><small>${tables.length ? 'Try another status, capacity, type, area, or search term.' : canManage ? 'Use “Set up restaurant layout” to create the requested 15 tables, or add tables individually.' : 'Ask a Manager or Administrator to add the restaurant tables.'}</small></div>`;
+  const cards = matchingTables.length
+    ? `<div class="table-management-grid">${matchingTables.map(renderCard).join('')}</div>`
+    : `<div class="empty-table"><strong>${tables.length ? 'No tables match these filters' : 'No tables have been added yet'}</strong><small>${tables.length ? 'Try another status, capacity, type, area, or search term.' : canManage ? 'Use “Set up restaurant layout” to create the requested 15 tables, or add tables individually.' : 'Ask a Manager or Administrator to add the restaurant tables.'}</small></div>`;
   const totalSeats = tables.reduce((sum, table) => sum + Number(table.seats || 0), 0);
   const layoutReady = layoutPlan.additions.length === 0 && layoutPlan.updates.length === 0 && layoutPlan.conflicts.length === 0;
   const headerActions = canManage
@@ -2389,10 +2424,98 @@ function restoreModalSubmit(form, label) {
   submit.removeAttribute('aria-busy');
   submit.textContent = label;
 }
-async function handleSubmit(form) {
+function restoreWalkInSubmit(form) {
+  const seatOnly = form.querySelector('.modal-submit');
+  if (seatOnly) {
+    seatOnly.disabled = form.dataset.hasAvailableTable !== 'true';
+    seatOnly.classList.remove('is-loading');
+    seatOnly.removeAttribute('aria-busy');
+    seatOnly.textContent = 'Seat only';
+  }
+  const seatAndOpen = form.querySelector('[data-walk-in-action="seat-and-open"]');
+  if (seatAndOpen) {
+    seatAndOpen.disabled = form.dataset.hasAvailableTable !== 'true' || form.dataset.hasOpenShift !== 'true';
+    seatAndOpen.classList.remove('is-loading');
+    seatAndOpen.removeAttribute('aria-busy');
+    seatAndOpen.textContent = 'Seat and open bill';
+  }
+}
+async function seatAndOpenWalkIn(form) {
+  const data = Object.fromEntries(new FormData(form));
+  let counts;
+  try {
+    counts = window.CostTrackLogic.normalizeReservationGuestCounts(
+      data.adults, data.seniorPwdCount, data.children
+    );
+    if (!data.table) throw new Error('Choose an available table.');
+  } catch (error) {
+    restoreWalkInSubmit(form);
+    toast(error.message, 'error');
+    return;
+  }
+
+  const now = new Date();
+  const date = today();
+  const time = window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+  try {
+    const result = await window.supabaseRecord.posSeatAndOpenWalkIn({
+      customerName: String(data.name || '').trim() || 'Walk-in guest',
+      phone: String(data.phone || '').trim(),
+      email: String(data.email || '').trim(),
+      date,
+      time,
+      tableId: data.table,
+      adultCount: counts.adults,
+      seniorCount: counts.seniorPwdCount,
+      kidsCount: counts.children,
+      notes: String(data.notes || '').trim(),
+      idempotencyKey: form.dataset.walkInKey
+    });
+    const reservation = window.supabaseRecord.mapRecord('reservations', result?.reservation);
+    const bill = window.supabaseRecord.mapRecord('posBills', result?.bill);
+    if (!reservation || !bill) {
+      throw new Error('The server did not return the saved Walk-in reservation and bill. Reload the bill list before retrying.');
+    }
+
+    rememberLocalChange('reservations', reservation.id);
+    upsertLocalRecord('reservations', reservation);
+    rememberLocalChange('posBills', bill.id);
+    upsertLocalRecord('posBills', bill);
+    const lines = (result.lines || []).map(line => window.supabaseRecord.mapRecord('billLines', line));
+    lines.forEach(line => rememberLocalChange('billLines', line.id));
+    replaceLocalRelatedRecords('billLines', line => line.billId === bill.id, lines);
+    let tableRefreshFailed = false;
+    try {
+      await refetchCollection('restaurantTables');
+    } catch (error) {
+      console.error('Walk-in was seated and billed, but table status could not refresh.', error);
+      tableRefreshFailed = true;
+    }
+    state.modalDirty = false;
+    closeModal();
+    toast(tableRefreshFailed
+      ? 'Walk-in and bill were created, but table status did not refresh. Reload before seating another party.'
+      : `${bill.billNumber || 'Bill'} opened for ${reservation.name}. Payment is due after the meal.`,
+    tableRefreshFailed ? 'error' : 'success');
+    billForm(bill);
+  } catch (error) {
+    console.error('Atomic Walk-in seat-and-bill failed.', error);
+    restoreWalkInSubmit(form);
+    toast(friendlyRpcError(error), 'error');
+  }
+}
+async function handleSubmit(form, submitter = null) {
   const data = Object.fromEntries(new FormData(form));
   const type = form.dataset.type;
   const editId = form.dataset.id;
+  if (type === 'reservation-confirmation') {
+    await saveReservationConfirmation(form, data);
+    return;
+  }
+  if (type === 'walk-in' && submitter?.dataset.walkInAction === 'seat-and-open') {
+    await seatAndOpenWalkIn(form);
+    return;
+  }
   let successMessage = 'Saved to cloud.';
   const requiredAction = {
     ingredient: 'product.manage',
@@ -2579,13 +2702,21 @@ async function handleSubmit(form) {
         upsertLocalRecord('billPayments', payment);
       }
       let relatedRefreshWarning = '';
+      let relatedRefreshTimeoutId;
       try {
-        const [payments, reservation, table, deposits] = await Promise.all([
+        const relatedRefresh = Promise.all([
           window.supabaseRecord.loadRelated('billPayments', 'billId', closedBill.id),
           closedBill.reservationId ? window.supabaseRecord.loadRecord('reservations', closedBill.reservationId) : null,
           closedBill.tableId ? window.supabaseRecord.loadRecord('restaurantTables', closedBill.tableId) : null,
           closedBill.reservationId ? window.supabaseRecord.loadRelated('reservationDeposits', 'reservationId', closedBill.reservationId) : null
         ]);
+        const refreshTimeout = new Promise((resolve, reject) => {
+          relatedRefreshTimeoutId = window.setTimeout(
+            () => reject(new Error('Bill closed, but linked record refresh timed out after 15 seconds.')),
+            15000
+          );
+        });
+        const [payments, reservation, table, deposits] = await Promise.race([relatedRefresh, refreshTimeout]);
         payments.forEach(item => rememberLocalChange('billPayments', item.id));
         replaceLocalRelatedRecords('billPayments', item => item.billId === closedBill.id, payments);
         if (reservation) {
@@ -2603,6 +2734,8 @@ async function handleSubmit(form) {
       } catch (refreshError) {
         console.error('Bill closed, but related records could not be refreshed.', refreshError);
         relatedRefreshWarning = ' The bill closed, but linked reservation, table, or deposit details could not refresh; reload the page.';
+      } finally {
+        window.clearTimeout(relatedRefreshTimeoutId);
       }
       setPostSaveSyncState();
       state.modalDirty = false;
@@ -2910,7 +3043,13 @@ async function handleSubmit(form) {
       };
       successMessage = 'Historical correction saved and recorded in the audit log.';
     } else {
+      const reservationType = existing?.type || 'Reservation';
       const dateOrTimeChanged = !existing || data.date !== existing.date || data.time !== existing.time;
+      if (reservationType !== 'Walk-in' && dateOrTimeChanged
+        && window.CostTrackLogic.reservationStartTimeIsInPast(data.date, data.time)) {
+        restoreReservationSubmit();
+        return toast('That reservation time has already passed. Choose a later time.', 'error');
+      }
       if (dateOrTimeChanged && !window.CostTrackLogic.isReservationTimeWithinOpenHours(data.time)) {
         restoreReservationSubmit();
         return toast('Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.', 'error');
@@ -2928,14 +3067,22 @@ async function handleSubmit(form) {
       }
       const email = String(data.email || '').trim();
       const phone = String(data.phone || '').trim();
-      const reservationType = existing?.type || 'Reservation';
       if (reservationType !== 'Walk-in' && !email && !phone) {
         restoreReservationSubmit();
         return toast('Enter a phone number or email address for this reservation.', 'error');
       }
-      const packageChargeItemId = String(data.packageChargeItemId || '');
-      const packageTierId = String(data.packageTierId || '');
-      const packagePaxCount = data.packagePaxCount === '' ? null : Number(data.packagePaxCount);
+      const packageChargeItemId = data.packageChargeItemId === undefined
+        ? String(existing?.packageChargeItemId || '')
+        : String(data.packageChargeItemId || '');
+      const packageTierId = data.packageTierId === undefined
+        ? String(existing?.packageTierId || '')
+        : String(data.packageTierId || '');
+      const packagePaxValue = data.packagePaxCount === undefined
+        ? existing?.packagePaxCount
+        : data.packagePaxCount;
+      const packagePaxCount = packagePaxValue === '' || packagePaxValue == null
+        ? null
+        : Number(packagePaxValue);
       if ((packageChargeItemId || packageTierId || packagePaxCount != null)
         && (!packageChargeItemId || !packageTierId || !Number.isInteger(packagePaxCount) || packagePaxCount < 1 || packagePaxCount > 1000)) {
         restoreReservationSubmit();
@@ -2973,6 +3120,9 @@ async function handleSubmit(form) {
         packageChargeItemId,
         packageTierId,
         packagePaxCount,
+        packageOverrideReason: data.packageOverrideReason === undefined
+          ? String(existing?.packageOverrideReason || '')
+          : String(data.packageOverrideReason || '').trim(),
         table: data.table || '',
         correctionReason: existing?.correctionReason || ''
       };
@@ -3099,6 +3249,7 @@ async function transitionReservation(itemId, nextStatus) {
   if (reservation.date < today()) return toast('Past reservations are kept for history and cannot change status.', 'error');
   const valid = { Pending: ['Confirmed', 'Cancelled'], Confirmed: ['Seated', 'No-show', 'Cancelled'], Seated: ['Completed'] };
   if (!valid[reservation.status]?.includes(nextStatus)) return toast('That reservation status transition is not valid.', 'error');
+  if (nextStatus === 'Confirmed') return openReservationConfirmation(reservation);
   if (nextStatus === 'No-show' && !confirm(`Mark ${reservation.name} as a no-show?`)) return;
   let actualCovers = reservation.actualCovers;
   if (nextStatus === 'Seated') {
@@ -3116,6 +3267,137 @@ async function transitionReservation(itemId, nextStatus) {
   } catch (error) {
     toast(friendlyRpcError(error), 'error');
   }
+}
+function openReservationConfirmation(reservation) {
+  const reservations = all('reservations');
+  const tables = all('restaurantTables').slice().sort((left, right) =>
+    left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: 'base' })
+  );
+  const partySize = Number(reservation.actualCovers || reservation.guests || 0);
+  const eligibleTable = table => {
+    const hasCapacity = Number(table.seats) >= partySize;
+    const hasConflict = window.CostTrackLogic.tableHasReservationConflict(
+      table.id, reservation.date, reservation.time, reservations, reservation.id, today()
+    );
+    return !hasConflict && hasCapacity && table.status !== 'Needs cleaning';
+  };
+  const defaultTable = tables.find(table => table.id === reservation.table && eligibleTable(table))
+    || tables.find(eligibleTable);
+  const tableId = defaultTable?.id || '';
+  const tableOptions = reservationTableOptions({
+    tableId,
+    date: reservation.date,
+    time: reservation.time,
+    partySize,
+    reservationId: reservation.id
+  });
+  const submitLabel = tableId ? 'Confirm & assign table' : 'Confirm without table';
+  modal(
+    'Confirm reservation',
+    `<p class="form-intro">Confirm ${esc(reservationDisplayName(reservation))} for ${esc(reservation.date)} at ${esc(reservation.time)} (${partySize} guest${partySize === 1 ? '' : 's'}). Choose an available table, or leave it unassigned if needed.</p><label>Table<select name="table"><option value="" ${tableId ? '' : 'selected'}>Confirm without assigning a table</option>${tableOptions}</select><small class="field-help">Tables that are too small, need cleaning, or have an overlapping booking are unavailable.</small></label>`,
+    submitLabel
+  );
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'reservation-confirmation';
+  form.dataset.id = reservation.id;
+  form.elements.table.addEventListener('change', () => {
+    const submit = form.querySelector('.modal-submit');
+    if (submit) submit.textContent = form.elements.table.value ? 'Confirm & assign table' : 'Confirm without table';
+  });
+}
+async function saveReservationConfirmation(form, data) {
+  const reservation = all('reservations').find(item => item.id === form.dataset.id);
+  const submitLabel = data.table ? 'Confirm & assign table' : 'Confirm without table';
+  const restoreSubmit = () => restoreModalSubmit(form, submitLabel);
+  if (!reservation || reservation.status !== 'Pending' || reservation.date < today()) {
+    restoreSubmit();
+    return toast('This reservation can no longer be confirmed. Reload and try again.', 'error');
+  }
+
+  const tableId = String(data.table || '');
+  if (tableId) {
+    const table = all('restaurantTables').find(item => item.id === tableId);
+    const partySize = Number(reservation.actualCovers || reservation.guests || 0);
+    if (!table || table.status === 'Needs cleaning') {
+      restoreSubmit();
+      return toast('That table is no longer available. Choose another table or confirm without one.', 'error');
+    }
+    if (Number(table.seats) < partySize) {
+      restoreSubmit();
+      return toast('That table does not have enough seats for this party.', 'error');
+    }
+    if (window.CostTrackLogic.tableHasReservationConflict(
+      table.id, reservation.date, reservation.time, all('reservations'), reservation.id, today()
+    )) {
+      restoreSubmit();
+      return toast('That table now has an overlapping reservation. Choose another table.', 'error');
+    }
+  }
+
+  try {
+    await saveRecord('reservations', {
+      ...reservation,
+      status: 'Confirmed',
+      table: tableId
+    });
+  } catch (error) {
+    restoreSubmit();
+    toast(friendlyRpcError(error), 'error');
+    return;
+  }
+  state.modalDirty = false;
+  closeModal();
+  toast(tableId ? `Reservation confirmed and assigned to ${tableId}.` : 'Reservation confirmed without a table.');
+  render();
+}
+async function resolveStaleWalkIn(reservationId, form, button) {
+  if (!['Administrator', 'Manager'].includes(state.role)) {
+    return toast('Only Managers and Administrators can resolve a stale Walk-in.', 'error');
+  }
+  const reservation = all('reservations').find(item => item.id === reservationId);
+  if (!reservation
+    || reservation.type !== 'Walk-in'
+    || reservation.status !== 'Seated'
+    || reservation.date >= today()) {
+    return toast('This is no longer an eligible past Seated Walk-in. Reload and try again.', 'error');
+  }
+  const reason = String(form?.elements.staleWalkInCompletionReason?.value || '').trim();
+  if (reason.length < 10 || reason.length > 500) {
+    return toast('Enter a completion reason between 10 and 500 characters.', 'error');
+  }
+  if (!confirm('Confirm that the guests have left. This marks only the reservation completed; it does not create or settle a bill, and any other unsaved edits will not be saved.')) return;
+
+  button.disabled = true;
+  button.textContent = 'Completing...';
+  let result;
+  try {
+    result = await window.supabaseRecord.posResolveStaleWalkIn(reservation.id, reason);
+    if (result?.status !== 'Completed') {
+      throw new Error('The database did not confirm reservation completion.');
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Mark guests departed';
+    console.error('Stale Walk-in completion failed.', error);
+    toast(friendlyRpcError(error), 'error');
+    return;
+  }
+
+  state.modalDirty = false;
+  document.querySelector('#modalRoot').innerHTML = '';
+  try {
+    await Promise.all([
+      refetchCollection('reservations'),
+      refetchCollection('restaurantTables')
+    ]);
+  } catch (error) {
+    console.error('Completed Walk-in table data could not be refreshed.', error);
+    toast('The Walk-in was completed, but the table list could not refresh. Reload before seating anyone.', 'error');
+    render();
+    return;
+  }
+  toast(result.already_completed ? 'This Walk-in was already completed.' : 'Walk-in completed; table availability refreshed.');
+  render();
 }
 function confirmRevenueForm(record) {
   modal('Confirm revenue draft', `<p class="panel-subtitle">Review the drafted counts and adjust them before confirmation.</p><div class="form-grid"><label>Adult customers<input name="adult_customers" type="number" min="0" step="1" value="${record.adult_customers}" required></label><label>Child customers<input name="child_customers" type="number" min="0" step="1" value="${record.child_customers}" required></label><label>Senior/PWD customers<input name="senior_pwd_customers" type="number" min="0" step="1" value="${record.senior_pwd_customers}" required></label></div>`, 'Confirm revenue');
@@ -3147,6 +3429,32 @@ function billExtraLineMarkup(line = {}, disabled = false) {
     ${disabled ? '' : '<button type="button" class="ghost-btn compact-btn" data-action="remove-bill-extra">Remove extra</button>'}
   </div>`;
 }
+function updateBillHeadcountWarning(form) {
+  const notice = form?.querySelector('[data-bill-headcount-warning]');
+  if (!notice) return false;
+  const reservationId = form.elements.reservationId?.value || '';
+  const reservation = all('reservations').find(item => item.id === reservationId);
+  if (!reservation) {
+    notice.classList.add('is-hidden');
+    notice.textContent = '';
+    return false;
+  }
+  const categories = [
+    ['adults', 'Adults', Number(reservation.adults ?? reservation.guests ?? 0)],
+    ['seniorCount', 'Senior / PWD', Number(reservation.seniorPwdCount || 0)],
+    ['kidsCount', 'Kids', Number(reservation.children || 0)]
+  ];
+  const details = categories.map(([field, label, reservationCount]) => ({
+    label,
+    reservationCount,
+    billCount: Number(form.elements[field]?.value || 0)
+  }));
+  const mismatch = details.some(item => item.reservationCount !== item.billCount);
+  notice.classList.remove('is-hidden');
+  notice.classList.toggle('is-warning', mismatch);
+  notice.textContent = `Reservation: ${details.map(item => `${item.label} ${item.reservationCount}`).join(', ')} · Bill: ${details.map(item => `${item.label} ${item.billCount}`).join(', ')}${mismatch ? ' — counts differ; confirm before saving.' : ' — counts match.'}`;
+  return mismatch;
+}
 function billForm(item = {}) {
   const editing = Boolean(item.id);
   if (editing && state.role === 'Receptionist' && item.createdBy !== state.user?.id) {
@@ -3166,6 +3474,8 @@ function billForm(item = {}) {
     : [];
   const extraLines = billLines.length ? billLines : (editable ? [{}] : []);
   const selectedReservation = all('reservations').find(res => res.id === item.reservationId);
+  const leftoverCharge = all('chargeItems').find(charge => charge.code === 'LEFTOVER' && charge.isActive !== false
+    && ['food', 'non_food', 'other'].includes(charge.type) && !charge.isPackage);
   const reservations = all('reservations').filter(res => res.status === 'Seated' || res.id === item.reservationId)
     .map(res => `<option value="${esc(res.id)}" ${item.reservationId === res.id ? 'selected' : ''}>${esc(res.name || 'Guest')} · ${esc(res.date)} ${esc(res.time)}${res.status === 'Seated' ? ' · Seated' : ''}</option>`).join('');
   const tableOptions = all('restaurantTables').map(table => `<option value="${esc(table.id)}" ${item.tableId === table.id || (!item.tableId && selectedReservation?.table === table.id) ? 'selected' : ''}>${esc(table.id)} · ${Number(table.seats)} seats</option>`).join('');
@@ -3217,6 +3527,7 @@ function billForm(item = {}) {
     : '';
   const content = `<p class="field-help">${editing ? `Bill ${esc(item.billNumber)} · ${esc(item.status)}${item.createdAt ? ` · Created ${esc(item.createdAt)}` : ''}` : 'Cash-only billing. Sales do not deduct inventory. Comped guests count as served at zero.'}</p>
     ${reservationPrefill}
+    <div class="pos-headcount-warning is-hidden" data-bill-headcount-warning role="status" aria-live="polite"></div>
     <div class="form-grid">
       <label>Customer name<input name="customerName" value="${esc(item.customerName || selectedReservation?.name || 'Walk-in')}" maxlength="160" ${disabled} required></label>
       <label>Seated reservation<select name="reservationId" ${disabled || editing ? 'disabled' : ''}><option value="">Walk-in / no reservation</option>${reservations}</select>${editing ? `<input type="hidden" name="reservationId" value="${esc(item.reservationId || '')}">` : ''}</label>
@@ -3229,7 +3540,7 @@ function billForm(item = {}) {
       <label>Comped × ₱0.00<input name="compedCount" type="number" min="0" max="1000" step="1" value="${Number(item.compedCount || 0)}" ${disabled} required></label>
     </div></fieldset>
     ${extraPaxSection}
-    <fieldset class="product-form-section"><legend>Extras</legend><div class="field-help">Extra item prices are snapshotted from the charge catalog. Stock is never changed.</div><div class="pos-extra-lines">${extraLines.map(line => billExtraLineMarkup(line, !editable)).join('')}</div>${editable ? '<button type="button" class="ghost-btn compact-btn" data-action="add-bill-extra">+ Add extra</button>' : ''}</fieldset>
+    <fieldset class="product-form-section"><legend>Extras</legend><div class="field-help">Extra item prices are snapshotted from the charge catalog. Stock is never changed.</div><div class="pos-extra-lines">${extraLines.map(line => billExtraLineMarkup(line, !editable)).join('')}</div>${editable ? `<div class="pos-extra-actions"><button type="button" class="ghost-btn compact-btn" data-action="add-bill-extra">+ Add extra</button>${leftoverCharge ? `<button type="button" class="ghost-btn compact-btn" data-action="add-leftover-charge" data-charge-id="${esc(leftoverCharge.id)}">Add Leftover charge · ${money(leftoverCharge.unitPrice || 0)}</button>` : '<span class="field-help">No active Leftover charge is configured.</span>'}</div>` : ''}</fieldset>
     <fieldset class="product-form-section"><legend>Discount</legend><div class="form-grid">
       <label>Discount<select name="discountId" ${disabled}><option value="">No discount</option>${discounts}</select></label>
       <label class="full">Reason (required when a discount is selected)<textarea name="discountReason" rows="2" maxlength="500" ${disabled}>${esc(item.discountReason || '')}</textarea></label>
@@ -3242,6 +3553,7 @@ function billForm(item = {}) {
   form.dataset.type = 'bill';
   if (editing) form.dataset.id = item.id;
   else form.dataset.createKey = id('POSCREATE');
+  updateBillHeadcountWarning(form);
 }
 async function billCloseForm(bill) {
   let preview;
@@ -3253,7 +3565,7 @@ async function billCloseForm(bill) {
   }
   const minimum = Number(preview.balance_after_deposit || 0);
   modal(`Take cash · ${esc(bill.billNumber)}`,
-    `<div class="pos-payment-summary"><div>Balance before deposit <strong>${money(preview.balance_due)}</strong></div><div>Less: Deposit <strong>${money(preview.deposit_to_apply)}</strong></div><div>Balance due <strong>${money(minimum)}</strong></div>${Number(preview.deposit_remainder || 0) > 0 ? `<p class="field-help">Deposit remainder held for follow-up: ${money(preview.deposit_remainder)}.</p>` : ''}</div><label>Cash tendered<input name="tenderedAmount" type="number" min="${minimum.toFixed(2)}" step="0.01" value="${minimum.toFixed(2)}" required><small class="field-help">The server applies eligible deposits, records the cash payment, and calculates change.</small></label>`,
+    `<div class="pos-payment-summary"><div>Balance before deposit <strong>${money(preview.balance_due)}</strong></div><div>Less: Deposit <strong>${money(preview.deposit_to_apply)}</strong></div><div>Balance due <strong>${money(minimum)}</strong></div>${Number(preview.deposit_remainder || 0) > 0 ? `<p class="field-help">Deposit remainder held for follow-up: ${money(preview.deposit_remainder)}.</p>` : ''}</div><label>Cash tendered<input name="tenderedAmount" type="number" min="${minimum.toFixed(2)}" step="0.01" value="${minimum.toFixed(2)}" required><small class="field-help">The server applies eligible deposits, records the cash payment, and calculates change.</small></label><div class="pos-cash-shortcuts" aria-label="Cash tender shortcuts"><button type="button" class="ghost-btn compact-btn" data-cash-tender="${minimum.toFixed(2)}">Exact · ${money(minimum)}</button><button type="button" class="ghost-btn compact-btn" data-cash-tender="500" ${minimum <= 0 || minimum > 500 ? 'disabled' : ''}>₱500</button><button type="button" class="ghost-btn compact-btn" data-cash-tender="1000" ${minimum <= 0 || minimum > 1000 ? 'disabled' : ''}>₱1,000</button></div>`,
     'Confirm cash and close', 'pos-payment-modal');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'bill-close';
@@ -3461,9 +3773,37 @@ document.addEventListener('click', event => {
   return deleteRecord('table', table.id);
 });
 document.addEventListener('click', async event => {
+  const cashTender = event.target.closest('[data-cash-tender]');
+  if (cashTender) {
+    const form = cashTender.closest('#modalForm[data-type="bill-close"]');
+    if (!form) return;
+    form.elements.tenderedAmount.value = cashTender.dataset.cashTender;
+    state.modalDirty = true;
+    return;
+  }
   const actionElement = event.target.closest('[data-action]');
   const action = actionElement?.dataset.action;
   if (!action) return;
+  if (action === 'add-leftover-charge') {
+    const form = document.querySelector('#modalForm[data-type="bill"]');
+    const lines = form?.querySelector('.pos-extra-lines');
+    const charge = all('chargeItems').find(item => item.id === actionElement.dataset.chargeId
+      && item.code === 'LEFTOVER' && item.isActive !== false);
+    if (!lines || !charge) return toast('The active Leftover charge is unavailable. Reload the catalog and try again.', 'error');
+    const existingLine = [...lines.querySelectorAll('[data-extra-line]')].find(line =>
+      line.querySelector('[name="extraChargeItemId"]')?.value === charge.id
+    );
+    if (existingLine) {
+      const quantity = existingLine.querySelector('[name="extraQuantity"]');
+      quantity.value = String(Number(quantity.value || 0) + 1);
+    } else {
+      if (lines.querySelectorAll('[data-extra-line]').length >= 30) return toast('A bill can have no more than 30 extra lines.', 'error');
+      lines.insertAdjacentHTML('beforeend', billExtraLineMarkup());
+      lines.lastElementChild.querySelector('[name="extraChargeItemId"]').value = charge.id;
+    }
+    state.modalDirty = true;
+    return;
+  }
   if (action === 'add-bill-extra') {
     const form = document.querySelector('#modalForm[data-type="bill"]');
     const lines = form?.querySelector('.pos-extra-lines');
@@ -3619,6 +3959,8 @@ document.addEventListener('click', event => {
   else if (name === 'edit-reservation') {
     const record = all('reservations').find(item => item.id === action.dataset.id);
     if (record) reservationForm(record);
+  } else if (name === 'resolve-stale-walkin') {
+    return resolveStaleWalkIn(action.dataset.id, action.closest('#modalForm'), action);
   } else if (name === 'toggle-recipe-picker') document.querySelector('.recipe-picker').classList.toggle('is-hidden');
   else if (name === 'add-recipe-ingredient') {
     const form = document.querySelector('#modalForm');
@@ -3735,6 +4077,14 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; render(); }
   if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
+  if (event.target.matches('[data-reservation-list-date]')) {
+    state.calendarDate = event.target.value || today();
+    state.reservationDateFilter = 'All';
+    state.reservationMealPeriodFilter = 'All';
+    state.query = '';
+    persistReservationFilters();
+    render();
+  }
 });
 document.addEventListener('change', event => {
   if (event.target.matches('[data-revenue-range]')) {
@@ -3744,9 +4094,14 @@ document.addEventListener('change', event => {
 });
 document.addEventListener('change', event => {
   const form = event.target.closest('#modalForm[data-type="reservation"]');
-  if (form && event.target.matches('[name="date"],[name="time"],[name="adults"],[name="children"]')) {
+  if (form && event.target.matches('[name="date"],[name="time"],[name="adults"],[name="seniorPwdCount"],[name="children"]')) {
+    if (event.target.matches('[name="date"]')) refreshReservationTimeOptions(form);
     refreshReservationTables(form);
     return;
+  }
+  const billFormElement = event.target.closest('#modalForm[data-type="bill"]');
+  if (billFormElement && event.target.matches('[name="reservationId"],[name="adultCount"],[name="seniorCount"],[name="kidsCount"]')) {
+    updateBillHeadcountWarning(billFormElement);
   }
   if (event.target.matches('[data-table-date]')) {
     if (event.target.value && event.target.value < today()) {
@@ -4545,30 +4900,26 @@ document.addEventListener('click', event => {
       .catch(error => toast(friendlyRpcError(error), 'error'));
     return;
   }
-  const calendarDate = event.target.closest('[data-calendar-date]');
-  if (calendarDate) { state.calendarDate = calendarDate.dataset.calendarDate; state.reservationDateFilter = 'All'; state.reservationMealPeriodFilter = 'All'; state.query = ''; persistReservationFilters(); render(); return; }
-  const calendarMonth = event.target.closest('[data-calendar-month]');
-  if (calendarMonth) {
-    const date = new Date(`${state.calendarDate || today()}T12:00:00`);
-    date.setDate(1);
-    date.setMonth(date.getMonth() + Number(calendarMonth.dataset.calendarMonth));
-    state.calendarDate = localDateStr(date);
+  const clearReservationFilters = event.target.closest('[data-reservation-clear-filters]');
+  if (clearReservationFilters) {
+    state.reservationFilter = 'All';
+    state.reservationTypeFilter = 'All';
+    state.reservationMealPeriodFilter = 'All';
+    state.reservationDateFilter = 'All';
+    state.calendarDate = today();
     state.query = '';
+    persistReservationFilters();
     render();
     return;
   }
-  if (event.target.closest('[data-calendar-today]')) { state.calendarDate = today(); state.reservationDateFilter = 'All'; state.reservationMealPeriodFilter = 'All'; state.query = ''; persistReservationFilters(); render(); return; }
   const filter = event.target.closest('[data-reservation-filter]');
   if (filter) { state.reservationFilter = filter.dataset.reservationFilter; state.query = ''; persistReservationFilters(); render(); return; }
   const typeFilter = event.target.closest('[data-reservation-type-filter]');
   if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.query = ''; persistReservationFilters(); render(); return; }
   const dateFilter = event.target.closest('[data-reservation-date-filter]');
-  if (dateFilter) { state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; if (state.reservationDateFilter === 'Today') state.calendarDate = today(); persistReservationFilters(); render(); return; }
-  const step = event.target.closest('[data-calendar-step]');
-  if (step) { const date = new Date(`${state.calendarDate || today()}T12:00:00`); date.setDate(date.getDate() + Number(step.dataset.calendarStep)); state.calendarDate = localDateStr(date); render(); return; }
+  if (dateFilter) { state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
 document.addEventListener('change', event => {
-  if (event.target.id === 'calendarDate') { state.calendarDate = event.target.value; render(); }
   if (event.target.matches('[data-reservation-calendar-filter]')) {
     if (event.target.dataset.reservationCalendarFilter === 'status') state.reservationCalendarStatus = event.target.value;
     if (event.target.dataset.reservationCalendarFilter === 'type') state.reservationCalendarType = event.target.value;
@@ -4606,6 +4957,10 @@ document.addEventListener('input', event => {
   }
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
   if (event.target.closest('#modalForm[data-type="receiving"]')) updateReceivingTotals(event.target.closest('#modalForm'));
+  const billFormElement = event.target.closest('#modalForm[data-type="bill"]');
+  if (billFormElement && event.target.matches('[name="adultCount"],[name="seniorCount"],[name="kidsCount"]')) {
+    updateBillHeadcountWarning(billFormElement);
+  }
   if (['adults', 'seniorPwdCount', 'children'].includes(event.target.name)
     && event.target.closest('#modalForm[data-type="walk-in"]')) {
     refreshWalkInTables(event.target.closest('#modalForm'));
@@ -4845,6 +5200,25 @@ document.addEventListener('submit', async event => {
       }
     }
   }
+  if (form.dataset.type === 'reservation' && form.dataset.reservationType === 'Walk-in'
+    && form.elements.packageChargeItemId && !form.elements.packageChargeItemId.disabled) {
+    const packageChargeItemId = form.elements.packageChargeItemId?.value || '';
+    const packageTierId = form.elements.packageTierId?.value || '';
+    const packagePaxCount = form.elements.packagePaxCount?.value || '';
+    const existing = all('reservations').find(item => item.id === form.dataset.id);
+    const packageChanged = packageChargeItemId !== String(existing?.packageChargeItemId || '')
+      || packageTierId !== String(existing?.packageTierId || '')
+      || packagePaxCount !== String(existing?.packagePaxCount || '');
+    if (packageChargeItemId && packageChanged) {
+      if (!['Manager', 'Administrator'].includes(state.role)) {
+        showFieldError(form.elements.packageChargeItemId, 'Only a Manager or Administrator can override the Walk-in package rule.');
+        valid = false;
+      } else if (String(form.elements.packageOverrideReason?.value || '').trim().length < 10) {
+        showFieldError(form.elements.packageOverrideReason, 'Enter an override reason of at least 10 characters.');
+        valid = false;
+      }
+    }
+  }
   if (form.dataset.type === 'bill') {
     const countNames = ['adultCount', 'seniorCount', 'kidsCount', 'compedCount'];
     const counts = countNames.map(name => Number(form.elements[name]?.value || 0));
@@ -4918,6 +5292,15 @@ document.addEventListener('submit', async event => {
     }
   }
   if (!valid) { event.stopImmediatePropagation(); form.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus(); return; }
+  if (form.dataset.type === 'bill') {
+    const mismatch = updateBillHeadcountWarning(form);
+    if (mismatch && !confirm('The reservation and bill head counts differ. Save the bill with these counts anyway?')) return;
+  }
+  if (form.dataset.type === 'bill-close') {
+    const bill = all('posBills').find(item => item.id === form.dataset.id);
+    if (bill && !bill.tableId
+      && !confirm('This bill has no table linked. Close it anyway?')) return;
+  }
   if (form.dataset.type === 'waste') {
     const product = ingredient(form.elements.ingredientId.value);
     const quantity = Number(form.elements.quantity.value);
@@ -4929,7 +5312,15 @@ document.addEventListener('submit', async event => {
     if (!confirm(`Record ${quantity} ${product?.unit || ''} of ${product?.name || 'this ingredient'} as ${form.elements.reason.value}?${linkedRecipe ? `\nRelated dish: ${linkedRecipe}` : ''}\nStock will decrease once from ${Number(product?.stock || 0)} to ${Number((Number(product?.stock || 0) - quantity).toFixed(4))} ${product?.unit || ''}.${costText}`)) return;
   }
   event.stopImmediatePropagation();
-  const submit = form.querySelector('.modal-submit'); submit.disabled = true; submit.classList.add('is-loading'); submit.setAttribute('aria-busy', 'true'); submit.textContent = 'Saving…';
+  const submit = event.submitter || form.querySelector('.modal-submit');
+  if (submit) {
+    submit.disabled = true;
+    submit.classList.add('is-loading');
+    submit.setAttribute('aria-busy', 'true');
+    submit.textContent = form.dataset.type === 'walk-in' && submit.dataset.walkInAction === 'seat-and-open'
+      ? 'Seating and opening bill…'
+      : 'Saving…';
+  }
   if (form.dataset.type === 'confirm-revenue') {
     const data = Object.fromEntries(new FormData(form));
     const submit = form.querySelector('button[type="submit"]');
@@ -4954,5 +5345,5 @@ document.addEventListener('submit', async event => {
     }
     return;
   }
-  handleSubmit(form);
+  handleSubmit(form, event.submitter);
 }, true);
