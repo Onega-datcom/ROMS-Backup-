@@ -170,8 +170,12 @@ textarea {
   margin-left: var(--space-2);
 }
 
-.form-grid label[data-unit]::after {
-  top: 65px;
+.modal.physical-count-modal .form-grid label {
+  align-content: start;
+}
+
+.modal.physical-count-modal .form-grid label[data-unit]::after {
+  top: 44px;
 }
 
 .field-help {
