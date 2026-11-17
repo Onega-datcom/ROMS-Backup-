@@ -338,6 +338,11 @@ td {
   font-size: 11px;
 }
 
+.report-table-scroll th:not(:first-child),
+.report-table-scroll td:not(:first-child) {
+  text-align: center;
+}
+
 .report-table-scroll th:first-child,
 .report-table-scroll td:first-child {
   text-align: left;
