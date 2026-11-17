@@ -62,6 +62,7 @@ declare
   cash_refund_count integer;
   resolution_count integer;
   action_count integer;
+  audit_count_before integer;
   payment_count integer;
   bill_count integer;
 begin
@@ -316,6 +317,12 @@ begin
     raise exception 'FAIL: resolution reason bounds were not enforced.';
   end if;
 
+  select count(*) into audit_count_before
+  from public.audit_logs a
+  where a.actor_id = manager_id
+    and a.table_name = 'reservations'
+    and a.record_id = seated_id
+    and a.action = 'UPDATE';
   result := public.pos_resolve_stale_booking(
     seated_id, 'close_without_charge', resolution_reason, true,
     null, null, idempotency_key_value
@@ -348,7 +355,7 @@ begin
   if reservation_status <> 'Completed'
      or table_status <> 'Needs cleaning'
      or resolution_count <> 1
-     or action_count <> 1
+     or action_count <> audit_count_before + 1
      or bill_count <> 0
      or payment_count <> 0
      or (revenue_table_exists and revenue_after <> revenue_before) then
