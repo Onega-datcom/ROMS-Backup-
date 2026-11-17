@@ -47,6 +47,7 @@ state.receivingDraft = [];
 state.receivingForm = {};
 state.reservationFilter = 'All';
 state.reservationTypeFilter = 'All';
+state.reservationFilterHighlightGroup = 'status';
 state.calendarDate = '';
 state.reservationCalendarDate = '';
 state.reservationCalendarView = 'dayGridMonth';
@@ -84,12 +85,14 @@ try {
   console.warn('Reservation filter preferences could not be restored.', error);
 }
 if (!['Lunch', 'Dinner'].includes(state.reservationMealPeriodFilter)) state.reservationMealPeriodFilter = 'All';
+if (!['status', 'type', 'meal'].includes(state.reservationFilterHighlightGroup)) state.reservationFilterHighlightGroup = 'status';
 function persistReservationFilters() {
   sessionStorage.setItem('costtrack_reservation_filters', JSON.stringify({
     reservationFilter: state.reservationFilter,
     reservationTypeFilter: state.reservationTypeFilter,
     reservationMealPeriodFilter: state.reservationMealPeriodFilter,
-    reservationDateFilter: state.reservationDateFilter
+    reservationDateFilter: state.reservationDateFilter,
+    reservationFilterHighlightGroup: state.reservationFilterHighlightGroup
   }));
 }
 const roleAccess = {
@@ -2171,10 +2174,10 @@ function reservationsPage() {
     .sort((a, b) => a.date.localeCompare(b.date) || (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
   const counts = status => status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
   const statusFilters = ['All', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled']
-    .map(status => `<button type="button" class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
+    .map(status => `<button type="button" class="${state.reservationFilterHighlightGroup === 'status' && state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
     .join('');
   const typeFilters = ['All', 'Reservation', 'Walk-in']
-    .map(type => `<button type="button" class="${state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
+    .map(type => `<button type="button" class="${state.reservationFilterHighlightGroup === 'type' && state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
     .join('');
   const hasActiveFilters = state.reservationFilter !== 'All'
     || state.reservationTypeFilter !== 'All'
@@ -4172,7 +4175,7 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-report-group]')) { state.reportGrouping = event.target.value; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; render(); }
-  if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
+  if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; state.reservationFilterHighlightGroup = 'meal'; persistReservationFilters(); render(); }
   if (event.target.matches('[data-reservation-list-date]')) {
     state.calendarDate = event.target.value || today();
     state.reservationDateFilter = 'All';
@@ -4999,6 +5002,7 @@ document.addEventListener('click', event => {
   if (clearReservationFilters) {
     state.reservationFilter = 'All';
     state.reservationTypeFilter = 'All';
+    state.reservationFilterHighlightGroup = 'status';
     state.reservationMealPeriodFilter = 'All';
     state.reservationDateFilter = 'All';
     state.calendarDate = today();
@@ -5008,9 +5012,9 @@ document.addEventListener('click', event => {
     return;
   }
   const filter = event.target.closest('[data-reservation-filter]');
-  if (filter) { state.reservationFilter = filter.dataset.reservationFilter; state.query = ''; persistReservationFilters(); render(); return; }
+  if (filter) { state.reservationFilter = filter.dataset.reservationFilter; state.reservationFilterHighlightGroup = 'status'; state.query = ''; persistReservationFilters(); render(); return; }
   const typeFilter = event.target.closest('[data-reservation-type-filter]');
-  if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.query = ''; persistReservationFilters(); render(); return; }
+  if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.reservationFilterHighlightGroup = 'type'; state.query = ''; persistReservationFilters(); render(); return; }
   const dateFilter = event.target.closest('[data-reservation-date-filter]');
   if (dateFilter) { state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
