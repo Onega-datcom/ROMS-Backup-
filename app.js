@@ -952,7 +952,7 @@ function openCommandPalette(trigger = document.querySelector('#searchLauncher'))
   state.paletteSelection = 0;
   root.innerHTML = `<div class="palette-backdrop" data-palette-backdrop>
     <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="paletteTitle">
-      <h2 id="paletteTitle" class="sr-only">Search or jump to</h2>
+      <h2 id="paletteTitle" class="sr-only">Search or  jump to</h2>
       <div class="palette-search">${shellIcon('search')}<input id="paletteSearch" type="search" role="combobox" aria-expanded="true" aria-controls="paletteResults" aria-autocomplete="list" aria-activedescendant="" placeholder="Search pages and actions…" autocomplete="off"><kbd>Esc</kbd></div>
       <div class="palette-results" id="paletteResults" role="listbox" aria-label="Pages and actions"></div>
       <div class="palette-hint"><span>↑↓ to navigate</span><span>Enter to select</span><span>Esc to close</span></div>
