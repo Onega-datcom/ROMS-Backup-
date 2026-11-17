@@ -2305,9 +2305,11 @@ a:focus-visible {
   background: #dccdb3;
 }
 
-.sidebar .user-menu-trigger:hover {
+#sidebar .sidebar-user-trigger:hover,
+#sidebar .sidebar-user-trigger:focus-visible {
   color: #f5f0e6;
-  background: transparent;
+  background: transparent !important;
+  box-shadow: none;
 }
 
 .search-launcher {
