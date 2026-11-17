@@ -170,6 +170,10 @@ textarea {
   margin-left: var(--space-2);
 }
 
+.form-grid label[data-unit]::after {
+  top: 65px;
+}
+
 .field-help {
   color: var(--muted);
   font-size: 10px;
