@@ -63,7 +63,6 @@ Examples:
 ```text
 GET    /rest/v1/reservations
 PATCH  /rest/v1/restaurant_tables
-POST   /rest/v1/revenue_records
 DELETE /rest/v1/waste_logs
 ```
 
@@ -79,7 +78,7 @@ Endpoint inventory and purpose:
 | `/rest/v1/recipes` | GET, POST, PATCH, DELETE | Read and manage recipe records when direct table access is used |
 | `/rest/v1/inventory_transactions` | GET, POST, PATCH, DELETE | Read and manage inventory movements |
 | `/rest/v1/production_logs` | GET, POST, PATCH, DELETE | Read and manage production records |
-| `/rest/v1/revenue_records` | GET, POST, PATCH, DELETE | Read and manage revenue records |
+| `/rest/v1/revenue_records` | GET | Read historical revenue archive (read-only for application roles) |
 | `/rest/v1/waste_logs` | GET, POST, PATCH, DELETE | Read and manage waste records |
 | `/rest/v1/physical_counts` | GET, POST, PATCH, DELETE | Read and manage physical stock counts |
 | `/rest/v1/reservations` | GET, POST, PATCH, DELETE | Read and manage reservations |
@@ -109,11 +108,11 @@ RPC functions used by the application:
 | `save_recipe` | Create or update a recipe |
 | `public_create_reservation` | Create a public reservation |
 | `public_get_reservation_status` | Retrieve public reservation status |
-| `confirm_revenue` | Confirm revenue and adjustments |
 | `pos_reservation_deposit_history` | Read a reservation’s deposit and action history |
 | `pos_list_unresolved_stale_bookings` | Read past unresolved bookings for Front of House roles |
 | `pos_resolve_stale_booking` | Atomically resolve an eligible past reservation and any held deposit |
 | `report_analytics` | Return report and analytics data |
+| `pos_revenue_report` | Return Manager/Administrator closed-bill revenue, customer, shift, and food-cost reports |
 | `costtrack_receive_delivery` | Record receiving, invoice lines, batches, and stock movements |
 | `get_expected_covers` | Calculate expected covers for a service |
 | `costtrack_load_production_batches` | Load production batches |
@@ -133,11 +132,11 @@ Full RPC endpoint inventory:
 | `/rest/v1/rpc/save_recipe` | Validate and save a recipe and its ingredients |
 | `/rest/v1/rpc/public_create_reservation` | Create a reservation from the public booking page |
 | `/rest/v1/rpc/public_get_reservation_status` | Return public status for a reservation |
-| `/rest/v1/rpc/confirm_revenue` | Confirm revenue and apply adjustments |
 | `/rest/v1/rpc/pos_reservation_deposit_history` | Read reservation deposits and audit actions |
 | `/rest/v1/rpc/pos_list_unresolved_stale_bookings` | Return unresolved past bookings with bill and held-deposit summaries |
 | `/rest/v1/rpc/pos_resolve_stale_booking` | Resolve a stale booking and its held deposit atomically |
 | `/rest/v1/rpc/report_analytics` | Return report and analytics results |
+| `/rest/v1/rpc/pos_revenue_report` | Return guarded closed-bill revenue and operational report data |
 | `/rest/v1/rpc/costtrack_receive_delivery` | Save receiving data, batches, and inventory movements |
 | `/rest/v1/rpc/get_expected_covers` | Calculate expected covers for a service |
 | `/rest/v1/rpc/costtrack_load_production_batches` | Load production batches for a service date |
@@ -158,11 +157,19 @@ Migration 010 is the current POS security layer. RLS policies are authoritative;
 | Shifts and cash movements | Read all; approved operations use RPC | Read own shift and its movements; cashier operations use RPC | No POS access |
 | Reservation deposits and deposit action history | Read all; Manager-only refund/forfeit through RPC | Read and record deposits through RPC; cannot refund or forfeit | No POS access |
 | Bill approvals | Read all and decide through RPC | Read own requests; can request but cannot approve | No POS access |
-| Revenue records | Read/write according to revenue role policies | No access | No access |
+| Revenue records | Read-only historical archive | No access | No access |
 
 Receptionist bill visibility is enforced twice: RLS filters database reads by `created_by`, and the Cashier UI lists only bills created by the signed-in Receptionist. Billing writes, closing, void requests, and deposit operations remain RPC-controlled.
 
-The former `create_revenue_draft(text)` function is not an available API. Migration 010 revokes execution from `PUBLIC`, `anon`, and `authenticated`; no current UI code calls it. Revenue integration is deferred to Phase 4, where closed POS bills will be the source of truth.
+The former `create_revenue_draft(text)` and `confirm_revenue(text, jsonb)` functions are not active application APIs. Migration 020 disables legacy revenue writes and preserves existing `revenue_records` as an archive. Phase 4 revenue comes only from bills currently in `Closed` status; voided, open, draft, deposit, estimate, and legacy rows do not contribute.
+
+### Phase 4 — closed-bill revenue reporting (migration 020)
+
+`pos_revenue_report(p_report_key, p_start_date, p_end_date, p_group_by, p_include_waste, p_page, p_page_size)` is a Manager/Administrator-only `SECURITY DEFINER` read RPC. The `dashboard` key returns today's Manila-business-date net revenue, closed bill count, actual customer counts, average check, discounts, and separate void count/amount. Other keys provide `daily_revenue`, `revenue_trend`, `customer_count`, `shift_revenue`, `closed_bill_summary`, and `food_cost`. Revenue views filter to current `Closed` bills with `closed_at`, and derive the business date from `closed_at` in `Asia/Manila`.
+
+The amount is calculated in the database as `max(0, subtotal + service_charge - discount_total)`. Deposits are excluded from sales and appear only in separate operational columns. Voids are excluded; reversed amount is shown separately only when a voided bill had previously closed. The UI requests these reports with a 15-second timeout and does not fall back to `revenue_records`.
+
+Run `supabase/020_closed_bill_revenue_reporting.sql` after migration 019, followed by `supabase/020_closed_bill_revenue_reporting_acceptance.sql` as the database owner. The acceptance script ends with `ROLLBACK`. Roll back migration 020 with `supabase/020_closed_bill_revenue_reporting_rollback.sql` before rolling back 019. Deployment and acceptance against a Supabase project must be verified separately; repository presence does not prove that the migration is deployed.
 
 ### Atomic Walk-in billing and Phase C safeguards (migrations 013–016)
 

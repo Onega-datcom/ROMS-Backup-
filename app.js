@@ -73,10 +73,16 @@ state.modalDirty = false;
 state.reportTab = state.reportTab || 'food_cost';
 state.reportGrouping = state.reportGrouping || 'day';
 state.reportIncludeWaste = state.reportIncludeWaste !== false;
+state.reportPage = 1;
 const reportServerData = {};
 let reportRequestKey = '';
 let reportRequestPending = false;
 let reportDataVersion = 0;
+let revenueDashboardData = null;
+let revenueDashboardLoading = false;
+let revenueDashboardError = '';
+let revenueDashboardRequest = 0;
+let revenueDashboardRefreshAfterLoad = false;
 let reportChartSpecs = [];
 let reportCharts = [];
 try {
@@ -104,10 +110,12 @@ const roleAccess = {
 const canAccess = view => Boolean(roleAccess[state.role]?.includes(view));
 const canAccessRevenue = () => ['Administrator', 'Manager'].includes(state.role);
 const canManageRates = () => ['Administrator', 'Manager'].includes(state.role);
-const canVoidRevenue = () => state.role === 'Administrator';
 const app = document.querySelector('#app');
 const money = value => `₱${Number(value || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
+const manilaBusinessToday = () => new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit'
+}).format(new Date());
 
 function localDateStr(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -120,7 +128,7 @@ function dateRangeBounds() {
     return start && end && start <= end ? [start, end] : ['', ''];
   }
   const days = [7, 30, 90, 365].includes(Number(state.dateRange)) ? Number(state.dateRange) : 30;
-  const end = today();
+  const end = manilaBusinessToday();
   const startDate = new Date(`${end}T12:00:00`);
   startDate.setDate(startDate.getDate() - days + 1);
   return [localDateStr(startDate), end];
@@ -277,41 +285,14 @@ function replaceLocalRelatedRecords(collection, matches, records) {
     ...records
   ];
 }
-document.addEventListener('click', async event => {
-  const action = event.target.closest('[data-action="void-revenue"]');
-  if (!action) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  if (!canVoidRevenue()) return toast('Only Administrators can void revenue.', 'error');
-  if (!confirm('Void this revenue record? This action is recorded and cannot be undone.')) return;
-  const reason = prompt('Why is this revenue record being voided?');
-  if (!reason?.trim()) return;
-  try {
-    await save('revenueRecords', all('revenueRecords').map(item => item.id === action.dataset.id ? { ...item, status: 'Voided', voided_by: state.role, void_reason: reason.trim(), voided_at: new Date().toISOString() } : item));
-    toast('Revenue record voided');
-    render();
-  } catch (error) {
-    console.error('Revenue void failed.', error);
-  }
-}, true);
 const ingredient = id => all('ingredients').find(item => item.id === id);
 const recipe = id => all('recipes').find(item => item.id === id);
 const id = prefix => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-function createRevenueRecord(data) {
-  return window.CostTrackLogic.createRevenueRecord(data);
-}
 function computedRecipeCost(item) { return window.CostTrackLogic.computedRecipeCost(item, all('ingredients')); }
 function inventoryValue() { return all('ingredients').reduce((sum, item) => sum + item.stock * item.cost, 0); }
 function productionCost(date) { return all('productionLogs').filter(item => !date || item.date === date).reduce((sum, item) => sum + computedRecipeCost(recipe(item.recipeId) || { ingredients: [] }) * Number(item.quantity || 0), 0); }
 function wasteCost(date) { return all('wasteLogs').filter(item => !date || item.date === date).reduce((sum, item) => sum + item.quantity * (ingredient(item.ingredientId)?.cost || 0), 0); }
 function revenueRecords() { return canAccessRevenue() ? all('revenueRecords') : []; }
-function profitability(date, record) {
-  const revenue = Number(record?.total_revenue || 0);
-  const production = productionCost(date);
-  const waste = wasteCost(date);
-  const profit = revenue - production - waste;
-  return { revenue, production, waste, profit, foodCostPercent: revenue ? production / revenue * 100 : null, wasteCostPercent: revenue ? waste / revenue * 100 : null, profitMargin: revenue ? profit / revenue * 100 : null };
-}
 function reservationRevenue(item, rates) { return window.CostTrackLogic.reservationRevenue(item, rates); }
 function reservationCategoryCount(item) {
   const seniorPwdCount = Number(item.seniorPwdCount ?? item.senior_pwd_count ?? 0);
@@ -416,14 +397,14 @@ function realtimeCollectionsForView() {
     approvals: ['pos_bills', 'pos_bill_approvals'],
     'charge-catalog': ['pos_charge_items', 'pos_package_tiers', 'pos_discounts', 'pos_settings'],
     rates: ['buffet_rates'],
-    revenue: ['revenue_records', 'production_logs', 'waste_logs', 'reservations'],
-    reports: ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'revenue_records', 'reservations']
+    revenue: ['revenue_records'],
+    reports: ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'reservations', 'pos_bills', 'pos_bill_payments', 'pos_shifts', 'pos_cash_movements', 'pos_reservation_deposits']
   };
   if (state.view === 'dashboard') {
     if (state.role === 'Receptionist') return ['reservations', 'restaurant_tables'];
     if (state.role === 'Inventory Clerk') return ['ingredients', 'inventory_transactions', 'physical_counts'];
     if (state.role === 'Chef / Kitchen Staff') return ['ingredients', 'recipes', 'production_logs', 'waste_logs', 'reservations'];
-    return ['ingredients', 'recipes', 'production_logs', 'waste_logs', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates'];
+    return ['ingredients', 'recipes', 'production_logs', 'waste_logs', 'reservations', 'restaurant_tables', 'pos_bills', 'buffet_rates'];
   }
   return common[state.view] || [];
 }
@@ -548,13 +529,17 @@ async function refreshRealtimeCollection(table, payload) {
     if (record) upsertLocalRecord(collection, record);
   }
   invalidateReportData();
+  if (table === 'pos_bills') {
+    revenueDashboardData = null;
+    revenueDashboardError = '';
+    if (revenueDashboardLoading) revenueDashboardRefreshAfterLoad = true;
+  }
   const changed = payload?.new || payload?.old || {};
   const actor = changed.recorded_by || changed.created_by || changed.updated_by || '';
   if (table === 'ingredients' && payload?.new && Number(payload.new.stock) <= Number(payload.new.minimum)) toast(`Low stock reached for ${payload.new.name || 'an ingredient'}${actor ? ` (${actor})` : ''}.`, 'error');
   if (table === 'reservations' && payload?.eventType === 'INSERT') toast(`New ${payload.new.type === 'Walk-in' ? 'walk-in' : 'reservation'} received${actor ? ` from ${actor}` : ''}.`);
   if (table === 'reservations' && payload?.old?.status !== payload?.new?.status && payload?.new?.status) toast(`Reservation status changed to ${payload.new.status}${actor ? ` by ${actor}` : ''}.`);
   if (table === 'restaurant_tables' && payload?.old?.status !== payload?.new?.status) toast(`Table ${payload.new.id} is now ${payload.new.status}.`);
-  if (table === 'revenue_records' && payload?.new?.status === 'Draft' && canAccessRevenue()) toast(`New revenue draft${actor ? ` from ${actor}` : ''}.`);
   if (['reservations', 'restaurant_tables', 'pos_bills', 'pos_reservation_deposits'].includes(table)) {
     invalidateUnresolvedBookings();
   }
@@ -747,7 +732,6 @@ function createActions() {
     { id: 'production', label: 'Log production', icon: 'chef-hat', view: 'production' },
     { id: 'waste', label: 'Log waste', icon: 'trash', view: 'waste' },
     { id: 'receiving', label: 'Receive supplies', icon: 'package-plus', view: 'receiving' },
-    { id: 'revenue', label: 'Record revenue', icon: 'chart', view: 'revenue' },
     { id: 'count', label: 'Start physical count', icon: 'clipboard-check', view: 'counts' }
   ].filter(action => canAccess(action.view));
 }
@@ -943,7 +927,6 @@ function runCreateAction(actionId) {
   closeShellPopovers(false);
   if (actionId === 'reservation') return reservationForm();
   if (actionId === 'cashier') return setView('cashier');
-  if (actionId === 'revenue') return revenueForm();
   if (actionId === 'production') return openForm('production');
   if (actionId === 'waste') return openForm('waste');
   if (actionId === 'receiving') return openForm('receiving');
@@ -1117,38 +1100,36 @@ function roleDashboard() {
   const todayReservations = reservations.filter(item => item.date === todayDate);
   const todayWalkIns = todayReservations.filter(item => item.type === 'Walk-in').length;
   const seatedCovers = todayReservations.filter(item => item.status === 'Seated').reduce((sum, item) => sum + Number(item.actualCovers || item.guests || 0), 0);
-  const revenueToday = canAccessRevenue() ? revenueRecords().filter(item => item.status === 'Confirmed' && item.business_date === todayDate).reduce((sum, item) => sum + item.total_revenue, 0) : 0;
-  const draftsToConfirm = canAccessRevenue() ? revenueRecords().filter(item => item.status === 'Draft').length : 0;
-  const monthStart = `${todayDate.slice(0, 7)}-01`;
-  const revenueMonth = canAccessRevenue() ? revenueRecords().filter(item => item.status === 'Confirmed' && item.business_date >= monthStart && item.business_date <= todayDate).reduce((sum, item) => sum + Number(item.total_revenue || 0), 0) : 0;
-  const productionMonth = all('productionLogs').filter(item => item.date >= monthStart && item.date <= todayDate).reduce((sum, item) => sum + computedRecipeCost(recipe(item.recipeId) || { ingredients: [] }) * Number(item.quantity || 0), 0);
-  const wasteMonth = all('wasteLogs').filter(item => item.date >= monthStart && item.date <= todayDate).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(ingredient(item.ingredientId)?.cost || 0), 0);
-  const offsetDate = days => { const date = new Date(`${todayDate}T12:00:00`); date.setDate(date.getDate() + days); return localDateStr(date); };
-  const revenueOn = date => canAccessRevenue() ? revenueRecords().filter(item => item.status === 'Confirmed' && item.business_date === date).reduce((sum, item) => sum + Number(item.total_revenue || 0), 0) : 0;
-  const coversOn = date => canAccessRevenue() ? revenueRecords().filter(item => item.status === 'Confirmed' && item.business_date === date).reduce((sum, item) => sum + Number(item.total_customers || 0), 0) : 0;
-  const trend = (current, previous, label) => previous ? `${current >= previous ? '↑' : '↓'} ${Math.abs((current - previous) / previous * 100).toFixed(1)}% vs ${label}` : `— vs ${label}`;
-  const revenueTrend = trend(revenueToday, revenueOn(offsetDate(-1)), 'yesterday');
-  const revenueWeekTrend = trend(revenueToday, revenueOn(offsetDate(-7)), 'last week');
-  const coversToday = coversOn(todayDate);
-  const profitToday = canAccessRevenue() ? profitability(todayDate, { total_revenue: revenueToday }).profit : 0;
-  const foodCostToday = revenueMonth ? (productionMonth + wasteMonth) / revenueMonth * 100 : null;
+  const revenueData = revenueDashboardData || {};
+  const revenueLoadingLabel = revenueDashboardError ? 'Unavailable' : revenueDashboardLoading || !revenueDashboardData ? 'Loading…' : null;
+  const revenueDashboardCards = [
+    metric("Today's Revenue", revenueLoadingLabel || money(revenueData.today_revenue), '₱', 'green-icon', revenueDashboardError ? 'Unable to load POS report' : 'Closed POS bills · Manila business date'),
+    metric('Closed Bills', revenueLoadingLabel || Number(revenueData.closed_bill_count || 0).toLocaleString(), '▤', 'purple-icon', 'Counted once by closed bill'),
+    metric('Customers Served', revenueLoadingLabel || Number(revenueData.customers_served || 0).toLocaleString(), '♙', 'purple-icon', 'Actual bill head counts'),
+    metric('Average Check', revenueLoadingLabel || money(revenueData.average_check), '↗', 'green-icon', 'Net revenue per closed bill'),
+    metric('Discount Total', revenueLoadingLabel || money(revenueData.discount_total), '−', 'orange-icon', 'Closed bills only'),
+    metric('Voided Bills', revenueLoadingLabel || Number(revenueData.voided_bill_count || 0).toLocaleString(), '!', 'red-icon', `${money(revenueData.voided_bill_amount)} reversed sales`),
+    metric('Voided Bill Amount', revenueLoadingLabel || money(revenueData.voided_bill_amount), '₱', 'red-icon', 'Shown separately · excluded from revenue')
+  ];
   const cards = state.role === 'Receptionist'
     ? [metric("Today's reservations", reservations.filter(item => item.date === today()).length, '▤', 'orange-icon', `${pendingReservations} awaiting confirmation`), metric('Guests expected', reservations.filter(item => item.date === today()).reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => liveTableAvailability(table, today(), reservations).status === 'Available').length, '⌂', 'orange-icon', 'Ready for assignment')]
     : state.role === 'Chef / Kitchen Staff'
     ? [metric('Recipes created', recipes.length, '◇', 'purple-icon', `${new Set(recipes.map(item => item.category)).size} categories`), metric('Production logs today', productionToday, '♨', 'green-icon', 'Batches recorded today'), metric('Waste logs today', wasteToday, '◌', 'red-icon', money(wasteCost()) + ' total waste cost'), metric('Active recipes', recipes.length, '↗', 'orange-icon', 'Available to produce')]
     : state.role === 'Inventory Clerk'
       ? [metric('Out of stock items', out, '!', 'red-icon', 'Immediate replenishment needed'), metric('Low stock items', low, '↓', 'orange-icon', 'Below minimum level'), metric('Healthy stock items', healthy, '✓', 'green-icon', 'At safe stock level'), metric('Total ingredients', ingredients.length, '◈', 'purple-icon', money(inventoryValue()) + ' inventory value')]
-      : state.role === 'Manager'
-        ? [metric("Today's Revenue", money(revenueToday), '₱', 'green-icon', `${revenueTrend}; ${revenueWeekTrend}`), metric('Covers today', coversToday, '♙', 'purple-icon', 'Confirmed revenue covers'), metric('Estimated Profit', money(profitToday), '↗', profitToday >= 0 ? 'green-icon' : 'red-icon', 'Revenue − production − waste'), `<div class="metric-card"><div class="metric-top"><span>Food Cost %</span><i class="metric-icon orange-icon">♨</i></div><div class="metric-value">${foodCostToday === null ? '—' : `${foodCostToday.toFixed(1)}%`}</div><div class="metric-foot"><button class="text-btn" data-view="reports">Current month report →</button></div></div>`]
-        : [metric("Today's Revenue", money(revenueToday), '₱', 'green-icon', `${revenueTrend}; ${revenueWeekTrend}`), metric('Covers today', coversToday, '♙', 'purple-icon', 'Confirmed revenue covers'), metric('Estimated Profit', money(profitToday), '↗', profitToday >= 0 ? 'green-icon' : 'red-icon', 'Revenue − production − waste'), metric('Low stock items', low + out, '!', 'red-icon', 'Needs attention')];
+      : canAccessRevenue()
+        ? revenueDashboardCards
+        : [metric('Low stock items', low + out, '!', 'red-icon', 'Needs attention')];
   const recipeCategories = [...new Set(recipes.map(item => item.category))];
   const kitchenPanel = `<div class="panel"><div class="panel-header"><div><div class="panel-title">Kitchen activity</div><div class="panel-subtitle">Recipes and production by category</div></div><button class="text-btn" data-view="production">Open production board →</button></div><div class="dashboard-list">${recipes.slice(0, 5).map(item => `<div class="dashboard-list-row"><span class="recipe-icon">◇</span><div><strong>${esc(item.name)}</strong><small>${esc(item.category)} · ${item.ingredients.length} ingredients</small></div><span class="tag">${money(computedRecipeCost(item))} / serving</span></div>`).join('')}</div><div class="category-chips">${recipeCategories.map(item => `<span>${esc(item)}</span>`).join('')}</div></div>`;
   const inventoryPanel = `<div class="panel inventory-health-panel"><div class="panel-header"><div><div class="panel-title">Inventory health</div><div class="panel-subtitle">Filter stock levels for quick action</div></div><button class="text-btn" data-view="ingredients">Manage inventory →</button></div><div class="quick-filters">${['All', 'Out of Stock', 'Low Stock', 'Healthy'].map(item => `<button class="${state.ingredientStatus === item ? 'active' : ''}" data-dashboard-status="${item}">${item}<b>${item === 'All' ? ingredients.length : ingredients.filter(x => stockStatus(x) === item).length}</b></button>`).join('')}</div><div class="dashboard-list">${ingredients.filter(item => state.ingredientStatus === 'All' || stockStatus(item) === state.ingredientStatus).slice(0, 6).map(item => `<div class="dashboard-list-row" data-view="ingredients"><span class="ingredient-dot">${item.name[0]}</span><div><strong>${esc(item.name)}</strong><small>${item.stock} ${item.unit} · minimum ${item.minimum}</small></div><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></div>`).join('')}</div></div>`;
   const charts = `<div class="panel empty-state"><div class="panel-title">Cost analytics</div><p>Authoritative trend charts are available in Reports.</p><button class="text-btn" data-view="reports">Open Reports →</button></div>`;
   const reservationPanel = `<div class="panel reservation-summary-panel"><div class="panel-header"><div><div class="panel-title">Reservation service</div><div class="panel-subtitle">${pendingReservations} bookings need attention · ${todayReservations.length} today</div></div><button class="text-btn" data-view="reservations">Manage reservations →</button></div><div class="dashboard-list">${todayReservations.slice(0, 4).map(item => `<div class="dashboard-list-row"><span class="ingredient-dot">${esc(item.name.charAt(0))}</span><div><strong>${esc(item.name)}</strong><small>${esc(item.time)} · ${item.guests} guests · ${esc(item.table || 'Unassigned')}</small></div><span class="status">${esc(item.status)}</span></div>`).join('') || '<p class="panel-subtitle">No reservations scheduled for today.</p>'}</div></div>`;
-  const draftPanel = canAccessRevenue() ? `<div class="panel"><div class="panel-header"><div><div class="panel-title">Drafts to confirm <span class="nav-badge">${draftsToConfirm}</span></div><div class="panel-subtitle">Completed service awaiting revenue confirmation.</div></div><button class="text-btn" data-view="revenue">Open revenue →</button></div>${draftsToConfirm ? '<p class="panel-subtitle">Review and confirm drafted covers before closing the day.</p>' : '<p class="panel-subtitle">No revenue drafts need confirmation.</p>'}</div>` : '';
+  const revenueDashboardErrorPanel = canAccessRevenue() && revenueDashboardError
+    ? `<div class="panel error-state" role="alert">${esc(revenueDashboardError)} <button class="ghost-btn" data-action="retry-revenue-dashboard">Retry dashboard</button></div>`
+    : '';
   const fohMetrics = canAccess('reservations') ? `<div class="panel"><div class="panel-title">Front-of-house today</div><div class="metric-grid compact-metric-grid">${metric('Reservations', todayReservations.length, '▤', 'orange-icon', 'Scheduled today')}${metric('Walk-ins', todayWalkIns, '⌂', 'purple-icon', 'Recorded today')}${metric('Seated covers', seatedCovers, '✓', 'green-icon', 'Currently seated')}</div></div>` : '';
-  return `<div class="welcome-row"><div><div class="eyebrow">${eyebrow}</div><h1>${dashboardGreeting()}</h1><p>${subtitle}</p></div>${state.role === 'Receptionist' ? '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>' : state.role === 'Inventory Clerk' || state.role === 'Administrator' || state.role === 'Manager' ? '<button class="primary-btn" data-action="open-receiving">+ Receive inventory</button>' : '<button class="primary-btn" data-view="production">Open production board</button>'}</div><div class="metric-grid role-metric-grid">${cards.join('')}</div>${fohMetrics}${state.role === 'Receptionist' ? `<div class="dashboard-grid">${reservationPanel}<div class="panel"><div class="panel-title">Front-of-house checklist</div><div class="checklist"><span>✓ Confirm pending bookings</span><span>○ Check in arriving guests</span><span>○ Review table assignments</span></div></div></div>` : state.role === 'Chef / Kitchen Staff' ? `<div class="dashboard-grid">${kitchenPanel}<div class="panel"><div class="panel-title">Today’s kitchen checklist</div><div class="checklist"><span>✓ Review today’s prep targets</span><span>○ Start a batch from the production board</span><span>○ Mark each cooked batch ready</span></div></div></div>` : state.role === 'Inventory Clerk' ? inventoryPanel : state.role === 'Manager' ? `<div class="dashboard-grid">${inventoryPanel}${reservationPanel}</div>${draftPanel}` : `<div class="dashboard-grid">${reservationPanel}${inventoryPanel}</div>${draftPanel}`}${state.role === 'Chef / Kitchen Staff' ? '' : charts}`;
+  return `<div class="welcome-row"><div><div class="eyebrow">${eyebrow}</div><h1>${dashboardGreeting()}</h1><p>${subtitle}</p></div>${state.role === 'Receptionist' ? '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>' : state.role === 'Inventory Clerk' || state.role === 'Administrator' || state.role === 'Manager' ? '<button class="primary-btn" data-action="open-receiving">+ Receive inventory</button>' : '<button class="primary-btn" data-view="production">Open production board</button>'}</div>${revenueDashboardErrorPanel}<div class="metric-grid role-metric-grid">${cards.join('')}</div>${fohMetrics}${state.role === 'Receptionist' ? `<div class="dashboard-grid">${reservationPanel}<div class="panel"><div class="panel-title">Front-of-house checklist</div><div class="checklist"><span>✓ Confirm pending bookings</span><span>○ Check in arriving guests</span><span>○ Review table assignments</span></div></div></div>` : state.role === 'Chef / Kitchen Staff' ? `<div class="dashboard-grid">${kitchenPanel}<div class="panel"><div class="panel-title">Today’s kitchen checklist</div><div class="checklist"><span>✓ Review today’s prep targets</span><span>○ Start a batch from the production board</span><span>○ Mark each cooked batch ready</span></div></div></div>` : state.role === 'Inventory Clerk' ? inventoryPanel : state.role === 'Manager' ? `<div class="dashboard-grid">${inventoryPanel}${reservationPanel}</div>` : `<div class="dashboard-grid">${reservationPanel}${inventoryPanel}</div>`}${state.role === 'Chef / Kitchen Staff' ? '' : charts}`;
 }
 function ingredientCardsPage() {
   const ingredients = all('ingredients');
@@ -2216,46 +2197,14 @@ function rateForm(item = {}) {
 function revenueAccessDenied() {
   return `${pageHeader('Restricted module', 'Access denied', 'Revenue and profitability data is limited to Administrator and Manager roles.', '')}<div class="panel empty-state"><span class="large-icon">!</span><h2>Revenue Tracking is restricted</h2><p>Your role does not have permission to view revenue, profit, or food cost information.</p></div>`;
 }
-function revenueForm(item = {}) {
-  if (!canAccessRevenue()) return toast('Revenue Tracking is restricted to Administrator and Manager roles.', 'error');
-  const rate = activeBuffetRate({ mealPeriod: item.meal_period || 'All Day' }, item.business_date || today());
-  const defaults = { adult_customers: 0, adult_rate: rate?.adultRate || 0, child_customers: 0, child_rate: rate?.childRate || 0, senior_pwd_customers: 0, senior_pwd_rate: rate?.seniorPwdRate || 0 };
-  const values = { ...defaults, ...item };
-  const production = productionCost(values.business_date || today());
-  const waste = wasteCost(values.business_date || today());
-  modal(item.id ? 'Edit revenue record' : 'Record revenue', `<input type="hidden" name="id" value="${esc(item.id || '')}"><div class="form-grid"><label>Business date<input name="business_date" type="date" max="${today()}" value="${esc(values.business_date || today())}" required></label><label>Meal period<select name="meal_period"><option ${values.meal_period === 'Lunch' ? 'selected' : ''}>Lunch</option><option ${values.meal_period === 'Dinner' ? 'selected' : ''}>Dinner</option><option ${values.meal_period === 'All Day' || !values.meal_period ? 'selected' : ''}>All Day</option></select></label></div><div class="revenue-entry-grid"><label>Adult customers<input name="adult_customers" type="number" min="0" step="1" value="${values.adult_customers}" required></label><label>Adult rate<input name="adult_rate" type="number" min="0.01" step="0.01" value="${values.adult_rate}" required></label><label>Child customers<input name="child_customers" type="number" min="0" step="1" value="${values.child_customers}" required></label><label>Child rate<input name="child_rate" type="number" min="0.01" step="0.01" value="${values.child_rate}" required></label><label>Senior/PWD customers<input name="senior_pwd_customers" type="number" min="0" step="1" value="${values.senior_pwd_customers}" required></label><label>Senior/PWD rate<input name="senior_pwd_rate" type="number" min="0.01" step="0.01" value="${values.senior_pwd_rate}" required></label></div><label>Remarks<textarea name="remarks" rows="2">${esc(values.remarks || '')}</textarea></label>${item.id ? '<label>Edit reason<input name="edit_reason" required placeholder="Why is this record changing?"></label>' : ''}<div class="revenue-preview" data-revenue-preview data-production="${production}" data-waste="${waste}"><strong>Live calculation</strong><span>Adult revenue <b data-preview="adult">₱0.00</b></span><span>Child revenue <b data-preview="child">₱0.00</b></span><span>Senior/PWD revenue <b data-preview="senior">₱0.00</b></span><span>Total customers <b data-preview="customers">0</b></span><span>Total revenue <b data-preview="total">₱0.00</b></span><span>Estimated profit <b data-preview="profit">₱${(-production - waste).toFixed(2)}</b></span></div>`, item.id ? 'Save changes' : 'Save revenue');
-  document.querySelector('#modalForm').dataset.type = 'revenue';
-  document.querySelector('#modalForm').dataset.id = item.id || '';
-  updateRevenuePreview(document.querySelector('#modalForm'));
-}
-function updateRevenuePreview(form) {
-  const value = name => Number(form.elements[name]?.value || 0);
-  const adult = value('adult_customers') * value('adult_rate');
-  const child = value('child_customers') * value('child_rate');
-  const senior = value('senior_pwd_customers') * value('senior_pwd_rate');
-  const total = adult + child + senior;
-  const customers = value('adult_customers') + value('child_customers') + value('senior_pwd_customers');
-  const profit = total - Number(form.querySelector('[data-revenue-preview]')?.dataset.production || 0) - Number(form.querySelector('[data-revenue-preview]')?.dataset.waste || 0);
-  const set = (key, text) => { const target = form.querySelector(`[data-preview="${key}"]`); if (target) target.textContent = text; };
-  set('adult', money(adult)); set('child', money(child)); set('senior', money(senior)); set('customers', customers); set('total', money(total)); set('profit', money(profit));
-}
 function revenuePage() {
   if (!canAccessRevenue()) return revenueAccessDenied();
   const [rangeStart, rangeEnd] = dateRangeBounds();
   const records = rangeStart && rangeEnd ? revenueRecords().filter(item => item.business_date >= rangeStart && item.business_date <= rangeEnd) : [];
-  const active = records.filter(item => item.status === 'Confirmed');
-  const date = today();
-  const todayRecords = active.filter(item => item.business_date === date);
-  const todayTotals = todayRecords.reduce((sum, item) => sum + item.total_revenue, 0);
-  const todayCustomers = todayRecords.reduce((sum, item) => sum + item.total_customers, 0);
-  const todayProfit = profitability(date, { total_revenue: todayTotals }).profit;
   const rows = records.slice().sort((a, b) => String(b.business_date || '').localeCompare(String(a.business_date || ''))).slice(0, 30).map(item => {
-    const result = profitability(item.business_date, item.status === 'Confirmed' ? item : null);
-    return `<tr class="${item.status === 'Voided' ? 'is-voided' : ''}"><td><strong>${esc(item.business_date)}</strong></td><td>${esc(item.meal_period)}</td><td>${item.adult_customers}</td><td>${item.child_customers}</td><td>${item.senior_pwd_customers}</td><td>${item.total_customers}</td><td class="numeric">${item.status === 'Confirmed' ? money(item.total_revenue) : '—'}</td><td class="numeric">${money(result.production)}</td><td class="numeric">${money(result.waste)}</td><td class="numeric">${item.status === 'Confirmed' ? money(result.profit) : '—'}</td><td><span class="status ${item.status === 'Confirmed' ? 'status-good' : item.status === 'Draft' ? 'status-low' : 'status-out'}">${esc(item.status)}</span></td><td>${item.status === 'Draft' && canAccessRevenue() ? `<button class="ghost-btn compact-btn" data-action="confirm-revenue" data-id="${item.id}">Confirm</button>` : ''}${canVoidRevenue() && item.status !== 'Voided' ? `<button class="danger-btn compact-btn" data-action="void-revenue" data-id="${item.id}">Void</button>` : ''}</td></tr>`;
-  }).join('') || '<tr><td colspan="12" class="empty-table">No revenue records yet. Record the first day of buffet revenue.</td></tr>';
-  const rateSummary = all('buffetRates').filter(item => item.isActive).slice(0, 3).map(item => `<div><span>${esc(item.mealPeriod)} / ${esc(item.dayType)}</span><strong>${money(item.adultRate)} adult</strong></div>`).join('') || '<small class="panel-subtitle">No active rates loaded.</small>';
-  const drafts = records.filter(item => item.status === 'Draft');
-  return `${pageHeader('Management insight', 'Revenue Tracking', 'Review drafted and confirmed buffet revenue. Revenue and cost figures are restricted to Administrator and Manager roles.', `<span class="nav-badge">${drafts.length} drafts to confirm</span>`)}<div class="metric-grid revenue-metrics">${metric("Today's Revenue", money(todayTotals), '₱', 'green-icon', `${todayRecords.length} confirmed entries`)}${metric('Drafts to confirm', drafts.length, '✎', 'orange-icon', 'Completed service awaiting review')}${metric('Total Customers', todayCustomers, '♙', 'purple-icon', 'Adults, children, and Senior/PWD')}${metric('Estimated Profit', money(todayProfit), '↗', 'green-icon', 'Revenue − production − waste')}${metric('Production Cost', money(productionCost(date)), '♨', 'orange-icon', 'Matched by business date')}${metric('Waste Cost', money(wasteCost(date)), '◌', 'red-icon', 'Matched by business date')}</div><div class="dashboard-grid"><div class="panel"><div class="panel-title">Profit breakdown</div><div class="panel-subtitle">${money(todayTotals)} Revenue − ${money(productionCost(date))} Production Cost − ${money(wasteCost(date))} Waste Cost = ${money(todayProfit)} Estimated Profit</div><div class="profit-breakdown"><i style="width:${todayTotals ? Math.max(4, todayTotals / Math.max(todayTotals, productionCost(date) + wasteCost(date) + 1) * 100) : 4}%"></i><i style="width:${todayTotals ? productionCost(date) / todayTotals * 100 : 0}%"></i><i style="width:${todayTotals ? wasteCost(date) / todayTotals * 100 : 0}%"></i></div><div class="legend"><span class="sales">Revenue</span><span class="cost">Production cost</span><span class="profit">Waste cost</span></div></div><div class="panel"><div class="panel-title">Active buffet rates</div><div class="analytics-stack">${rateSummary}</div><button class="ghost-btn compact-btn" data-view="rates">Manage rates</button></div></div><div class="panel revenue-records-panel"><div class="panel-header"><div><div class="panel-title">Revenue records</div><div class="panel-subtitle">Drafts require confirmation; voided records remain visible for audit history.</div></div><div class="toolbar-inline">${dateRangeControls()}</div></div><div class="table-scroll"><table><thead><tr><th>Date</th><th>Meal period</th><th>Adults</th><th>Children</th><th>Senior/PWD</th><th>Total customers</th><th>Revenue</th><th>Production cost</th><th>Waste cost</th><th>Estimated profit</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+    return `<tr class="${item.status === 'Voided' ? 'is-voided' : ''}"><td><strong>${esc(item.business_date)}</strong></td><td>${esc(item.meal_period)}</td><td>${Number(item.adult_customers || 0)}</td><td>${Number(item.child_customers || 0)}</td><td>${Number(item.senior_pwd_customers || 0)}</td><td>${Number(item.total_customers || 0)}</td><td class="numeric">${money(item.total_revenue)}</td><td><span class="status">${esc(item.status || 'Archived')}</span></td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="empty-table">No archived legacy revenue records in this range.</td></tr>';
+  return `${pageHeader('Historical archive', 'Legacy Revenue Records', 'Historical revenue_records are preserved for reference only. They are excluded from all Phase 4 sales totals and reports.', '')}<div class="panel revenue-records-panel"><div class="panel-header"><div><div class="panel-title">Read-only archive</div><div class="panel-subtitle">Closed POS bills are the sole source of current revenue.</div></div><div class="toolbar-inline">${dateRangeControls()}</div></div><div class="table-scroll"><table><thead><tr><th>Date</th><th>Meal period</th><th>Adults</th><th>Children</th><th>Senior/PWD</th><th>Customers</th><th>Archived amount</th><th>Legacy status</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
 }
 function reservationsPage() {
   const reservations = all('reservations');
@@ -3206,21 +3155,6 @@ async function handleSubmit(form, submitter = null) {
       toast(friendlyRpcError(error), 'error');
       return;
     }
-  } else if (type === 'revenue') {
-    if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error');
-    const duplicate = all('revenueRecords').find(item => item.id !== editId && item.status === 'Confirmed' && item.business_date === data.business_date && item.meal_period === data.meal_period);
-    if (duplicate) return toast(`An active ${data.meal_period} record already exists for ${data.business_date}.`, 'error');
-    const existing = all('revenueRecords').find(item => item.id === editId);
-    const record = createRevenueRecord({
-      ...data,
-      id: editId || id('REV'),
-      recorded_by: existing?.recorded_by || state.role,
-      recorded_at: existing?.recorded_at || new Date().toISOString(),
-      last_edited_by: editId ? state.role : '',
-      last_edited_at: editId ? new Date().toISOString() : null,
-      edit_reason: editId ? data.edit_reason : ''
-    });
-    await save('revenueRecords', editId ? all('revenueRecords').map(item => item.id === editId ? record : item) : [record, ...all('revenueRecords')]);
   } else if (type === 'reservation') {
     const existing = editId ? all('reservations').find(item => item.id === editId) : null;
     if (editId && !existing) {
@@ -3703,11 +3637,6 @@ async function openUnresolvedBookingBill(reservationId) {
     return toast('The bill is not available in your cashier access. Ask a Manager or Administrator to open it.', 'error');
   }
   billForm(bill);
-}
-function confirmRevenueForm(record) {
-  modal('Confirm revenue draft', `<p class="panel-subtitle">Review the drafted counts and adjust them before confirmation.</p><div class="form-grid"><label>Adult customers<input name="adult_customers" type="number" min="0" step="1" value="${record.adult_customers}" required></label><label>Child customers<input name="child_customers" type="number" min="0" step="1" value="${record.child_customers}" required></label><label>Senior/PWD customers<input name="senior_pwd_customers" type="number" min="0" step="1" value="${record.senior_pwd_customers}" required></label></div>`, 'Confirm revenue');
-  document.querySelector('#modalForm').dataset.type = 'confirm-revenue';
-  document.querySelector('#modalForm').dataset.id = record.id;
 }
 function chargeItemForm(item = {}) {
   const value = key => item?.[key] ?? '';
@@ -4243,10 +4172,6 @@ document.addEventListener('click', async event => {
   }
   if (action === 'reservation-transition') return transitionReservation(event.target.closest('[data-action]').dataset.id, event.target.closest('[data-action]').dataset.transition);
   if (action === 'delete-reservation') return deleteRecord('reservation', event.target.closest('[data-action]').dataset.id);
-  if (action === 'confirm-revenue') {
-    const record = all('revenueRecords').find(item => item.id === event.target.closest('[data-action]').dataset.id);
-    if (record) confirmRevenueForm(record);
-  }
 });
 document.addEventListener('click', event => {
   const category = event.target.closest('[data-recipe-category]')?.dataset.recipeCategory;
@@ -4266,20 +4191,7 @@ document.addEventListener('click', event => {
   const name = action.dataset.action;
   if (name === 'close-modal') closeModal();
   else if (name === 'open-recipe') openRecipeForm();
-  else if (name === 'open-revenue') revenueForm();
-  else if (name === 'edit-revenue') {
-    if (!canAccessRevenue()) return toast('Revenue Tracking is restricted.', 'error');
-    const record = all('revenueRecords').find(item => item.id === action.dataset.id);
-    if (record) revenueForm(record);
-  } else if (name === 'void-revenue') {
-    if (!canVoidRevenue()) return toast('Only Administrators can void revenue.', 'error');
-    if (!confirm('Void this revenue record? This action is recorded and cannot be undone.')) return;
-    const reason = prompt('Why is this revenue record being voided?');
-    if (!reason?.trim()) return;
-    save('revenueRecords', all('revenueRecords').map(item => item.id === action.dataset.id ? { ...item, status: 'Voided', voided_by: state.role, void_reason: reason.trim(), voided_at: new Date().toISOString() } : item));
-    toast('Revenue record voided');
-    render();
-  } else if (name === 'open-reservation') reservationForm();
+  else if (name === 'open-reservation') reservationForm();
   else if (name === 'edit-reservation') {
     const record = all('reservations').find(item => item.id === action.dataset.id);
     if (record) reservationForm(record);
@@ -4409,8 +4321,10 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-low-stock-filter]')) { state.ingredientStatus = event.target.checked ? 'Low Stock' : 'All'; render(); }
   if (event.target.matches('[data-date-range]')) {
     state.dateRange = event.target.value;
+    state.reportPage = 1;
+    reportRequestKey = '';
     if (state.dateRange === 'custom') {
-      state.customDateTo ||= today();
+      state.customDateTo ||= manilaBusinessToday();
       if (!state.customDateFrom) {
         const startDate = new Date(`${state.customDateTo}T12:00:00`);
         startDate.setDate(startDate.getDate() - 29);
@@ -4419,9 +4333,9 @@ document.addEventListener('change', event => {
     }
     render();
   }
-  if (event.target.matches('[data-report-group]')) { state.reportGrouping = event.target.value; reportRequestKey = ''; render(); }
-  if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; reportRequestKey = ''; render(); }
-  if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; render(); }
+  if (event.target.matches('[data-report-group]')) { state.reportGrouping = event.target.value; state.reportPage = 1; reportRequestKey = ''; render(); }
+  if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; state.reportPage = 1; reportRequestKey = ''; render(); }
+  if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; state.reportPage = 1; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
   if (event.target.matches('[data-reservation-list-date]')) {
     state.calendarDate = event.target.value || today();
@@ -4506,6 +4420,9 @@ async function syncWithSupabase() {
   KEYS.forEach(key => { collectionState[key] = pendingCollections[key]; });
   supabaseSyncEnabled = true;
   invalidateReportData();
+  revenueDashboardData = null;
+  revenueDashboardError = '';
+  if (revenueDashboardLoading) revenueDashboardRefreshAfterLoad = true;
   setPostSaveSyncState();
   render();
 }
@@ -4999,6 +4916,7 @@ function render() {
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
     return;
   }
+  if (state.view === 'dashboard' && canAccessRevenue()) loadRevenueDashboard();
   if (state.view === 'reservations' && state.unresolvedFocusId) {
     const target = [...app.querySelectorAll('[data-unresolved-reservation]')]
       .find(element => element.dataset.id === state.unresolvedFocusId);
@@ -5119,6 +5037,37 @@ function invalidateReportData() {
   reportDataVersion++;
   Object.keys(reportServerData).forEach(key => delete reportServerData[key]);
   reportRequestKey = '';
+  revenueDashboardData = null;
+  revenueDashboardError = '';
+  if (revenueDashboardLoading) revenueDashboardRefreshAfterLoad = true;
+}
+async function loadRevenueDashboard(force = false) {
+  if (!canAccessRevenue() || !state.user || revenueDashboardLoading) return;
+  if (revenueDashboardData && !force) return;
+  const requestId = ++revenueDashboardRequest;
+  revenueDashboardLoading = true;
+  revenueDashboardError = '';
+  try {
+    const data = await window.supabaseRecord.posRevenueReport('dashboard');
+    if (requestId === revenueDashboardRequest) revenueDashboardData = data;
+  } catch (error) {
+    console.error('Closed-bill dashboard metrics could not be loaded.', error);
+    if (requestId === revenueDashboardRequest) {
+      revenueDashboardData = null;
+      revenueDashboardError = friendlyRpcError(error);
+    }
+  } finally {
+    if (requestId === revenueDashboardRequest) {
+      revenueDashboardLoading = false;
+      if (revenueDashboardRefreshAfterLoad) {
+        revenueDashboardRefreshAfterLoad = false;
+        revenueDashboardData = null;
+        loadRevenueDashboard(true);
+        return;
+      }
+      if (state.view === 'dashboard') render();
+    }
+  }
 }
 function initializeReportCharts() {
   const panel = document.querySelector('.report-chart-grid');
@@ -5183,12 +5132,15 @@ function initializeReportCharts() {
 function reportTable(headers, rows, empty = 'No data in this range.') { return `<div class="table-scroll"><table><thead><tr>${headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">${empty}</td></tr>`}</tbody></table></div>`; }
 function reportExport(rows, name) { const output = rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); const blob = new Blob([output], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `costtrack-${name}.csv`; link.click(); URL.revokeObjectURL(link.href); }
 async function loadReportData() {
-  const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}`;
+  const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}|${state.reportPage}`;
   if (!start || !end || reportRequestPending || reportRequestKey === key || reportServerData[key]) return;
   reportRequestPending = true; reportRequestKey = key;
   const requestVersion = reportDataVersion;
   try {
-    const data = await window.supabaseRecord.reportAnalytics(state.reportTab, start, end, state.reportGrouping, state.reportIncludeWaste);
+    const closedBillReport = ['daily_revenue', 'revenue_trend', 'customer_count', 'shift_revenue', 'closed_bill_summary', 'food_cost'].includes(state.reportTab);
+    const data = closedBillReport
+      ? await window.supabaseRecord.posRevenueReport(state.reportTab, start, end, state.reportGrouping, state.reportIncludeWaste, state.reportPage, 100)
+      : await window.supabaseRecord.reportAnalytics(state.reportTab, start, end, state.reportGrouping, state.reportIncludeWaste);
     if (requestVersion === reportDataVersion) reportServerData[key] = data;
   }
   catch (error) {
@@ -5197,15 +5149,49 @@ async function loadReportData() {
   finally { reportRequestPending = false; if (state.view === 'reports') render(); }
 }
 function reportsPage() {
-  const [start, end] = dateRangeBounds(); const tabs = [['food_cost', 'Food cost'], ['waste', 'Waste'], ['revenue', 'Revenue & covers'], ['inventory', 'Inventory'], ['production', 'Production']].filter(([tab]) => tab === 'revenue' || tab === 'food_cost' ? canAccessRevenue() : tab === 'inventory' ? ['Administrator', 'Manager', 'Inventory Clerk'].includes(state.role) : tab === 'waste' ? ['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk'].includes(state.role) : ['Administrator', 'Manager', 'Chef / Kitchen Staff'].includes(state.role));
+  const [start, end] = dateRangeBounds();
+  const revenueTabs = [
+    ['daily_revenue', 'Daily revenue'],
+    ['revenue_trend', 'Revenue trend'],
+    ['customer_count', 'Customers'],
+    ['shift_revenue', 'Shift revenue'],
+    ['closed_bill_summary', 'Closed bills']
+  ];
+  const tabs = [
+    ...revenueTabs.filter(() => canAccessRevenue()),
+    ...[['food_cost', 'Food cost'], ['waste', 'Waste'], ['inventory', 'Inventory'], ['production', 'Production']]
+      .filter(([tab]) => tab === 'food_cost' ? canAccessRevenue() : tab === 'inventory' ? ['Administrator', 'Manager', 'Inventory Clerk'].includes(state.role) : tab === 'waste' ? ['Administrator', 'Manager', 'Chef / Kitchen Staff', 'Inventory Clerk'].includes(state.role) : ['Administrator', 'Manager', 'Chef / Kitchen Staff'].includes(state.role))
+  ];
   if (!tabs.some(([tab]) => tab === state.reportTab)) {
     state.reportTab = tabs[0]?.[0] || 'waste';
     reportRequestKey = '';
   }
-  const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}`; const server = reportServerData[key]; const data = server && !server.error ? server : {};
-  const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; const invalidDateRange = state.dateRange === 'custom' && (!start || !end || start > end); const loading = reportRequestPending && !server && !invalidDateRange; const error = server?.error; let headers = []; let tableRows = []; let charts = ''; let kpis = '';
-  if (state.reportTab === 'food_cost') { headers = ['Period', 'Revenue', 'Food cost', 'Food cost %']; tableRows = rows.map(item => `<tr><td>${item.period}</td><td>${money(item.revenue)}</td><td>${money(item.food_cost)}</td><td class="${item.food_cost_pct > 32 ? 'negative' : 'positive'}">${item.food_cost_pct == null ? '—' : `${Number(item.food_cost_pct).toFixed(1)}%`}</td></tr>`); charts = reportChartPanel('reportFoodCostChart', 'Food cost over time', 'Food cost percentage by reporting period.', rows, 'food_cost_pct', 'period', 'line', '%'); kpis = `${metric('Food cost %', rows.some(item => item.revenue) ? `${(rows.reduce((sum, item) => sum + Number(item.food_cost || 0), 0) / Math.max(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0), 1) * 100).toFixed(1)}%` : '—', '♨', 'orange-icon', 'Target 32%')}${metric('Confirmed revenue', money(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0)), '₱', 'green-icon', rows.some(item => item.revenue) ? 'Confirmed rows only' : 'No confirmed revenue in this range')}`; }
-  else if (state.reportTab === 'revenue') { headers = ['Period', 'Meal period', 'Adults', 'Children', 'Senior/PWD', 'Covers', 'Revenue', 'Revenue / cover', 'Estimated profit']; tableRows = rows.map(item => `<tr><td>${item.period}</td><td>${esc(item.meal_period)}</td><td>${item.adults}</td><td>${item.children}</td><td>${item.senior_pwd}</td><td>${item.covers}</td><td>${money(item.revenue)}</td><td>${item.covers ? money(item.revenue / item.covers) : '—'}</td><td>${money(Number(item.revenue || 0) - Number(item.production_cost || 0) - Number(item.waste_cost || 0))}</td></tr>`); charts = reportChartPanel('reportRevenueChart', 'Revenue over time', 'Confirmed revenue by reporting period.', rows, 'revenue', 'period', 'line', 'currency'); kpis = `${metric('Revenue', money(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0)), '₱', 'green-icon', rows.length ? 'Confirmed rows only' : 'No confirmed revenue in this range')}${metric('Covers', rows.reduce((sum, item) => sum + Number(item.covers || 0), 0), '♙', 'purple-icon', `No-shows: ${data.no_show_count || 0}`)}`; }
+  const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}|${state.reportPage}`; const server = reportServerData[key]; const data = server && !server.error ? server : {};
+  const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; const invalidDateRange = state.dateRange === 'custom' && (!start || !end || start > end); const loading = !server && !invalidDateRange; const error = server?.error; let headers = []; let tableRows = []; let charts = ''; let kpis = '';
+  if (state.reportTab === 'food_cost') { headers = ['Period', 'Revenue', 'Food cost', 'Food cost %']; tableRows = rows.map(item => `<tr><td>${item.period}</td><td>${money(item.revenue)}</td><td>${money(item.food_cost)}</td><td class="${item.food_cost_pct > 32 ? 'negative' : 'positive'}">${item.food_cost_pct == null ? '—' : `${Number(item.food_cost_pct).toFixed(1)}%`}</td></tr>`); charts = reportChartPanel('reportFoodCostChart', 'Food cost over time', 'Food cost percentage by reporting period.', rows, 'food_cost_pct', 'period', 'line', '%'); kpis = `${metric('Food cost %', rows.some(item => item.revenue) ? `${(rows.reduce((sum, item) => sum + Number(item.food_cost || 0), 0) / Math.max(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0), 1) * 100).toFixed(1)}%` : '—', '♨', 'orange-icon', 'Target 32%')}${metric('Closed-bill revenue', money(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0)), '₱', 'green-icon', rows.some(item => item.revenue) ? 'Closed bills only' : 'No closed-bill revenue in this range')}`; }
+  else if (['daily_revenue', 'revenue_trend'].includes(state.reportTab)) {
+    headers = ['Period', 'Closed bills', 'Net revenue', 'Discounts', 'Customers', 'Voided bills', 'Voided amount'];
+    tableRows = rows.map(item => `<tr><td>${esc(item.period)}</td><td>${Number(item.closed_bill_count || 0)}</td><td>${money(item.net_revenue)}</td><td>${money(item.discount_total)}</td><td>${Number(item.customers_served || 0)}</td><td>${Number(item.voided_bill_count || 0)}</td><td>${money(item.voided_bill_amount)}</td></tr>`);
+    charts = reportChartPanel('reportRevenueChart', 'Closed-bill revenue', 'Net revenue grouped by Manila business date.', rows, 'net_revenue', 'period', 'line', 'currency');
+    kpis = `${metric('Net revenue', money(rows.reduce((sum, item) => sum + Number(item.net_revenue || 0), 0)), '₱', 'green-icon', 'Closed bills only')}${metric('Closed bills', rows.reduce((sum, item) => sum + Number(item.closed_bill_count || 0), 0), '▤', 'purple-icon', 'Counted once')}${metric('Voided amount', money(rows.reduce((sum, item) => sum + Number(item.voided_bill_amount || 0), 0)), '₱', 'red-icon', 'Separate from revenue')}`;
+  }
+  else if (state.reportTab === 'customer_count') {
+    headers = ['Period', 'Closed bills', 'Adults', 'Senior/PWD', 'Kids', 'Comped', 'Customers served'];
+    tableRows = rows.map(item => `<tr><td>${esc(item.period)}</td><td>${Number(item.closed_bill_count || 0)}</td><td>${Number(item.adult_count || 0)}</td><td>${Number(item.senior_count || 0)}</td><td>${Number(item.kids_count || 0)}</td><td>${Number(item.comped_count || 0)}</td><td>${Number(item.customers_served || 0)}</td></tr>`);
+    charts = reportChartPanel('reportCustomerChart', 'Customers served', 'Actual bill counts; no estimate is used.', rows, 'customers_served', 'period', 'bar', 'customers');
+    kpis = `${metric('Customers served', rows.reduce((sum, item) => sum + Number(item.customers_served || 0), 0), '♙', 'purple-icon', 'Actual bill counts')}${metric('Closed bills', rows.reduce((sum, item) => sum + Number(item.closed_bill_count || 0), 0), '▤', 'green-icon', 'Source: closed POS bills')}`;
+  }
+  else if (state.reportTab === 'shift_revenue') {
+    headers = ['Shift', 'Status', 'Closed bills', 'Net revenue', 'Discounts', 'Customers', 'Deposits applied', 'Deposit receipts', 'Cash payments', 'Cash refunds', 'Expected cash'];
+    tableRows = rows.map(item => `<tr><td>${esc(item.shift_code || 'Unassigned / legacy')}</td><td>${esc(item.shift_status || '—')}</td><td>${Number(item.closed_bill_count || 0)}</td><td>${money(item.net_revenue)}</td><td>${money(item.discount_total)}</td><td>${Number(item.customers_served || 0)}</td><td>${money(item.deposit_applied)}</td><td>${money(item.deposit_receipts)}</td><td>${money(item.cash_payments)}</td><td>${money(item.cash_refunds)}</td><td>${money(item.expected_cash)}</td></tr>`);
+    charts = reportChartPanel('reportShiftRevenueChart', 'Revenue by shift', 'Sales totals derive from closed bills; cash movements and deposits are separate operational values.', rows, 'net_revenue', 'shift_code', 'bar', 'currency');
+    kpis = `${metric('Net revenue', money(rows.reduce((sum, item) => sum + Number(item.net_revenue || 0), 0)), '₱', 'green-icon', 'Closed bills only')}${metric('Deposit receipts', money(rows.reduce((sum, item) => sum + Number(item.deposit_receipts || 0), 0)), '₱', 'orange-icon', 'Operational cash · not sales')}`;
+  }
+  else if (state.reportTab === 'closed_bill_summary') {
+    headers = ['Bill #', 'Business date', 'Closed at', 'Shift', 'Subtotal', 'Service charge', 'Discount', 'Net revenue', 'Adults', 'Senior/PWD', 'Kids', 'Comped', 'Served', 'Deposit applied'];
+    tableRows = rows.map(item => `<tr><td>${esc(item.bill_number)}</td><td>${esc(item.business_date)}</td><td>${esc(item.closed_at)}</td><td>${esc(item.shift_code || '—')}</td><td>${money(item.subtotal)}</td><td>${money(item.service_charge)}</td><td>${money(item.discount_total)}</td><td>${money(item.net_revenue)}</td><td>${Number(item.adult_count || 0)}</td><td>${Number(item.senior_count || 0)}</td><td>${Number(item.kids_count || 0)}</td><td>${Number(item.comped_count || 0)}</td><td>${Number(item.customers_served || 0)}</td><td>${money(item.deposit_applied)}</td></tr>`);
+    kpis = `${metric('Bills in range', Number(data.total_rows || 0), '▤', 'purple-icon', 'Closed status only')}${metric('Page revenue', money(rows.reduce((sum, item) => sum + Number(item.net_revenue || 0), 0)), '₱', 'green-icon', `Page ${data.page || state.reportPage}`)}`;
+  }
   else if (state.reportTab === 'waste') {
     headers = ['Ingredient', 'Quantity', 'Waste cost'];
     tableRows = (data.by_ingredient || []).map(item => `<tr><td>${esc(item.name)}</td><td>${item.quantity}</td><td>${money(item.waste_cost)}</td></tr>`);
@@ -5234,7 +5220,11 @@ function reportsPage() {
     kpis = metric('Batches', (data.rows || []).reduce((sum, item) => sum + Number(item.batches || 0), 0), '♨', 'orange-icon', 'Production logs');
   }
   const exportRows = [headers, ...tableRows.map(row => [...row.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map(match => match[1].replace(/<[^>]+>/g, '')))];
-  return `${pageHeader('Management insight', 'Reports & analytics', 'Aggregated reports use confirmed revenue only and latest ingredient purchase prices.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs">${tabs.map(([tab, label]) => `<button class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state">Loading report…</div>' : error ? `<div class="panel error-state">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">Food cost uses latest ingredient costs at report time; production history has no cost snapshot.</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel report-table-panel">${reportTable(headers, tableRows, state.reportTab === 'revenue' ? 'No confirmed revenue in this range.' : 'No data in this range.')}</div>`}`;
+  const pageCount = Math.max(1, Math.ceil(Number(data.total_rows || 0) / Number(data.page_size || 100)));
+  const pagination = state.reportTab === 'closed_bill_summary'
+    ? `<div class="toolbar-inline report-pagination"><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.max(1, state.reportPage - 1)}" ${state.reportPage <= 1 ? 'disabled' : ''}>Previous</button><span>Page ${state.reportPage} of ${pageCount} · ${Number(data.total_rows || 0)} bills</span><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.min(pageCount, state.reportPage + 1)}" ${state.reportPage >= pageCount ? 'disabled' : ''}>Next</button></div>`
+    : '';
+  return `${pageHeader('Management insight', 'Reports & analytics', 'Revenue and customer counts derive from closed POS bills. Deposits and cash movements are shown separately in operational reports.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs">${tabs.map(([tab, label]) => `<button class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state">Loading report…</div>' : error ? `<div class="panel error-state" role="alert">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">${state.reportTab === 'food_cost' ? 'Food cost uses latest ingredient costs at report time; production history has no cost snapshot.' : 'Net sales exclude voided bills, deposits, and all legacy revenue records.'}</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel report-table-panel">${reportTable(headers, tableRows, 'No data in this range.')}${pagination}</div>`}`;
 }
 
 document.addEventListener('keydown', event => {
@@ -5354,7 +5344,6 @@ document.addEventListener('input', event => {
     && event.target.closest('#modalForm[data-type="walk-in"]')) {
     refreshWalkInTables(event.target.closest('#modalForm'));
   }
-  if (event.target.closest('#modalForm[data-type="revenue"]')) updateRevenuePreview(event.target.closest('#modalForm'));
   if (event.target.matches('[data-custom-portions]')) {
     event.target.closest('.production-dish-card')?.querySelector('[data-use-custom-portions="true"]')?.removeAttribute('data-request-id');
   }
@@ -5379,11 +5368,14 @@ window.addEventListener('hashchange', () => {
 
 document.addEventListener('click', event => {
   const reportTab = event.target.closest('[data-report-tab]');
-  if (reportTab) { state.reportTab = reportTab.dataset.reportTab; reportRequestKey = ''; render(); return; }
-  if (event.target.closest('[data-action="retry-report"]')) { const [start, end] = dateRangeBounds(); delete reportServerData[`${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}`]; reportRequestKey = ''; render(); return; }
+  if (reportTab) { state.reportTab = reportTab.dataset.reportTab; state.reportPage = 1; reportRequestKey = ''; render(); return; }
+  if (event.target.closest('[data-action="retry-revenue-dashboard"]')) { loadRevenueDashboard(true); return; }
+  const reportPageButton = event.target.closest('[data-action="report-page"]');
+  if (reportPageButton && !reportPageButton.disabled) { state.reportPage = Number(reportPageButton.dataset.page); reportRequestKey = ''; render(); return; }
+  if (event.target.closest('[data-action="retry-report"]')) { const [start, end] = dateRangeBounds(); delete reportServerData[`${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}|${state.reportPage}`]; reportRequestKey = ''; render(); return; }
   if (event.target.closest('[data-action="print-report"]')) { window.print(); return; }
   if (event.target.closest('[data-action="export-report"]')) {
-    const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}`; const data = reportServerData[key]; if (!data || data.error) { toast('This report is not available until the server data loads successfully.', 'error'); return; } const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; reportExport([Object.keys(rows[0] || {}), ...rows.map(item => Object.values(item))], state.reportTab); return;
+    const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}|${state.reportPage}`; const data = reportServerData[key]; if (!data || data.error) { toast('This report is not available until the server data loads successfully.', 'error'); return; } const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; reportExport([Object.keys(rows[0] || {}), ...rows.map(item => Object.values(item))], state.reportTab); return;
   }
   const backdrop = event.target.classList.contains('modal-backdrop');
   if (backdrop) document.querySelector('#modalRoot').innerHTML = '';
@@ -5577,7 +5569,6 @@ document.addEventListener('submit', async event => {
   form.querySelectorAll('input[type="number"]').forEach(control => {
     if (control.value !== '' && (!Number.isFinite(Number(control.value)) || Number(control.value) < Number(control.min || 0))) { showFieldError(control, `Enter a number of ${control.min && Number(control.min) > 0 ? 'at least ' + control.min : 'zero or more'}.`); valid = false; }
     if (['batchYield', 'prepTarget'].includes(control.name) && control.value !== '' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number.'); valid = false; }
-    if (form.dataset.type === 'revenue' && ['adult_customers', 'child_customers', 'senior_pwd_customers'].includes(control.name) && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number of customers.'); valid = false; }
   });
   if (['reservation', 'walk-in'].includes(form.dataset.type)) {
     const countNames = ['adults', 'seniorPwdCount', 'children'];
@@ -5677,7 +5668,6 @@ document.addEventListener('submit', async event => {
       }
     });
   }
-  if (form.dataset.type === 'revenue' && ['adult_customers', 'child_customers', 'senior_pwd_customers'].reduce((sum, name) => sum + Number(form.elements[name]?.value || 0), 0) < 1) { showFieldError(form.elements.adult_customers, 'At least one customer is required.'); valid = false; }
   if (form.dataset.type === 'waste') {
     const quantity = Number(form.elements.quantity.value);
     const product = ingredient(form.elements.ingredientId.value);
@@ -5727,30 +5717,6 @@ document.addEventListener('submit', async event => {
     submit.textContent = form.dataset.type === 'walk-in' && submit.dataset.walkInAction === 'seat-and-open'
       ? 'Seating and opening bill…'
       : 'Saving…';
-  }
-  if (form.dataset.type === 'confirm-revenue') {
-    const data = Object.fromEntries(new FormData(form));
-    const submit = form.querySelector('button[type="submit"]');
-    submit.disabled = true;
-    submit.textContent = 'Confirming…';
-    try {
-      await window.supabaseRecord.confirmRevenue(form.dataset.id, {
-        adult_customers: Number(data.adult_customers),
-        child_customers: Number(data.child_customers),
-        senior_pwd_customers: Number(data.senior_pwd_customers)
-      });
-      invalidateReportData();
-      state.modalDirty = false;
-      closeModal();
-      toast('Revenue draft confirmed.');
-      await syncWithSupabase();
-    } catch (error) {
-      console.error('Revenue confirmation failed.', error);
-      submit.disabled = false;
-      submit.textContent = 'Confirm revenue';
-      toast(friendlyRpcError(error), 'error');
-    }
-    return;
   }
   handleSubmit(form, event.submitter);
 }, true);

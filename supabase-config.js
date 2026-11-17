@@ -562,14 +562,6 @@ window.supabaseRecord = {
     throwIfError(error);
     return data;
   },
-  async confirmRevenue(revenueId, adjustments) {
-    const { data, error } = await window.supabaseClient.rpc('confirm_revenue', {
-      revenue_id_value: revenueId,
-      adjustments: adjustments || {}
-    });
-    throwIfError(error);
-    return data;
-  },
   async reportAnalytics(reportKey, startDate, endDate, groupBy, includeWaste) {
     const { data, error } = await window.supabaseClient.rpc('report_analytics', {
       report_key: reportKey,
@@ -580,6 +572,39 @@ window.supabaseRecord = {
     });
     throwIfError(error);
     return data || {};
+  },
+  async posRevenueReport(reportKey, startDate, endDate, groupBy, includeWaste, page, pageSize) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient.rpc('pos_revenue_report', {
+        p_report_key: reportKey,
+        p_start_date: startDate || null,
+        p_end_date: endDate || null,
+        p_group_by: groupBy || 'day',
+        p_include_waste: includeWaste !== false,
+        p_page: page || 1,
+        p_page_size: pageSize || 100
+      }).abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('POS revenue report timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data || {};
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('POS revenue report timed out after 15 seconds. Retry loading the report.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   },
   async receiveDelivery(payload) {
     const { data, error } = await window.supabaseClient.rpc('costtrack_receive_delivery', {

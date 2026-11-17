@@ -218,6 +218,52 @@ test('posResolveStaleBooking sends explicit outcome, confirmation, deposit, and 
   assert.equal(timers.size, 0);
 });
 
+test('posRevenueReport sends date, grouping, and pagination arguments through the guarded RPC', async () => {
+  let call;
+  const expected = { today_revenue: 1250, closed_bill_count: 3 };
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
+  });
+
+  assert.deepEqual(await record.posRevenueReport(
+    'closed_bill_summary', '2026-11-01', '2026-11-17', 'day', true, 2, 50
+  ), expected);
+  assert.equal(call.name, 'pos_revenue_report');
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args)), {
+    p_report_key: 'closed_bill_summary',
+    p_start_date: '2026-11-01',
+    p_end_date: '2026-11-17',
+    p_group_by: 'day',
+    p_include_waste: true,
+    p_page: 2,
+    p_page_size: 50
+  });
+  assert.equal(timers.size, 0);
+});
+
+test('posRevenueReport aborts and reports a 15-second timeout', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({
+    abortSignal(requestSignal) {
+      signal = requestSignal;
+      return new Promise(() => {});
+    }
+  }));
+  const pending = record.posRevenueReport('dashboard');
+  const [timeout] = timers.values();
+
+  timeout();
+
+  await assert.rejects(pending, /POS revenue report timed out after 15 seconds/);
+  assert.equal(signal.aborted, true);
+  assert.equal(timers.size, 0);
+});
+
 test('posResolveStaleBooking aborts after 15 seconds and retains retry guidance', async () => {
   let signal;
   const { record, timers } = loadSupabaseRecord(() => ({
