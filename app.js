@@ -4739,8 +4739,15 @@ function render() {
     app.innerHTML = '<div class="panel error-state" role="alert">This module is unavailable. Please return to the dashboard or contact your administrator.</div>';
     return;
   }
+  const revenueScrollLeft = state.view === 'revenue'
+    ? document.querySelector('.revenue-records-panel .table-scroll')?.scrollLeft || 0
+    : null;
   try {
     app.innerHTML = renderPage();
+    if (revenueScrollLeft !== null) {
+      const tableScroll = app.querySelector('.revenue-records-panel .table-scroll');
+      if (tableScroll) tableScroll.scrollLeft = revenueScrollLeft;
+    }
   } catch (error) {
     console.error(`Could not render the ${state.view} module.`, error);
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
