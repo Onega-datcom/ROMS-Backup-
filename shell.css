@@ -1738,6 +1738,28 @@ body {
   color: #655e49;
 }
 
+.login-brand {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.login-brand .brand-mark {
+  display: none;
+}
+
+.login-brand strong {
+  color: #3b2a20;
+  font: italic 400 40px/1 Georgia, serif;
+  letter-spacing: -1px;
+}
+
+.login-brand small {
+  color: #806448;
+  font: 700 9px/1.4 'DM Sans', sans-serif;
+  letter-spacing: 1.65px;
+}
+
 .login-art {
   color: var(--ink);
   background: #dccdb3;
@@ -1778,6 +1800,38 @@ body {
 .brand-mark {
   border-radius: 11px;
   background: #806448;
+}
+
+.sidebar .brand-mark {
+  display: none;
+}
+
+.sidebar .brand-copy strong {
+  color: #f5f0e6;
+  font: italic 400 22px/1 Georgia, serif;
+  letter-spacing: -.4px;
+}
+
+.sidebar .brand-copy small {
+  color: #dccdb3;
+  font-size: 8px;
+  letter-spacing: 1.15px;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.sidebar-collapsed .sidebar .brand-mark {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  padding: 0;
+  color: #dccdb3;
+  background: transparent;
+  font: italic 400 30px/1 Georgia, serif;
 }
 
 .brand-copy strong,

@@ -155,7 +155,7 @@ function currentUserInitials() {
 }
 function dashboardGreeting() {
   const firstName = currentUserName().split(/[\s@._-]+/).filter(Boolean)[0];
-  return firstName ? `Good morning, ${esc(firstName)}.` : 'Welcome to CostTrack.';
+  return firstName ? `Good morning, ${esc(firstName)}.` : 'Welcome to ROMS.';
 }
 async function save(key, value) {
   if (key === 'users') {
@@ -694,7 +694,7 @@ function userMenuMarkup(placement) {
     </button>
     <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
       <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
-      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Help / CostTrack guide</span></button>
+      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Help / ROMS guide</span></button>
       <div class="popover-divider"></div>
       <button type="button" role="menuitem" class="danger-menu-item" data-shell-action="sign-out">${shellIcon('logout')}<span>Sign out</span></button>
     </div>
@@ -811,18 +811,18 @@ function nav() {
   const guideCollapsed = readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`) === 'true'
     || collapsed
     || shortScreen;
-  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="CostTrack guide">
-    <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="CostTrack guide" aria-expanded="${!guideCollapsed}">
-      <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>CostTrack guide</strong><span>Learn the workflow</span></span>
+  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="ROMS guide">
+    <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="ROMS guide" aria-expanded="${!guideCollapsed}">
+      <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>ROMS guide</strong><span>Learn the workflow</span></span>
     </button>
-    <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss CostTrack guide" title="Dismiss guide">${shellIcon('close')}</button>
+    <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss ROMS guide" title="Dismiss guide">${shellIcon('close')}</button>
     <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
   </section>`;
   const collapseLabel = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   return `<div class="sidebar-top">
       <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
       <div class="brand">
-        <span class="brand-mark">CT</span><span class="brand-copy"><strong>COST<span>TRACK</span></strong><small>BOH cost management</small></span>
+        <span class="brand-mark" aria-hidden="true">R</span><span class="brand-copy"><strong>Restaurant</strong><small>OPERATION MANAGEMENT SYSTEM</small></span>
         <button class="sidebar-collapse" type="button" data-shell-action="toggle-sidebar" aria-label="${collapseLabel}" title="${collapseLabel}">${shellIcon('panel')}</button>
       </div>
       <div class="workspace-switcher" aria-label="Restaurant workspace">
@@ -1043,7 +1043,7 @@ function login(message = '') {
   document.querySelector('#appShell').classList.add('is-hidden');
   document.querySelector('#loginScreen').classList.remove('is-hidden');
   const recovering = passwordRecoveryMode || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
-  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><div class="brand-mark">CT</div><strong>COST<span>TRACK</span></strong></div><span class="eyebrow">Back-of-house cost management</span><h1>Know your food cost.<br><em>Run a smarter kitchen.</em></h1><p>Track ingredients, recipes, production, waste, and variance in one focused workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Work email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Sign in to CostTrack <span>→</span></button></form><button class="link-button" id="resetPasswordButton" type="button">Send password reset link</button><small>Accounts are provisioned by your CostTrack administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
+  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><strong>Restaurant</strong><small>OPERATION MANAGEMENT SYSTEM</small></div><span class="eyebrow">Back-of-house cost management</span><h1>Know your food cost.<br><em>Run a smarter kitchen.</em></h1><p>Track ingredients, recipes, production, waste, and variance in one focused workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Work email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Sign in to ROMS <span>→</span></button></form><button class="link-button" id="resetPasswordButton" type="button">Send password reset link</button><small>Accounts are provisioned by your system administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
 }
 function metric(label, value, icon, tone, foot) { return `<div class="metric-card"><div class="metric-top"><span>${label}</span><i class="metric-icon ${tone}">${icon}</i></div><div class="metric-value">${value}</div><div class="metric-foot">${foot}</div></div>`; }
 function pageHeader(eyebrow, title, subtitle, action = '') { return `<div class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`; }
@@ -1065,7 +1065,7 @@ function roleDashboard() {
   const counts = all('physicalCounts');
   const shortages = counts.filter(item => item.actual < item.expected).length;
   const roleCopy = {
-    Administrator: ['System overview', 'Your complete CostTrack workspace at a glance.'],
+    Administrator: ['System overview', 'Your complete ROMS workspace at a glance.'],
     Manager: ['Operational summary', 'Monitor cost, stock health, waste, and variance.'],
     'Inventory Clerk': ['Inventory control center', 'Keep supplies accurate, available, and ready for service.'],
     'Chef / Kitchen Staff': ['Kitchen workspace', 'Focus on recipes, production, and waste during today’s shift.'],
@@ -4283,7 +4283,7 @@ async function openAuthenticatedSession(session) {
     .single();
   if (error || !profile || !roleAccess[profile.role]) {
     await window.supabaseClient.auth.signOut();
-    throw new Error('Your account has no valid CostTrack role profile. Ask an administrator to provision your profile.');
+    throw new Error('Your account has no valid ROMS role profile. Ask an administrator to provision your profile.');
   }
   state.user = profile;
   state.role = profile.role;
@@ -4648,7 +4648,7 @@ function modal(title, content, submit = 'Save record', modalClass = '') {
   modalOpener = document.activeElement;
   state.modalDirty = false;
   const submitButton = submit ? `<button class="primary-btn modal-submit" type="submit">${submit}</button>` : '';
-  document.querySelector('#modalRoot').innerHTML = `<div class="modal-backdrop" role="presentation"><div class="modal${modalClass ? ` ${esc(modalClass)}` : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1"><div class="modal-header"><div><div class="eyebrow">CostTrack workspace</div><h2 id="modalTitle">${title}</h2></div></div><form id="modalForm" novalidate>${content}<div class="modal-actions"><button type="button" class="ghost-btn" data-action="close-modal">Cancel</button>${submitButton}</div></form></div></div>`;
+  document.querySelector('#modalRoot').innerHTML = `<div class="modal-backdrop" role="presentation"><div class="modal${modalClass ? ` ${esc(modalClass)}` : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1"><div class="modal-header"><div><div class="eyebrow">ROMS workspace</div><h2 id="modalTitle">${title}</h2></div></div><form id="modalForm" novalidate>${content}<div class="modal-actions"><button type="button" class="ghost-btn" data-action="close-modal">Cancel</button>${submitButton}</div></form></div></div>`;
   const form = document.querySelector('#modalForm');
   form.querySelectorAll('label').forEach((label, index) => {
     const control = label.querySelector('input, select, textarea');
