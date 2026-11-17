@@ -111,6 +111,8 @@ RPC functions used by the application:
 | `public_get_reservation_status` | Retrieve public reservation status |
 | `confirm_revenue` | Confirm revenue and adjustments |
 | `pos_reservation_deposit_history` | Read a reservation’s deposit and action history |
+| `pos_list_unresolved_stale_bookings` | Read past unresolved bookings for Front of House roles |
+| `pos_resolve_stale_booking` | Atomically resolve an eligible past reservation and any held deposit |
 | `report_analytics` | Return report and analytics data |
 | `costtrack_receive_delivery` | Record receiving, invoice lines, batches, and stock movements |
 | `get_expected_covers` | Calculate expected covers for a service |
@@ -133,6 +135,8 @@ Full RPC endpoint inventory:
 | `/rest/v1/rpc/public_get_reservation_status` | Return public status for a reservation |
 | `/rest/v1/rpc/confirm_revenue` | Confirm revenue and apply adjustments |
 | `/rest/v1/rpc/pos_reservation_deposit_history` | Read reservation deposits and audit actions |
+| `/rest/v1/rpc/pos_list_unresolved_stale_bookings` | Return unresolved past bookings with bill and held-deposit summaries |
+| `/rest/v1/rpc/pos_resolve_stale_booking` | Resolve a stale booking and its held deposit atomically |
 | `/rest/v1/rpc/report_analytics` | Return report and analytics results |
 | `/rest/v1/rpc/costtrack_receive_delivery` | Save receiving data, batches, and inventory movements |
 | `/rest/v1/rpc/get_expected_covers` | Calculate expected covers for a service |
@@ -172,9 +176,21 @@ The bill UI compares reservation and bill counts by adult, Senior/PWD, and kid c
 
 Migration 014 corrects the reservation guard so ordinary Walk-in inserts with no package are not treated as package overrides. Migration 015 permits a past Seated reservation to transition to Completed only when its linked bill has been closed and fully settled by the current actor in the same transaction; other historical edits remain protected. Run `supabase/015_past_reservation_bill_close.sql` after 014, then run the 013 and 015 acceptance scripts; both end with `ROLLBACK`. The 013 rollback removes the atomic entry point but intentionally retains idempotency/audit records and package enforcement. The 014 rollback restores the original guard defect and is not recommended. The 015 rollback restores the prior historical guard.
 
-Migration 016 adds `pos_resolve_stale_walkin(p_reservation_id text, p_reason text)`. It is executable by authenticated users but checks for the Manager or Administrator role in the database. It may complete only a past Seated Walk-in, requires a 10–500 character reason, and rejects any linked bill that is not Closed and fully settled, as well as any Held deposit. The operator must confirm that the party has left. The RPC changes the reservation status and completion timestamp only; it does not create, settle, or alter bills, payments, deposits, inventory, or table configuration. The reservation update is recorded by the existing audit log, while direct status updates remain blocked. Run `supabase/016_stale_walkin_completion.sql` after 015 and then `supabase/016_stale_walkin_completion_acceptance.sql`; the acceptance ends with `ROLLBACK`. Roll back 016 with `supabase/016_stale_walkin_completion_rollback.sql` before rolling back 015.
+Migration 016 originally added `pos_resolve_stale_walkin(p_reservation_id text, p_reason text)`. Migration 019 retires that entry point; callers must use `pos_resolve_stale_booking` so the Manager/Administrator records an explicit outcome and any held-deposit action.
 
 Migration 017 rejects a new same-day reservation, or a changed reservation schedule, when its start time has passed in the restaurant's Asia/Manila time zone. Walk-ins are exempt because their start time is recorded as guests arrive; edits that leave an existing reservation's date and time unchanged remain allowed. The management and public reservation forms also filter out today's elapsed slots and validate again on submit. Run `supabase/017_prevent_past_reservation_times.sql` after 016, then run `supabase/017_prevent_past_reservation_times_acceptance.sql` after 10:00 AM Asia/Manila; the acceptance ends with `ROLLBACK`. Roll back with `supabase/017_prevent_past_reservation_times_rollback.sql` before rolling back 016.
+
+Migration 018 restores the narrow past Seated Walk-in completion exception in `enforce_reservation_history_guard()` that migration 016 adds. It requires the existing 016 transaction-context helper and preserves the 015 settled-bill exception and historical edit checks. It changes no data. Apply `supabase/018_restore_stale_walkin_history_guard.sql` after 017, then rerun the 016 and 013 acceptance scripts. Its rollback restores the pre-018 (015) history guard; run that rollback before rolling back 017 or 016.
+
+### Phase D — stale-booking resolution (migration 019)
+
+`pos_list_unresolved_stale_bookings()` is a read-only, role-checked RPC for Administrator, Manager, and Receptionist. It returns past Pending/Confirmed bookings and past Seated bookings without a Closed zero-balance bill, including reservation ID/name/date/time/type/table/guest count/status, bill-status summary, Held-deposit total, age in Manila calendar days, and a `Payable` or `Unresolved` label. A Seated booking with an Open bill is labelled `Payable`; the UI offers the existing cashier flow and does not resolve it.
+
+`pos_resolve_stale_booking(p_reservation_id text, p_outcome text, p_reason text, p_confirm_no_meal boolean, p_deposit_action text, p_deposit_reason text, p_idempotency_key text)` is a Manager/Administrator-only `SECURITY DEFINER` RPC. Outcomes are `close_without_charge`, `no_show`, and `cancel`. Close without charge is limited to past Seated Reservation/Walk-in rows, requires a 10–500 character reason and explicit confirmation that no meal was served or the record is a test/error, and refuses an Open or otherwise unsettled linked bill. It creates no bill, payment, or revenue. No-show/Cancelled is limited to past Pending/Confirmed rows.
+
+When Held deposits exist, the same request must explicitly choose `refund` or `forfeit`; the action reason is required. Refund is recorded through the existing cash-movement mechanism and requires the Manager's own open shift. Deposit settlement, reservation status, table status, audit record, and idempotency record are atomic. Seated close-without-charge marks a linked table `Needs cleaning`; No-show/Cancelled frees its table to `Available`. Each resolution stores the actor, timestamp, reason, outcome, and related bill/deposit/cash-movement IDs in `pos_stale_booking_resolutions`. Repeating a matching idempotency key returns its prior result; reuse with different input is rejected.
+
+The Reservations **Unresolved** filter displays the list and count to Receptionists, Managers, and Administrators. Rows with an Open bill show **Payable** and an **Open bill** action using the cashier flow. Managers/Administrators receive a Resolve dialog with outcome, reason, confirmation, deposit choice, and a refund/open-shift warning; Receptionists have no resolve or deposit action. Table Management links an unresolved past Seated booking to its item rather than presenting a dead in-use action. Resolution and list requests use a 15-second timeout; failures display errors and restore form state. Run `supabase/019_resolve_stale_bookings.sql` after 018, then `supabase/019_resolve_stale_bookings_acceptance.sql`; the acceptance transaction ends with `ROLLBACK`. Roll back 019 before 018 with `supabase/019_resolve_stale_bookings_rollback.sql`.
 
 ## Reservation guest counts and source (Phase A)
 

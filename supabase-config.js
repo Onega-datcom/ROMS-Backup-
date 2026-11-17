@@ -777,13 +777,65 @@ window.supabaseRecord = {
       window.clearTimeout(timeoutId);
     }
   },
-  async posResolveStaleWalkIn(reservationId, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_resolve_stale_walkin', {
-      p_reservation_id: reservationId,
-      p_reason: reason
-    });
-    throwIfError(error);
-    return data;
+  async posListUnresolvedStaleBookings() {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient
+        .rpc('pos_list_unresolved_stale_bookings')
+        .abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('Unresolved bookings request timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data || [];
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('Unresolved bookings request timed out after 15 seconds. Retry loading the list.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  },
+  async posResolveStaleBooking(payload) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutId;
+    try {
+      const request = window.supabaseClient.rpc('pos_resolve_stale_booking', {
+        p_reservation_id: payload.reservationId,
+        p_outcome: payload.outcome,
+        p_reason: payload.reason,
+        p_confirm_no_meal: payload.confirmNoMeal,
+        p_deposit_action: payload.depositAction || null,
+        p_deposit_reason: payload.depositReason || '',
+        p_idempotency_key: payload.idempotencyKey
+      }).abortSignal(controller.signal);
+      const timeout = new Promise((resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error('Stale booking resolution timed out after 15 seconds.'));
+        }, POS_BILL_SAVE_TIMEOUT_MS);
+      });
+      const { data, error } = await Promise.race([request, timeout]);
+      throwIfError(error);
+      return data;
+    } catch (error) {
+      if (timedOut) {
+        throw new Error('Stale booking resolution timed out after 15 seconds. The server may still finish it. Retry from this same dialog to reuse its idempotency key, or reload the Unresolved list before starting another resolution.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   },
   async posRequestBillVoid(billId, reason) {
     const { data, error } = await window.supabaseClient.rpc('pos_request_bill_void_phase3', {

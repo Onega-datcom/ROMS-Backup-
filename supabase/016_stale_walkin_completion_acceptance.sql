@@ -1,5 +1,5 @@
 -- Acceptance checks for audited stale Walk-in completion.
--- Run as the database owner after migrations 013, 014, 015, and 016.
+-- Run as the database owner after migrations 013 through 019.
 -- Test rows are rolled back; the production date guard stays enabled.
 
 begin;
@@ -7,9 +7,12 @@ begin;
 do $$
 declare
   rpc_signature regprocedure :=
+    'public.pos_resolve_stale_booking(text,text,text,boolean,text,text,text)'::regprocedure;
+  legacy_rpc_signature regprocedure :=
     'public.pos_resolve_stale_walkin(text,text)'::regprocedure;
   manager_id uuid;
   receptionist_id uuid;
+  business_date_value date := timezone('Asia/Manila', statement_timestamp())::date;
   reservation_id_value text := 'STALE-WI-' || gen_random_uuid()::text;
   same_day_reservation_id text := 'STALE-TODAY-' || gen_random_uuid()::text;
   non_walkin_reservation_id text := 'STALE-BOOKING-' || gen_random_uuid()::text;
@@ -29,14 +32,18 @@ declare
   same_day_blocked boolean := false;
   non_walkin_blocked boolean := false;
   open_bill_blocked boolean := false;
-  held_deposit_blocked boolean := false;
   direct_update_blocked boolean := false;
   receptionist_blocked boolean := false;
   reason_value text := 'Guests confirmed departed; resolving stale table occupancy.';
+  deposit_reason_value text := 'Held deposit forfeited under the manager-approved resolution.';
+  reservation_idempotency_key text := gen_random_uuid()::text;
 begin
   if not has_function_privilege('authenticated', rpc_signature, 'EXECUTE')
      or has_function_privilege('anon', rpc_signature, 'EXECUTE') then
-    raise exception 'FAIL: stale Walk-in completion RPC grants are not authenticated-only.';
+    raise exception 'FAIL: stale-booking RPC grants are not authenticated-only.';
+  end if;
+  if has_function_privilege('authenticated', legacy_rpc_signature, 'EXECUTE') then
+    raise exception 'FAIL: the retired Walk-in resolver remains executable.';
   end if;
 
   select p.id into manager_id
@@ -63,17 +70,20 @@ begin
     adults, senior_pwd_count, children, status, seated_at, actual_covers,
     table_id, source, created_by
   ) values (
-    reservation_id_value, 'Stale Walk-in acceptance', current_date,
+    reservation_id_value, 'Stale Walk-in acceptance', business_date_value,
     '12:00 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
     table_id_value, 'Walk-in', manager_id
   );
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
-  set reservation_date = current_date - 1
+  set reservation_date = business_date_value - 1
   where id = reservation_id_value;
   perform set_config('request.jwt.claim.sub', manager_id::text, true);
 
-  result := public.pos_resolve_stale_walkin(reservation_id_value, reason_value);
+  result := public.pos_resolve_stale_booking(
+    reservation_id_value, 'close_without_charge', reason_value, true,
+    null, null, reservation_idempotency_key
+  );
   select status, last_correction_reason
     into reservation_status, reservation_reason
   from public.reservations
@@ -88,16 +98,19 @@ begin
     and record_id = reservation_id_value
     and action = 'UPDATE';
   if result->>'status' <> 'Completed'
-     or result->>'already_completed' <> 'false'
+     or result->>'already_resolved' <> 'false'
      or reservation_status <> 'Completed'
      or reservation_reason <> reason_value
-     or table_status <> 'Available'
+     or table_status <> 'Needs cleaning'
      or audit_count <> 1 then
-    raise exception 'FAIL: stale Walk-in was not completed with its reason, audit row, and freed table.';
+    raise exception 'FAIL: stale Walk-in was not completed with its reason, audit row, and cleaning state.';
   end if;
 
-  result := public.pos_resolve_stale_walkin(reservation_id_value, reason_value);
-  if result->>'already_completed' <> 'true' then
+  result := public.pos_resolve_stale_booking(
+    reservation_id_value, 'close_without_charge', reason_value, true,
+    null, null, reservation_idempotency_key
+  );
+  if result->>'already_resolved' <> 'true' then
     raise exception 'FAIL: retrying completion was not idempotent.';
   end if;
 
@@ -107,12 +120,14 @@ begin
     source, created_by
   ) values (
     same_day_reservation_id, 'Same-day completion blocker acceptance',
-    current_date, '12:30 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
+    business_date_value, '12:30 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
     'Walk-in', manager_id
   );
   begin
-    perform public.pos_resolve_stale_walkin(
-      same_day_reservation_id, 'Same-day visits must remain active.'
+    perform public.pos_resolve_stale_booking(
+      same_day_reservation_id, 'close_without_charge',
+      'Same-day visits must remain active.', true,
+      null, null, gen_random_uuid()::text
     );
     raise exception 'FAIL: stale completion accepted a same-day Walk-in.';
   exception when sqlstate '55000' then
@@ -124,13 +139,14 @@ begin
     raise exception 'FAIL: same-day Walk-in was not protected.';
   end if;
 
+  -- Start tomorrow so migration 017 cannot reject setup after the 1:30 PM slot.
   insert into public.reservations (
     id, name, phone, reservation_date, reservation_time, guests, type,
     adults, senior_pwd_count, children, status, seated_at, actual_covers,
     source, created_by
   ) values (
     non_walkin_reservation_id, 'Past reservation type blocker acceptance',
-    '09171234567', current_date, '1:30 PM', 1, 'Reservation', 1, 0, 0,
+    '09171234567', business_date_value + 1, '1:30 PM', 1, 'Reservation', 1, 0, 0,
     'Pending', null, null,
     'Phone', manager_id
   );
@@ -144,23 +160,29 @@ begin
   where id = non_walkin_reservation_id;
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
-  set reservation_date = current_date - 1
+  set reservation_date = business_date_value - 1
   where id = non_walkin_reservation_id;
   perform set_config('request.jwt.claim.sub', manager_id::text, true);
   begin
     perform public.pos_resolve_stale_walkin(
-      non_walkin_reservation_id, 'Only past Walk-ins may use this action.'
+      non_walkin_reservation_id, 'Legacy entry point must be retired.'
     );
-    raise exception 'FAIL: stale completion accepted a non-Walk-in reservation.';
-  exception when sqlstate '55000' then
+    raise exception 'FAIL: legacy Walk-in RPC was still executable.';
+  exception when insufficient_privilege then
     non_walkin_blocked := true;
   end;
+  result := public.pos_resolve_stale_booking(
+    non_walkin_reservation_id, 'close_without_charge',
+    'Past reservation is a verified test record with no meal served.',
+    true, null, null, gen_random_uuid()::text
+  );
   select status, type into reservation_status, reservation_type
   from public.reservations where id = non_walkin_reservation_id;
   if not non_walkin_blocked
-     or reservation_status <> 'Seated'
+     or result->>'status' <> 'Completed'
+     or reservation_status <> 'Completed'
      or reservation_type <> 'Reservation' then
-    raise exception 'FAIL: non-Walk-in reservation was not protected.';
+    raise exception 'FAIL: unified resolver did not accept a valid past Reservation, or legacy RPC remained active.';
   end if;
 
   insert into public.reservations (
@@ -168,13 +190,13 @@ begin
     adults, senior_pwd_count, children, status, seated_at, actual_covers,
     source, created_by
   ) values (
-    open_bill_reservation_id, 'Open bill blocker acceptance', current_date,
+    open_bill_reservation_id, 'Open bill blocker acceptance', business_date_value,
     '1:00 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
     'Walk-in', manager_id
   );
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
-  set reservation_date = current_date - 1
+  set reservation_date = business_date_value - 1
   where id = open_bill_reservation_id;
   perform set_config('request.jwt.claim.sub', manager_id::text, true);
   insert into public.pos_bills (
@@ -185,8 +207,10 @@ begin
   );
 
   begin
-    perform public.pos_resolve_stale_walkin(
-      open_bill_reservation_id, 'Open bill must remain protected.'
+    perform public.pos_resolve_stale_booking(
+      open_bill_reservation_id, 'close_without_charge',
+      'Open bill must remain protected.', true,
+      null, null, gen_random_uuid()::text
     );
     raise exception 'FAIL: stale completion bypassed an open bill.';
   exception when sqlstate '55000' then
@@ -208,13 +232,13 @@ begin
     adults, senior_pwd_count, children, status, seated_at, actual_covers,
     source, created_by
   ) values (
-    held_deposit_reservation_id, 'Held deposit blocker acceptance', current_date,
+    held_deposit_reservation_id, 'Held deposit blocker acceptance', business_date_value,
     '2:00 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
     'Walk-in', manager_id
   );
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
-  set reservation_date = current_date - 1
+  set reservation_date = business_date_value - 1
   where id = held_deposit_reservation_id;
   perform set_config('request.jwt.claim.sub', manager_id::text, true);
   insert into public.pos_reservation_deposits (
@@ -224,23 +248,20 @@ begin
     'cash', 'Held', manager_id
   );
 
-  begin
-    perform public.pos_resolve_stale_walkin(
-      held_deposit_reservation_id, 'Held deposit must remain protected.'
-    );
-    raise exception 'FAIL: stale completion bypassed a held deposit.';
-  exception when sqlstate '55000' then
-    held_deposit_blocked := true;
-  end;
+  result := public.pos_resolve_stale_booking(
+    held_deposit_reservation_id, 'close_without_charge',
+    'Past Walk-in is a verified test record; no meal was served.',
+    true, 'forfeit', deposit_reason_value, gen_random_uuid()::text
+  );
   select status into reservation_status
   from public.reservations where id = held_deposit_reservation_id;
   select status into deposit_status
   from public.pos_reservation_deposits
   where reservation_id = held_deposit_reservation_id;
-  if not held_deposit_blocked
-     or reservation_status <> 'Seated'
-     or deposit_status <> 'Held' then
-    raise exception 'FAIL: stale completion changed a reservation or held deposit.';
+  if result->>'status' <> 'Completed'
+     or reservation_status <> 'Completed'
+     or deposit_status <> 'Forfeited' then
+    raise exception 'FAIL: unified resolver did not complete the Walk-in and settle its held deposit.';
   end if;
 
   insert into public.reservations (
@@ -248,13 +269,13 @@ begin
     adults, senior_pwd_count, children, status, seated_at, actual_covers,
     source, created_by
   ) values (
-    direct_update_reservation_id, 'Direct update guard acceptance', current_date,
+    direct_update_reservation_id, 'Direct update guard acceptance', business_date_value,
     '3:00 PM', 1, 'Walk-in', 1, 0, 0, 'Seated', now(), 1,
     'Walk-in', manager_id
   );
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
-  set reservation_date = current_date - 1
+  set reservation_date = business_date_value - 1
   where id = direct_update_reservation_id;
   perform set_config('request.jwt.claim.sub', manager_id::text, true);
   begin
@@ -273,8 +294,10 @@ begin
 
   perform set_config('request.jwt.claim.sub', receptionist_id::text, true);
   begin
-    perform public.pos_resolve_stale_walkin(
-      direct_update_reservation_id, 'Receptionist must not complete history.'
+    perform public.pos_resolve_stale_booking(
+      direct_update_reservation_id, 'close_without_charge',
+      'Receptionist must not complete history.', true,
+      null, null, gen_random_uuid()::text
     );
     raise exception 'FAIL: Receptionist was allowed to resolve a stale Walk-in.';
   exception when insufficient_privilege then
@@ -284,7 +307,7 @@ begin
     raise exception 'FAIL: stale completion did not enforce the Manager/Administrator role.';
   end if;
 
-  raise notice 'PASS: audited past Walk-in completion freed occupancy; date/type scope, idempotency, bill/deposit protection, direct-update denial, and role restrictions passed.';
+  raise notice 'PASS: unified stale-booking resolution handled Walk-ins and Reservations; date/status scope, idempotency, bill/deposit handling, direct-update denial, and role restrictions passed.';
 end;
 $$;
 

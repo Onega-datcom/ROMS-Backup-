@@ -47,6 +47,8 @@ state.receivingDraft = [];
 state.receivingForm = {};
 state.reservationFilter = 'All';
 state.reservationTypeFilter = 'All';
+state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
+state.unresolvedFocusId = '';
 state.calendarDate = '';
 state.reservationCalendarDate = '';
 state.reservationCalendarView = 'dayGridMonth';
@@ -182,6 +184,9 @@ async function saveCollections(changes) {
       }
     }
     for (const key of touched) collectionState[key] = await window.supabaseRecord.load(key);
+    if (touched.some(key => ['reservations', 'restaurantTables', 'posBills', 'reservationDeposits'].includes(key))) {
+      invalidateUnresolvedBookings();
+    }
     invalidateReportData();
     setPostSaveSyncState();
     render();
@@ -403,7 +408,7 @@ function realtimeCollectionsForView() {
     production: ['ingredients', 'recipes', 'production_logs', 'production_batches', 'reservations'],
     waste: ['ingredients', 'waste_logs', 'production_logs'],
     counts: ['ingredients', 'physical_counts'],
-    reservations: ['reservations', 'restaurant_tables'],
+    reservations: ['reservations', 'restaurant_tables', 'pos_bills', 'pos_reservation_deposits'],
     calendar: ['reservations', 'restaurant_tables'],
     tables: ['reservations', 'restaurant_tables'],
     cashier: ['pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'reservations'],
@@ -476,6 +481,36 @@ async function refetchCollection(collection) {
   persistCollection(collection, records);
   return records;
 }
+async function loadUnresolvedBookings(force = false) {
+  const viewCanRead = ['Administrator', 'Manager', 'Receptionist'].includes(state.role);
+  const unresolved = state.unresolvedBookings;
+  if (!viewCanRead || !state.user || unresolved.loading || (unresolved.loaded && !force)) return;
+  unresolved.loading = true;
+  unresolved.error = '';
+  try {
+    unresolved.rows = await window.supabaseRecord.posListUnresolvedStaleBookings();
+    unresolved.loaded = true;
+  } catch (error) {
+    console.error('Unresolved bookings could not be loaded.', error);
+    unresolved.rows = [];
+    unresolved.error = friendlyRpcError(error);
+    unresolved.loaded = true;
+  } finally {
+    unresolved.loading = false;
+    const refreshAgain = unresolved.refreshAfterLoad === true;
+    unresolved.refreshAfterLoad = false;
+    if (['reservations', 'tables'].includes(state.view)) render();
+    if (refreshAgain) {
+      unresolved.loaded = false;
+      loadUnresolvedBookings();
+    }
+  }
+}
+function invalidateUnresolvedBookings() {
+  const unresolved = state.unresolvedBookings;
+  unresolved.loaded = false;
+  if (unresolved.loading) unresolved.refreshAfterLoad = true;
+}
 async function refreshPosCollections() {
   const collections = ['posBills', 'billLines', 'billPayments', 'billApprovals', 'shifts', 'cashMovements', 'reservationDeposits', 'reservations', 'restaurantTables'];
   if (['Administrator', 'Manager'].includes(state.role)) collections.push('posNotifications');
@@ -484,6 +519,7 @@ async function refreshPosCollections() {
   }
   const loaded = await Promise.all(collections.map(collection => window.supabaseRecord.load(collection)));
   collections.forEach((collection, index) => persistCollection(collection, loaded[index]));
+  invalidateUnresolvedBookings();
 }
 async function refreshRealtimeCollection(table, payload) {
   if (table === 'production_batches') {
@@ -519,6 +555,9 @@ async function refreshRealtimeCollection(table, payload) {
   if (table === 'reservations' && payload?.old?.status !== payload?.new?.status && payload?.new?.status) toast(`Reservation status changed to ${payload.new.status}${actor ? ` by ${actor}` : ''}.`);
   if (table === 'restaurant_tables' && payload?.old?.status !== payload?.new?.status) toast(`Table ${payload.new.id} is now ${payload.new.status}.`);
   if (table === 'revenue_records' && payload?.new?.status === 'Draft' && canAccessRevenue()) toast(`New revenue draft${actor ? ` from ${actor}` : ''}.`);
+  if (['reservations', 'restaurant_tables', 'pos_bills', 'pos_reservation_deposits'].includes(table)) {
+    invalidateUnresolvedBookings();
+  }
   if (['ingredients', 'reservations', 'restaurant_tables', 'revenue_records', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'recipes', 'buffet_rates', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'].includes(table)) render();
 }
 function scheduleRealtimeRefresh(table, payload) {
@@ -1901,14 +1940,20 @@ function reservationCard(item, showRevenue = false) {
     ? `${money(revenueEstimate)} estimated buffet revenue`
     : 'No rate set';
   const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}`;
-  const lifecycleActions = isPastReservation ? '' : item.status === 'Pending'
+  const lifecycleActions = isPastReservation
+    ? item.status === 'Seated'
+      ? `${openBill
+        ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>`
+        : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`}`
+      : ''
+    : item.status === 'Pending'
     ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
     : item.status === 'Confirmed'
       ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
       : item.status === 'Seated'
         ? `${openBill ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>` : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`}<button type="button" class="reservation-confirm-btn" data-action="record-deposit" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before recording a deposit."'}>Record deposit</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}" aria-describedby="reservation-complete-help-${esc(item.id)}" disabled title="A reservation is completed automatically when its linked bill is closed and fully settled.">Complete</button><small class="field-help" id="reservation-complete-help-${esc(item.id)}">Complete is available only through closing and settling the linked bill.</small>`
         : '';
-  const depositActions = ['Administrator', 'Manager'].includes(state.role)
+  const depositActions = !isPastReservation && ['Administrator', 'Manager'].includes(state.role)
     ? heldDeposits.map(deposit => `<span class="deposit-action-group"><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="refund" data-id="${esc(deposit.id)}">Refund ${money(deposit.amount)}</button><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="forfeit" data-id="${esc(deposit.id)}">Forfeit</button></span>`).join('')
     : '';
   const depositHistoryAction = reservationDeposits.length
@@ -1920,6 +1965,44 @@ function reservationCard(item, showRevenue = false) {
     ? (['Administrator', 'Manager'].includes(state.role) ? 'Correct past reservation' : 'View past reservation')
     : 'View reservation';
   return `<article class="reservation-card${isPastReservation ? ' reservation-card--historical' : ''}"><button type="button" class="reservation-card-main" data-action="edit-reservation" data-id="${esc(item.id)}" aria-label="${actionLabel} for ${esc(item.name)}">${details}</button><div class="reservation-actions">${actions}</div></article>`;
+}
+function unresolvedBookingCard(row) {
+  const reservationId = row.reservation_id;
+  const reservation = all('reservations').find(item => item.id === reservationId);
+  const openBill = all('posBills').find(bill =>
+    bill.reservationId === reservationId && bill.status === 'Open'
+  );
+  const canResolve = ['Administrator', 'Manager'].includes(state.role);
+  const hasOpenShift = all('shifts').some(shift =>
+    shift.status === 'Open' && shift.openedBy === state.user?.id
+  );
+  const status = row.reservation_status;
+  const type = row.type || reservation?.type || 'Reservation';
+  const heldTotal = Number(row.held_deposit_total || 0);
+  const ageDays = Number(row.age_days || 0);
+  const billStatus = row.bill_status || 'None';
+  const tableId = row.table_id || reservation?.table || '';
+  const openBillAction = row.resolution_label === 'Payable'
+    ? `<button type="button" class="reservation-confirm-btn" data-action="open-unresolved-bill" data-id="${esc(reservationId)}">Open bill</button>`
+    : status === 'Seated'
+      ? `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(reservationId)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`
+      : '';
+  const resolveAction = canResolve && row.resolution_label !== 'Payable'
+    ? `<button type="button" class="primary-btn compact-btn" data-action="resolve-stale-booking" data-id="${esc(reservationId)}">Resolve</button>`
+    : '';
+  return `<article class="reservation-card unresolved-booking-card" data-unresolved-reservation data-id="${esc(reservationId)}">
+    <div class="reservation-card-main">
+      <span class="status ${reservationStatusClass(status)}">${esc(status)}</span>
+      <span class="tag">${esc(type)}</span>
+      ${row.resolution_label === 'Payable' ? '<span class="unresolved-payable-label">Payable</span>' : ''}
+      <strong>${esc(row.name || reservationDisplayName({ type }))}</strong>
+      <small>${esc(reservationDateLabel(row.reservation_date))} · ${esc(row.reservation_time || 'Time not set')} · ${esc(tableId || 'Unassigned')}</small>
+      <small>${Number(row.guests || 0)} guests · unresolved for ${ageDays} day${ageDays === 1 ? '' : 's'}</small>
+      <small>Bill status: ${esc(billStatus)}</small>
+      ${heldTotal > 0 ? `<small>Held deposit: ${money(heldTotal)}</small>` : '<small>Held deposit: None</small>'}
+    </div>
+    <div class="reservation-actions">${openBillAction}${resolveAction}</div>
+  </article>`;
 }
 function reservationTableOptions({ tableId = '', date = '', time = '', partySize = 0, reservationId = '' } = {}) {
   return all('restaurantTables').map(table => {
@@ -2024,19 +2107,16 @@ function reservationForm(item = {}, defaults = {}) {
     : 'Package price is charged as food revenue. Additional guests are suggested on the bill.';
   const packageSection = `<fieldset class="product-form-section"><legend>Package booking (optional)</legend><div class="form-grid"><label>Package<select name="packageChargeItemId" ${packageDisabled}><option value="">No package</option>${packageOptions}</select></label><label>Package tier<select name="packageTierId" ${packageDisabled}><option value="">Choose a tier</option>${tierOptions}</select></label><label>Booked pax<input name="packagePaxCount" type="number" min="1" max="1000" step="1" value="${esc(item.packagePaxCount || '')}" ${packageDisabled}></label>${packageOverrideField}</div><small class="field-help">${packageRuleHelp}</small></fieldset>`;
   const historyNotice = isPastReservation
-    ? `<div class="reservation-history-notice"><strong>${canCorrectPast ? 'Historical correction' : 'Past reservation · view only'}</strong><span>${canCorrectPast ? 'Only the guest name, contact details, occasion, seating preference, and special-request notes can be corrected. Date, time, party size, table, and status are locked. Your reason is recorded in the audit log.' : 'Past bookings are kept for reference and cannot be changed from this account.'}</span></div>`
+    ? `<div class="reservation-history-notice"><strong>${canCorrectPast ? 'Historical correction' : 'Past reservation · view only'}</strong><span>${canCorrectPast ? 'Only the guest name, contact details, occasion, seating preference, and special-request notes can be corrected. Date, time, party size, table, and status are locked. Your reason is recorded in the audit log.' : 'Past bookings are kept for reference. Eligible unresolved bookings are handled from the Unresolved list.'}</span></div>`
     : '';
   const correctionReason = canCorrectPast
     ? `<label>Correction reason<textarea name="correctionReason" minlength="10" maxlength="500" required placeholder="Explain why this historical detail needs correction"></textarea><small class="field-help">Required; enter at least 10 characters.</small></label>`
-    : '';
-  const staleWalkInResolution = canCorrectPast && item.type === 'Walk-in' && item.status === 'Seated'
-    ? `<div class="reservation-history-notice"><strong>Clear stale table occupancy</strong><span>Only mark this visit complete after confirming the guests have left. This does not create or settle a bill. Any linked bill must be Closed and fully settled, and held deposits must be resolved first; this action and reason are audited.</span><label>Completion reason<textarea name="staleWalkInCompletionReason" minlength="10" maxlength="500" rows="2"></textarea></label><button type="button" class="primary-btn" data-action="resolve-stale-walkin" data-id="${esc(item.id)}">Mark guests departed</button></div>`
     : '';
   const sourceOptions = ['', 'Website', 'Phone', 'Facebook', 'Walk-in', 'Other']
     .map(source => `<option value="${esc(source)}" ${String(item.source || '') === source ? 'selected' : ''}>${source || 'Not specified'}</option>`)
     .join('');
   const lockReservationDetails = lockHistoricalFields || lockReadOnlyFields;
-  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><small class="field-help">${item.type === 'Walk-in' ? 'Contact details are optional for walk-ins.' : 'Enter a phone number or email address.'}</small><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(reservationDate)}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM. Past times today are unavailable.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="1000" step="1" value="${adults}" required ${lockReservationDetails}></label><label>Senior / PWD<input name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="${seniorPwdCount}" required ${lockReservationDetails}></label><label>Kids<input name="children" type="number" min="0" max="1000" step="1" value="${children}" required ${lockReservationDetails}></label></div><div class="form-grid"><label>Table<select name="table" ${lockReservationDetails}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label><label>Source<select name="source" ${lockReservationDetails}>${sourceOptions}</select></div>${packageSection}<label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}${staleWalkInResolution}`;
+  const formContent = `${historyNotice}<input type="hidden" name="id" value="${esc(item.id || '')}"><input type="hidden" name="status" value="${esc(item.status || 'Pending')}"><label>Guest name<input name="name" value="${esc(item.name || '')}" ${item.type === 'Walk-in' ? '' : 'required'} autocomplete="name" ${lockReadOnlyFields}></label><div class="form-grid"><label>Email<input name="email" type="email" value="${esc(item.email || '')}" autocomplete="email" ${lockReadOnlyFields}></label><label>Phone<input name="phone" value="${esc(item.phone || '')}" autocomplete="tel" ${lockReadOnlyFields}></label></div><small class="field-help">${item.type === 'Walk-in' ? 'Contact details are optional for walk-ins.' : 'Enter a phone number or email address.'}</small><div class="form-grid"><label>Date<input name="date" type="date" min="${today()}" value="${esc(reservationDate)}" required ${lockHistoricalFields}></label><label>Time<select name="time" required ${lockHistoricalFields}>${timeOptions}</select><small class="field-help">Each booking has a two-hour window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM. Past times today are unavailable.</small></label></div><div class="form-grid"><label>Adults<input name="adults" type="number" min="0" max="1000" step="1" value="${adults}" required ${lockReservationDetails}></label><label>Senior / PWD<input name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="${seniorPwdCount}" required ${lockReservationDetails}></label><label>Kids<input name="children" type="number" min="0" max="1000" step="1" value="${children}" required ${lockReservationDetails}></label></div><div class="form-grid"><label>Table<select name="table" ${lockReservationDetails}><option value="">Unassigned</option>${tableOptions}</select><small class="field-help">Only tables with enough seats and no overlapping two-hour booking can be assigned.</small></label><label>Status<input value="${esc(item.status || 'Pending')}" readonly disabled></label><label>Source<select name="source" ${lockReservationDetails}>${sourceOptions}</select></div>${packageSection}<label>Occasion<input name="occasion" value="${esc(item.occasion || '')}" ${lockReadOnlyFields}></label><label>Seating preference<input name="preference" value="${esc(item.preference || 'Any available table')}" ${lockReadOnlyFields}></label><label>Special request<textarea name="request" ${lockReadOnlyFields}>${esc(item.request || '')}</textarea></label>${correctionReason}`;
   const title = isPastReservation ? canCorrectPast ? 'Correct past reservation' : 'Past reservation details' : item.id ? 'Update reservation' : 'New reservation';
   const submitLabel = isReadOnly ? '' : item.id ? canCorrectPast ? 'Save correction' : 'Save changes' : 'Create reservation';
   modal(title, formContent, submitLabel);
@@ -2180,29 +2260,48 @@ function revenuePage() {
 function reservationsPage() {
   const reservations = all('reservations');
   const selectedDate = state.calendarDate || today();
+  const unresolvedMode = state.reservationFilter === 'Unresolved';
+  const unresolvedRows = state.unresolvedBookings.rows || [];
+  const query = String(state.query || '').trim().toLowerCase();
+  const filteredUnresolvedRows = unresolvedRows.filter(row =>
+    (state.reservationTypeFilter === 'All' || row.type === state.reservationTypeFilter)
+    && (!query || `${row.name || ''} ${row.table_id || ''} ${row.type || ''} ${row.reservation_id || ''}`.toLowerCase().includes(query))
+  );
   const dateMatches = item => state.reservationDateFilter === 'Today' ? item.date === today() : state.reservationDateFilter === 'Upcoming' ? item.date >= today() : item.date === selectedDate;
-  const baseItems = reservations.filter(dateMatches).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter) && (!state.query || `${item.name} ${item.email} ${item.phone}`.toLowerCase().includes(state.query.toLowerCase())));
+  const baseItems = unresolvedMode ? [] : reservations.filter(dateMatches).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter) && (!state.query || `${item.name} ${item.email} ${item.phone}`.toLowerCase().includes(state.query.toLowerCase())));
   const items = baseItems
     .filter(item => (state.reservationFilter === 'All' || item.status === state.reservationFilter) && (state.reservationMealPeriodFilter === 'All' || reservationMealPeriod(item) === state.reservationMealPeriodFilter))
     .sort((a, b) => a.date.localeCompare(b.date) || (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
-  const counts = status => status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
-  const statusFilters = ['All', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled']
+  const counts = status => status === 'Unresolved'
+    ? unresolvedRows.length
+    : status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
+  const statusFilters = ['All', 'Unresolved', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled']
     .map(status => `<button type="button" class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
     .join('');
   const typeFilters = ['All', 'Reservation', 'Walk-in']
     .map(type => `<button type="button" class="${state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
     .join('');
-  const hasActiveFilters = state.reservationFilter !== 'All'
-    || state.reservationTypeFilter !== 'All'
-    || state.reservationMealPeriodFilter !== 'All'
-    || state.reservationDateFilter !== 'All'
-    || Boolean(String(state.query || '').trim())
-    || selectedDate !== today();
+  const hasActiveFilters = unresolvedMode
+    ? state.reservationTypeFilter !== 'All' || Boolean(String(state.query || '').trim())
+    : state.reservationFilter !== 'All'
+      || state.reservationTypeFilter !== 'All'
+      || state.reservationMealPeriodFilter !== 'All'
+      || state.reservationDateFilter !== 'All'
+      || Boolean(String(state.query || '').trim())
+      || selectedDate !== today();
   const clearFiltersButton = hasActiveFilters
     ? '<button type="button" class="text-btn reservation-clear-filters" data-reservation-clear-filters>Clear filters</button>'
     : '';
-  const timeline = items.map(item => reservationCard(item, true)).join('');
-  const selectedCount = items.length;
+  const dateControls = unresolvedMode ? '' : `<label class="reservation-date-field">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div>`;
+  const mealPeriodFilter = unresolvedMode ? '' : `<label class="reservation-meal-filter">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label>`;
+  const unresolvedList = state.unresolvedBookings.loading
+    ? '<div class="empty-table" role="status" aria-live="polite">Loading unresolved bookings…</div>'
+    : state.unresolvedBookings.error
+      ? `<div class="panel error-state" role="alert">Unresolved bookings could not be loaded: ${esc(state.unresolvedBookings.error)} <button type="button" class="ghost-btn compact-btn" data-action="retry-unresolved-bookings">Retry</button></div>`
+      : filteredUnresolvedRows.map(unresolvedBookingCard).join('')
+        || '<div class="empty-table"><strong>No unresolved bookings</strong><small>Past bookings needing attention will appear here.</small></div>';
+  const timeline = unresolvedMode ? unresolvedList : items.map(item => reservationCard(item, true)).join();
+  const selectedCount = unresolvedMode ? filteredUnresolvedRows.length : items.length;
   const tableCards = all('restaurantTables')
     .slice()
     .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: 'base' }))
@@ -2213,13 +2312,27 @@ function reservationsPage() {
     const detail = booking
       ? `${booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest')} · ${booking.date < today() ? `${reservationDateLabel(booking.date)} · ` : ''}${booking.time || 'Time not set'}`
       : `${Number(table.seats)} seats`;
+    const unresolvedBooking = booking?.status === 'Seated'
+      ? unresolvedRows.find(row => row.reservation_id === booking.id && row.table_id === table.id)
+      : null;
+    const pastSeatedBooking = booking?.status === 'Seated' && booking.date < today();
     const warning = availability.stayLimitReached
       ? '<small class="reservation-stay-warning">Two-hour limit reached — notify guest; table remains occupied.</small>'
       : '';
-    return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}</div>`;
+    const unresolvedLink = pastSeatedBooking
+      ? `<small class="reservation-stay-warning">Past seated booking remains ${unresolvedBooking?.resolution_label === 'Payable' ? 'payable' : 'unresolved'}; a timer does not free the table.</small><button type="button" class="text-btn" data-action="show-unresolved-booking" data-id="${esc(booking.id)}">View unresolved booking</button>`
+      : '';
+    return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}${unresolvedLink}</div>`;
   }).join('');
-  const listLabel = state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
-  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', '<span><button class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button class="primary-btn" data-action="open-reservation">+ New reservation</button></span>')}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><section class="panel reservation-table-panel reservation-list-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${selectedCount} reservation${selectedCount === 1 ? '' : 's'} scheduled</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-list-controls"><label class="reservation-date-field">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div><label class="reservation-search-field">Search<input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Guest, email, or phone" aria-label="Search guests"></label>${clearFiltersButton}</div><div class="reservation-filter-bar"><div class="reservation-filter-group"><span class="reservation-filter-group-label">Status</span><div class="reservation-filters" role="group" aria-label="Filter by reservation status">${statusFilters}</div></div><div class="reservation-filter-group"><span class="reservation-filter-group-label">Type</span><div class="reservation-filters" role="group" aria-label="Filter by booking type">${typeFilters}</div></div><label class="reservation-meal-filter">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label></div><div class="reservation-timeline">${selectedCount ? timeline : `<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>`}</div></section>`;
+  const listLabel = unresolvedMode ? 'Unresolved bookings' : state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
+  const unresolvedBadge = state.unresolvedBookings.loading
+    ? '<span class="nav-badge" aria-live="polite">Unresolved · loading</span>'
+    : `<span class="nav-badge" aria-live="polite">${unresolvedRows.length} unresolved</span>`;
+  const timelineContent = unresolvedMode
+    ? timeline
+    : selectedCount ? timeline : '<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>';
+  const headerActions = `<span>${unresolvedBadge} <button type="button" class="ghost-btn" data-action="refresh-unresolved-bookings" ${state.unresolvedBookings.loading ? 'disabled' : ''}>Refresh unresolved</button> <button type="button" class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button type="button" class="primary-btn" data-action="open-reservation">+ New reservation</button></span>`;
+  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', headerActions)}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><section class="panel reservation-table-panel reservation-list-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${state.unresolvedBookings.error && unresolvedMode ? 'List unavailable until refreshed.' : `${selectedCount} ${unresolvedMode ? 'booking' : 'reservation'}${selectedCount === 1 ? '' : 's'}${unresolvedMode ? ' require attention' : ' scheduled'}`}</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-list-controls">${dateControls}<label class="reservation-search-field">Search<input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Guest, email, phone, table, or ID" aria-label="Search guests"></label>${clearFiltersButton}</div><div class="reservation-filter-bar"><div class="reservation-filter-group"><span class="reservation-filter-group-label">Status</span><div class="reservation-filters" role="group" aria-label="Filter by reservation status">${statusFilters}</div></div><div class="reservation-filter-group"><span class="reservation-filter-group-label">Type</span><div class="reservation-filters" role="group" aria-label="Filter by booking type">${typeFilters}</div></div>${mealPeriodFilter}</div><div class="reservation-timeline">${timelineContent}</div></section>`;
 }
 function tableManagementPage() {
   const date = state.tableManagementDate || today();
@@ -2279,14 +2392,26 @@ function tableManagementPage() {
     );
     const bookingEnd = booking ? window.CostTrackLogic.reservationEndTime(booking.time) : null;
     const bookingDate = booking?.date < date ? `${reservationDateLabel(booking.date)} · ` : '';
+    const staleBooking = booking?.status === 'Seated' && booking.date < today();
+    const staleResolution = staleBooking
+      ? state.unresolvedBookings.rows.find(row => row.reservation_id === booking.id)
+      : null;
+    const staleBookingNotice = staleBooking
+      ? `<small class="reservation-stay-warning">Past seated booking remains ${staleResolution?.resolution_label === 'Payable' ? 'payable' : 'unresolved'}; the two-hour timer does not free this table.</small>`
+      : '';
     const bookingDetails = booking
-      ? `<div class="table-booking-details"><strong>${esc(booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest'))}</strong><span>${esc(bookingDate)}${esc(booking.time || 'Time not set')}${bookingEnd ? `–${esc(bookingEnd)}` : ''} · ${Number(booking.guests || 0)} guest${Number(booking.guests || 0) === 1 ? '' : 's'}</span><button type="button" class="text-btn" data-action="edit-reservation" data-id="${esc(booking.id)}">Open booking</button>${availability.stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest. Keep this table occupied until they leave.</small>' : ''}${availability.bookingWindowEnded ? '<small class="reservation-stay-warning" role="status">The two-hour window passed. Confirm whether the guest arrived, or update the booking status.</small>' : ''}</div>`
+      ? `<div class="table-booking-details"><strong>${esc(booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest'))}</strong><span>${esc(bookingDate)}${esc(booking.time || 'Time not set')}${bookingEnd ? `–${esc(bookingEnd)}` : ''} · ${Number(booking.guests || 0)} guest${Number(booking.guests || 0) === 1 ? '' : 's'}</span><button type="button" class="text-btn" data-action="edit-reservation" data-id="${esc(booking.id)}">Open booking</button>${staleBookingNotice}${availability.stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest. Keep this table occupied until they leave.</small>' : ''}${availability.bookingWindowEnded ? '<small class="reservation-stay-warning" role="status">The two-hour window passed. Confirm whether the guest arrived, or update the booking status.</small>' : ''}</div>`
       : '<small class="table-empty-detail">No active booking assigned for this date</small>';
     const additionalBookings = availability.bookings.length > (booking ? 1 : 0)
       ? `<small class="table-additional-bookings">+${availability.bookings.length - (booking ? 1 : 0)} more booking${availability.bookings.length - (booking ? 1 : 0) === 1 ? '' : 's'} on this date</small>`
       : '';
     const areaBadge = area !== 'Unassigned' ? `<span class="table-area-badge">${esc(area)}</span>` : '';
-    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>${historyExists ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>' : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`}` : ''}</div></article>`;
+    const historyControl = staleBooking
+      ? `<button type="button" class="ghost-btn compact-btn" data-action="show-unresolved-booking" data-id="${esc(booking.id)}">View unresolved booking</button>`
+      : historyExists
+        ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>'
+        : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`;
+    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>` : ''}${staleBooking || canManage ? historyControl : ''}</div></article>`;
   };
   const cards = matchingTables.length
     ? `<div class="table-management-grid">${matchingTables.map(renderCard).join('')}</div>`
@@ -2598,6 +2723,10 @@ async function handleSubmit(form, submitter = null) {
   const editId = form.dataset.id;
   if (type === 'reservation-confirmation') {
     await saveReservationConfirmation(form, data);
+    return;
+  }
+  if (type === 'stale-booking-resolution') {
+    await submitStaleBookingResolution(form, data);
     return;
   }
   if (type === 'walk-in' && submitter?.dataset.walkInAction === 'seat-and-open') {
@@ -3438,35 +3567,99 @@ async function saveReservationConfirmation(form, data) {
   toast(tableId ? `Reservation confirmed and assigned to ${tableId}.` : 'Reservation confirmed without a table.');
   render();
 }
-async function resolveStaleWalkIn(reservationId, form, button) {
+function staleBookingResolutionForm(reservationId) {
   if (!['Administrator', 'Manager'].includes(state.role)) {
-    return toast('Only Managers and Administrators can resolve a stale Walk-in.', 'error');
+    return toast('Only Managers and Administrators can resolve stale bookings.', 'error');
   }
+  const unresolved = state.unresolvedBookings.rows.find(row => row.reservation_id === reservationId);
+  if (!unresolved || unresolved.resolution_label === 'Payable') {
+    return toast('This booking is payable or no longer eligible for resolution. Refresh the Unresolved list.', 'error');
+  }
+  if (!['Seated', 'Pending', 'Confirmed'].includes(unresolved.reservation_status)) {
+    return toast('This booking is no longer eligible for resolution. Refresh the Unresolved list.', 'error');
+  }
+  const closeWithoutCharge = unresolved.reservation_status === 'Seated';
+  const heldDepositTotal = Number(unresolved.held_deposit_total || 0);
+  const ownsOpenShift = all('shifts').some(shift =>
+    shift.status === 'Open' && shift.openedBy === state.user?.id
+  );
+  const outcomes = closeWithoutCharge
+    ? '<option value="close_without_charge">Close without charge</option>'
+    : '<option value="no_show">Mark no-show</option><option value="cancel">Mark Cancelled</option>';
+  const noMealConfirmation = closeWithoutCharge
+    ? '<label class="stale-no-meal-confirmation"><input type="checkbox" name="confirmNoMeal" required><span>I confirm no meal was served, or this is a test/error record.</span></label>'
+    : '';
+  const depositChoice = heldDepositTotal > 0
+    ? `<section class="stale-deposit-resolution"><strong>Held deposit · ${money(heldDepositTotal)}</strong><label>Deposit action<select name="depositAction" required><option value="">Choose Refund or Forfeit</option><option value="refund">Refund</option><option value="forfeit">Forfeit</option></select></label><p class="field-help stale-refund-warning">Refund requires your own open cashier shift. ${ownsOpenShift ? 'Your open shift is ready.' : 'You do not currently have an open shift; the database will reject a refund until you open one.'}</p><label>Deposit action reason<textarea name="depositReason" minlength="10" maxlength="500" rows="2" required placeholder="Explain why the held deposit is being refunded or forfeited."></textarea></label></section>`
+    : '';
   const reservation = all('reservations').find(item => item.id === reservationId);
-  if (!reservation
-    || reservation.type !== 'Walk-in'
-    || reservation.status !== 'Seated'
-    || reservation.date >= today()) {
-    return toast('This is no longer an eligible past Seated Walk-in. Reload and try again.', 'error');
+  modal(
+    'Resolve past booking',
+    `<p class="panel-subtitle">${esc(reservation?.name || unresolved.name || 'Guest')} · ${esc(unresolved.type)} · ${esc(reservationDateLabel(unresolved.reservation_date))} · ${esc(unresolved.table_id || 'Unassigned')}</p>
+      <div class="stale-resolution-warning"><strong>${closeWithoutCharge ? 'No bill, payment, or revenue will be created.' : 'This records the booking as a confirmed No-show or cancellation.'}</strong><span>${closeWithoutCharge ? 'Use Close without charge only when no meal was served or the booking is a test/error record. If a bill exists, continue through the cashier flow instead.' : 'The table is freed only after this explicit resolution; a timer never frees it.'}</span></div>
+      <label>Outcome<select name="outcome" required>${outcomes}</select></label>
+      ${noMealConfirmation}
+      <label>Resolution reason<textarea name="reason" minlength="10" maxlength="500" rows="3" required placeholder="Record what was checked and why this booking is being resolved."></textarea><small class="field-help">Required; 10–500 characters. Saved with your identity and timestamp.</small></label>
+      ${depositChoice}`,
+    'Resolve booking',
+    'stale-resolution-modal'
+  );
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'stale-booking-resolution';
+  form.dataset.reservationId = reservationId;
+  form.dataset.idempotencyKey = id('STALE');
+  form.dataset.heldDepositTotal = String(heldDepositTotal);
+}
+async function submitStaleBookingResolution(form, data) {
+  const restoreSubmit = () => restoreModalSubmit(form, 'Resolve booking');
+  const reservationId = form.dataset.reservationId;
+  const unresolved = state.unresolvedBookings.rows.find(row => row.reservation_id === reservationId);
+  if (!['Administrator', 'Manager'].includes(state.role)) {
+    restoreSubmit();
+    return toast('Only Managers and Administrators can resolve stale bookings.', 'error');
   }
-  const reason = String(form?.elements.staleWalkInCompletionReason?.value || '').trim();
+  if (!unresolved) {
+    restoreSubmit();
+    return toast('This booking is no longer on the Unresolved list. Refresh and try again.', 'error');
+  }
+  const reason = String(data.reason || '').trim();
+  const depositReason = String(data.depositReason || '').trim();
+  const heldDepositTotal = Number(form.dataset.heldDepositTotal || 0);
+  const confirmNoMeal = form.elements.confirmNoMeal?.checked === true;
   if (reason.length < 10 || reason.length > 500) {
-    return toast('Enter a completion reason between 10 and 500 characters.', 'error');
+    restoreSubmit();
+    return toast('Enter a resolution reason between 10 and 500 characters.', 'error');
   }
-  if (!confirm('Confirm that the guests have left. This marks only the reservation completed; it does not create or settle a bill, and any other unsaved edits will not be saved.')) return;
-
-  button.disabled = true;
-  button.textContent = 'Completing...';
-  let result;
+  if (unresolved.reservation_status === 'Seated' && !confirmNoMeal) {
+    restoreSubmit();
+    return toast('Confirm that no meal was served or this is a test/error record.', 'error');
+  }
+  if (heldDepositTotal > 0
+    && (!['refund', 'forfeit'].includes(data.depositAction)
+      || depositReason.length < 10
+      || depositReason.length > 500)) {
+    restoreSubmit();
+    return toast('Choose Refund or Forfeit and enter a 10–500 character deposit reason.', 'error');
+  }
+  const expectedStatus = data.outcome === 'close_without_charge' ? 'Completed'
+    : data.outcome === 'no_show' ? 'No-show'
+      : data.outcome === 'cancel' ? 'Cancelled' : '';
   try {
-    result = await window.supabaseRecord.posResolveStaleWalkIn(reservation.id, reason);
-    if (result?.status !== 'Completed') {
-      throw new Error('The database did not confirm reservation completion.');
+    const result = await window.supabaseRecord.posResolveStaleBooking({
+      reservationId,
+      outcome: data.outcome,
+      reason,
+      confirmNoMeal,
+      depositAction: heldDepositTotal > 0 ? data.depositAction : null,
+      depositReason: heldDepositTotal > 0 ? depositReason : '',
+      idempotencyKey: form.dataset.idempotencyKey
+    });
+    if (result?.status !== expectedStatus) {
+      throw new Error('The database did not confirm the requested booking resolution.');
     }
   } catch (error) {
-    button.disabled = false;
-    button.textContent = 'Mark guests departed';
-    console.error('Stale Walk-in completion failed.', error);
+    restoreSubmit();
+    console.error('Stale booking resolution failed.', error);
     toast(friendlyRpcError(error), 'error');
     return;
   }
@@ -3476,16 +3669,40 @@ async function resolveStaleWalkIn(reservationId, form, button) {
   try {
     await Promise.all([
       refetchCollection('reservations'),
-      refetchCollection('restaurantTables')
+      refetchCollection('restaurantTables'),
+      refetchCollection('reservationDeposits'),
+      refetchCollection('cashMovements')
     ]);
   } catch (error) {
-    console.error('Completed Walk-in table data could not be refreshed.', error);
-    toast('The Walk-in was completed, but the table list could not refresh. Reload before seating anyone.', 'error');
+    console.error('Resolved booking data could not be refreshed.', error);
+    invalidateUnresolvedBookings();
+    toast('The booking was resolved, but related data could not refresh. Reload before making another booking or cash decision.', 'error');
     render();
     return;
   }
-  toast(result.already_completed ? 'This Walk-in was already completed.' : 'Walk-in completed; table availability refreshed.');
+  invalidateUnresolvedBookings();
+  toast('Booking resolved. The table and any held deposit were updated atomically.');
   render();
+}
+async function openUnresolvedBookingBill(reservationId) {
+  let bill = all('posBills').find(item =>
+    item.reservationId === reservationId && item.status === 'Open'
+  );
+  if (!bill && ['Administrator', 'Manager'].includes(state.role)) {
+    try {
+      await refetchCollection('posBills');
+      bill = all('posBills').find(item =>
+        item.reservationId === reservationId && item.status === 'Open'
+      );
+    } catch (error) {
+      console.error('Open bill could not be refreshed from the cashier flow.', error);
+      return toast(friendlyRpcError(error), 'error');
+    }
+  }
+  if (!bill) {
+    return toast('The bill is not available in your cashier access. Ask a Manager or Administrator to open it.', 'error');
+  }
+  billForm(bill);
 }
 function confirmRevenueForm(record) {
   modal('Confirm revenue draft', `<p class="panel-subtitle">Review the drafted counts and adjust them before confirmation.</p><div class="form-grid"><label>Adult customers<input name="adult_customers" type="number" min="0" step="1" value="${record.adult_customers}" required></label><label>Child customers<input name="child_customers" type="number" min="0" step="1" value="${record.child_customers}" required></label><label>Senior/PWD customers<input name="senior_pwd_customers" type="number" min="0" step="1" value="${record.senior_pwd_customers}" required></label></div>`, 'Confirm revenue');
@@ -3962,6 +4179,25 @@ document.addEventListener('click', async event => {
     return toast('Only Held deposits can be refunded or forfeited.', 'error');
   }
   if (action === 'deposit-history') return showReservationDepositHistory(actionElement.dataset.id);
+  if (action === 'resolve-stale-booking') return staleBookingResolutionForm(actionElement.dataset.id);
+  if (action === 'refresh-unresolved-bookings') {
+    invalidateUnresolvedBookings();
+    return loadUnresolvedBookings(true);
+  }
+  if (action === 'retry-unresolved-bookings') return loadUnresolvedBookings(true);
+  if (action === 'show-unresolved-booking') {
+    state.reservationFilter = 'Unresolved';
+    state.reservationTypeFilter = 'All';
+    state.reservationDateFilter = 'All';
+    state.reservationMealPeriodFilter = 'All';
+    state.calendarDate = today();
+    state.query = '';
+    state.unresolvedFocusId = actionElement.dataset.id;
+    persistReservationFilters();
+    setView('reservations');
+    return;
+  }
+  if (action === 'open-unresolved-bill') return openUnresolvedBookingBill(actionElement.dataset.id);
   if (action === 'open-reservation-bill') {
     const reservation = all('reservations').find(item => item.id === actionElement.dataset.id);
     if (!reservation || reservation.status !== 'Seated') return toast('Only seated reservations can open a bill.', 'error');
@@ -4047,8 +4283,6 @@ document.addEventListener('click', event => {
   else if (name === 'edit-reservation') {
     const record = all('reservations').find(item => item.id === action.dataset.id);
     if (record) reservationForm(record);
-  } else if (name === 'resolve-stale-walkin') {
-    return resolveStaleWalkIn(action.dataset.id, action.closest('#modalForm'), action);
   } else if (name === 'toggle-recipe-picker') document.querySelector('.recipe-picker').classList.toggle('is-hidden');
   else if (name === 'add-recipe-ingredient') {
     const form = document.querySelector('#modalForm');
@@ -4191,6 +4425,7 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
   if (event.target.matches('[data-reservation-list-date]')) {
     state.calendarDate = event.target.value || today();
+    state.reservationFilter = 'All';
     state.reservationDateFilter = 'All';
     state.reservationMealPeriodFilter = 'All';
     state.query = '';
@@ -4287,6 +4522,7 @@ async function openAuthenticatedSession(session) {
   }
   state.user = profile;
   state.role = profile.role;
+  state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
   window.supabaseRecord.clearVersions();
   const requestedView = window.location.hash.slice(1) || 'dashboard';
   state.view = canAccess(requestedView) ? requestedView : (roleAccess[state.role][0] || 'dashboard');
@@ -4320,6 +4556,7 @@ async function signOutCurrentUser() {
   closeShellPopovers(false);
   state.user = null;
   state.role = null;
+  state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
   lastSavedAt = null;
   supabaseSyncEnabled = false;
   KEYS.forEach(key => { collectionState[key] = []; });
@@ -4735,6 +4972,11 @@ function render() {
     state.view = roleAccess[state.role][0];
     syncActiveSidebarGroup(state.view);
   }
+  if (['reservations', 'tables'].includes(state.view)
+    && !state.unresolvedBookings.loaded
+    && !state.unresolvedBookings.loading) {
+    loadUnresolvedBookings();
+  }
   document.querySelector('#sidebar').innerHTML = nav();
   renderShellChrome();
   const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', cashier: 'Front of House', shifts: 'Front of House', approvals: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', 'charge-catalog': 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management' };
@@ -4756,6 +4998,16 @@ function render() {
     console.error(`Could not render the ${state.view} module.`, error);
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
     return;
+  }
+  if (state.view === 'reservations' && state.unresolvedFocusId) {
+    const target = [...app.querySelectorAll('[data-unresolved-reservation]')]
+      .find(element => element.dataset.id === state.unresolvedFocusId);
+    if (target) {
+      state.unresolvedFocusId = '';
+      target.setAttribute('tabindex', '-1');
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   }
   if (state.view === 'calendar') initializeReservationCalendar();
   if (state.view === 'reports') initializeReportCharts();
@@ -5013,7 +5265,8 @@ document.addEventListener('click', event => {
   }
   const clearReservationFilters = event.target.closest('[data-reservation-clear-filters]');
   if (clearReservationFilters) {
-    state.reservationFilter = 'All';
+    const unresolvedMode = state.reservationFilter === 'Unresolved';
+    state.reservationFilter = unresolvedMode ? 'Unresolved' : 'All';
     state.reservationTypeFilter = 'All';
     state.reservationMealPeriodFilter = 'All';
     state.reservationDateFilter = 'All';
@@ -5024,11 +5277,22 @@ document.addEventListener('click', event => {
     return;
   }
   const filter = event.target.closest('[data-reservation-filter]');
-  if (filter) { state.reservationFilter = filter.dataset.reservationFilter; state.query = ''; persistReservationFilters(); render(); return; }
+  if (filter) {
+    state.reservationFilter = filter.dataset.reservationFilter;
+    state.query = '';
+    if (state.reservationFilter === 'Unresolved') {
+      state.reservationDateFilter = 'All';
+      state.reservationMealPeriodFilter = 'All';
+      state.calendarDate = today();
+    }
+    persistReservationFilters();
+    render();
+    return;
+  }
   const typeFilter = event.target.closest('[data-reservation-type-filter]');
   if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.query = ''; persistReservationFilters(); render(); return; }
   const dateFilter = event.target.closest('[data-reservation-date-filter]');
-  if (dateFilter) { state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
+  if (dateFilter) { state.reservationFilter = 'All'; state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
 document.addEventListener('change', event => {
   if (event.target.matches('[data-reservation-calendar-filter]')) {
@@ -5291,6 +5555,25 @@ document.addEventListener('submit', async event => {
   form.querySelectorAll('[required]').forEach(control => {
     if (!String(control.value).trim()) { showFieldError(control, 'This field is required.'); valid = false; }
   });
+  if (form.dataset.type === 'stale-booking-resolution') {
+    const reason = String(form.elements.reason?.value || '').trim();
+    const depositReason = String(form.elements.depositReason?.value || '').trim();
+    const confirmNoMeal = form.elements.confirmNoMeal;
+    if (reason.length < 10 || reason.length > 500) {
+      showFieldError(form.elements.reason, 'Enter a resolution reason between 10 and 500 characters.');
+      valid = false;
+    }
+    if (confirmNoMeal && !confirmNoMeal.checked) {
+      showFieldError(confirmNoMeal, 'Confirm that no meal was served or this is a test/error record.');
+      valid = false;
+    }
+    if (Number(form.dataset.heldDepositTotal || 0) > 0) {
+      if (depositReason.length < 10 || depositReason.length > 500) {
+        showFieldError(form.elements.depositReason, 'Enter a deposit action reason between 10 and 500 characters.');
+        valid = false;
+      }
+    }
+  }
   form.querySelectorAll('input[type="number"]').forEach(control => {
     if (control.value !== '' && (!Number.isFinite(Number(control.value)) || Number(control.value) < Number(control.min || 0))) { showFieldError(control, `Enter a number of ${control.min && Number(control.min) > 0 ? 'at least ' + control.min : 'zero or more'}.`); valid = false; }
     if (['batchYield', 'prepTarget'].includes(control.name) && control.value !== '' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number.'); valid = false; }

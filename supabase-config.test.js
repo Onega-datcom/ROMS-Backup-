@@ -167,18 +167,100 @@ test('posCloseBill aborts and reports when the RPC does not respond within 15 se
   assert.equal(timers.size, 0);
 });
 
-test('posResolveStaleWalkIn sends the reservation and audit reason to its guarded RPC', async () => {
+test('posListUnresolvedStaleBookings calls the role-guarded listing RPC', async () => {
   let call;
-  const expected = { reservation_id: 'walk-in-1', status: 'Completed' };
-  const { record } = loadSupabaseRecord((name, args) => {
-    call = { name, args };
-    return Promise.resolve({ data: expected, error: null });
+  const expected = [{ reservation_id: 'reservation-1', resolution_label: 'Payable' }];
+  const { record, timers } = loadSupabaseRecord(name => {
+    call = { name };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
   });
 
-  assert.equal(await record.posResolveStaleWalkIn('walk-in-1', 'Guests confirmed departed.'), expected);
-  assert.equal(call.name, 'pos_resolve_stale_walkin');
-  assert.equal(call.args.p_reservation_id, 'walk-in-1');
-  assert.equal(call.args.p_reason, 'Guests confirmed departed.');
+  assert.deepEqual(await record.posListUnresolvedStaleBookings(), expected);
+  assert.equal(call.name, 'pos_list_unresolved_stale_bookings');
+  assert.equal(timers.size, 0);
+});
+
+test('posResolveStaleBooking sends explicit outcome, confirmation, deposit, and idempotency arguments', async () => {
+  let call;
+  const expected = { reservation_id: 'reservation-1', status: 'Completed' };
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
+  });
+
+  assert.equal(await record.posResolveStaleBooking({
+    reservationId: 'reservation-1',
+    outcome: 'close_without_charge',
+    reason: 'Verified test record; no meal was served.',
+    confirmNoMeal: true,
+    depositAction: 'refund',
+    depositReason: 'Return the held customer deposit.',
+    idempotencyKey: 'same-resolution-key'
+  }), expected);
+  assert.equal(call.name, 'pos_resolve_stale_booking');
+  assert.equal(JSON.stringify(call.args), JSON.stringify({
+    p_reservation_id: 'reservation-1',
+    p_outcome: 'close_without_charge',
+    p_reason: 'Verified test record; no meal was served.',
+    p_confirm_no_meal: true,
+    p_deposit_action: 'refund',
+    p_deposit_reason: 'Return the held customer deposit.',
+    p_idempotency_key: 'same-resolution-key'
+  }));
+  assert.equal(timers.size, 0);
+});
+
+test('posResolveStaleBooking aborts after 15 seconds and retains retry guidance', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({
+    abortSignal(requestSignal) {
+      signal = requestSignal;
+      return new Promise(() => {});
+    }
+  }));
+  const pending = record.posResolveStaleBooking({
+    reservationId: 'reservation-1',
+    outcome: 'close_without_charge',
+    reason: 'Verified test record; no meal was served.',
+    confirmNoMeal: true,
+    idempotencyKey: 'retry-same-resolution'
+  });
+  const [timeout] = timers.values();
+
+  timeout();
+
+  await assert.rejects(
+    pending,
+    /Stale booking resolution timed out after 15 seconds\..*same dialog.*idempotency key/
+  );
+  assert.equal(signal.aborted, true);
+  assert.equal(timers.size, 0);
+});
+
+test('posListUnresolvedStaleBookings reports a timeout and aborts the request', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({
+    abortSignal(requestSignal) {
+      signal = requestSignal;
+      return new Promise(() => {});
+    }
+  }));
+  const pending = record.posListUnresolvedStaleBookings();
+  const [timeout] = timers.values();
+
+  timeout();
+
+  await assert.rejects(pending, /Unresolved bookings request timed out after 15 seconds/);
+  assert.equal(signal.aborted, true);
+  assert.equal(timers.size, 0);
 });
 
 test('posSeatAndOpenWalkIn sends all counts and the stable idempotency key', async () => {

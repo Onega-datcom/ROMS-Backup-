@@ -51,3 +51,20 @@
 @media(max-width:1350px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1050px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
+
+.reservation-list-panel .unresolved-booking-card{max-width:none;min-height:100%;padding:16px;gap:14px;border-color:#efcfaa;background:#fffaf4}
+.unresolved-booking-card .reservation-card-main{display:grid;gap:8px;align-content:start;width:100%;text-align:left}
+.unresolved-booking-card .reservation-card-main small{font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+.unresolved-booking-card .reservation-actions{display:flex;flex-wrap:wrap;gap:8px;width:100%;margin-top:auto}
+.unresolved-booking-card .reservation-actions button,.reservation-filter-bar [data-reservation-filter],.reservation-filter-bar [data-reservation-type-filter],.reservation-list-controls button,.stale-resolution-modal button,[data-action="show-unresolved-booking"],[data-action="refresh-unresolved-bookings"],[data-action="retry-unresolved-bookings"]{min-height:44px}
+.unresolved-payable-label{justify-self:start;padding:5px 9px;border-radius:999px;background:var(--orange-bg);color:#8e571e;font-size:11px;font-weight:800}
+.stale-resolution-warning,.stale-deposit-resolution{display:grid;gap:7px;padding:13px;border:1px solid #e8d5b8;border-radius:10px;background:#fffaf2;color:#704d24}
+.stale-resolution-warning span,.stale-deposit-resolution .field-help{font-size:12px;line-height:1.5}
+.stale-no-meal-confirmation{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--line);border-radius:9px;background:#f7faf8}
+.stale-no-meal-confirmation input{width:20px;height:20px;flex:0 0 20px;margin:1px 0 0;accent-color:var(--teal)}
+.stale-no-meal-confirmation span{line-height:1.5}
+.stale-deposit-resolution{margin:4px 0}
+.stale-deposit-resolution select,.stale-deposit-resolution textarea,.stale-resolution-modal textarea{width:100%;min-height:44px}
+.stale-resolution-modal textarea{resize:vertical}
+.unresolved-booking-card:focus{outline:3px solid var(--teal);outline-offset:3px}
+@media(max-width:650px){.unresolved-booking-card .reservation-actions{display:grid;grid-template-columns:1fr}.unresolved-booking-card .reservation-actions button{width:100%}}
