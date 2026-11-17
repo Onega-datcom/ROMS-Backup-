@@ -23,6 +23,7 @@ declare
   cancel_id text := 'D1-CANCEL-' || gen_random_uuid()::text;
   same_day_id text := 'D1-TODAY-' || gen_random_uuid()::text;
   completed_id text := 'D1-COMPLETED-' || gen_random_uuid()::text;
+  completed_bill_id text := 'D1-COMPLETED-BILL-' || gen_random_uuid()::text;
   cancelled_id text := 'D1-CANCELLED-' || gen_random_uuid()::text;
   role_denial_id text := 'D1-ROLE-' || gen_random_uuid()::text;
   seated_table_id text := 'D1-T-SEATED-' || substr(gen_random_uuid()::text, 1, 12);
@@ -115,13 +116,13 @@ begin
 
   insert into public.restaurant_tables (id, seats, status, x, y, guest)
   values
-    (seated_table_id, 4, 'Occupied', 0, 0, ''),
-    (refund_table_id, 4, 'Occupied', 1, 0, ''),
-    (forfeit_table_id, 4, 'Occupied', 2, 0, ''),
-    (open_bill_table_id, 4, 'Occupied', 3, 0, ''),
-    (no_show_table_id, 4, 'Occupied', 4, 0, ''),
-    (cancel_table_id, 4, 'Occupied', 5, 0, ''),
-    (role_table_id, 4, 'Occupied', 6, 0, '');
+    (seated_table_id, 4, 'Available', 0, 0, ''),
+    (refund_table_id, 4, 'Available', 1, 0, ''),
+    (forfeit_table_id, 4, 'Available', 2, 0, ''),
+    (open_bill_table_id, 4, 'Available', 3, 0, ''),
+    (no_show_table_id, 4, 'Available', 4, 0, ''),
+    (cancel_table_id, 4, 'Available', 5, 0, ''),
+    (role_table_id, 4, 'Available', 6, 0, '');
 
   insert into public.reservations (
     id, name, phone, reservation_date, reservation_time, guests, type,
@@ -130,34 +131,66 @@ begin
   ) values
     (seated_id, 'D1 no-charge reservation', '09170000001',
      business_date_value + 1, '1:00 PM', 4, 'Reservation', 4, 0, 0,
-     'Seated', clock_timestamp(), 4, seated_table_id, 'Phone', manager_id),
+     'Pending', null, null, seated_table_id, 'Phone', manager_id),
     (refund_id, 'D1 refund Walk-in', null,
      business_date_value + 1, '1:30 PM', 2, 'Walk-in', 2, 0, 0,
-     'Seated', clock_timestamp(), 2, refund_table_id, 'Walk-in', manager_id),
+     'Pending', null, null, refund_table_id, 'Walk-in', manager_id),
     (forfeit_id, 'D1 forfeit Walk-in', null,
      business_date_value + 1, '2:00 PM', 2, 'Walk-in', 2, 0, 0,
-     'Seated', clock_timestamp(), 2, forfeit_table_id, 'Walk-in', manager_id),
+     'Pending', null, null, forfeit_table_id, 'Walk-in', manager_id),
     (open_bill_id, 'D1 open bill reservation', '09170000002',
      business_date_value + 1, '2:30 PM', 2, 'Reservation', 2, 0, 0,
-     'Seated', clock_timestamp(), 2, open_bill_table_id, 'Phone', manager_id),
+     'Pending', null, null, open_bill_table_id, 'Phone', manager_id),
     (no_show_id, 'D1 no-show reservation', '09170000003',
      business_date_value + 1, '3:00 PM', 2, 'Reservation', 2, 0, 0,
      'Pending', null, null, no_show_table_id, 'Phone', manager_id),
     (cancel_id, 'D1 cancel reservation', '09170000004',
      business_date_value + 1, '3:30 PM', 2, 'Reservation', 2, 0, 0,
-     'Confirmed', null, null, cancel_table_id, 'Phone', manager_id),
+     'Pending', null, null, cancel_table_id, 'Phone', manager_id),
     (role_denial_id, 'D1 role-denial reservation', '09170000005',
      business_date_value + 1, '4:00 PM', 2, 'Reservation', 2, 0, 0,
-     'Seated', clock_timestamp(), 2, role_table_id, 'Phone', manager_id),
+     'Pending', null, null, role_table_id, 'Phone', manager_id),
     (completed_id, 'D1 already completed reservation', '09170000006',
      business_date_value + 1, '4:30 PM', 2, 'Reservation', 2, 0, 0,
-     'Completed', clock_timestamp(), 2, null, 'Phone', manager_id),
+     'Pending', null, null, null, 'Phone', manager_id),
     (cancelled_id, 'D1 already cancelled reservation', '09170000007',
      business_date_value + 1, '5:00 PM', 2, 'Reservation', 2, 0, 0,
-     'Cancelled', null, null, null, 'Phone', manager_id),
+     'Pending', null, null, null, 'Phone', manager_id),
     (same_day_id, 'D1 same-day Walk-in', null,
      business_date_value, '12:00 PM', 2, 'Walk-in', 2, 0, 0,
-     'Seated', clock_timestamp(), 2, null, 'Walk-in', manager_id);
+     'Pending', null, null, null, 'Walk-in', manager_id);
+
+  -- Follow valid lifecycle transitions instead of inserting terminal statuses.
+  update public.reservations
+  set status = 'Confirmed'
+  where id in (
+    seated_id, refund_id, forfeit_id, open_bill_id, cancel_id, role_denial_id,
+    completed_id, cancelled_id, same_day_id
+  );
+  update public.reservations
+  set status = 'Seated',
+      seated_at = clock_timestamp(),
+      actual_covers = guests
+  where id in (
+    seated_id, refund_id, forfeit_id, open_bill_id, role_denial_id,
+    completed_id, same_day_id
+  );
+  update public.reservations
+  set status = 'Cancelled'
+  where id in (cancel_id, cancelled_id);
+
+  -- The completed-status fixture must satisfy the settled-bill guard.
+  insert into public.pos_bills (
+    id, bill_number, reservation_id, customer_name, status, balance_due,
+    created_by, closed_at, closed_by
+  ) values (
+    completed_bill_id, completed_bill_id, completed_id,
+    'D1 already completed reservation', 'Closed', 0,
+    manager_id, clock_timestamp(), manager_id
+  );
+  update public.reservations
+  set status = 'Completed'
+  where id = completed_id;
 
   perform set_config('request.jwt.claim.sub', '', true);
   update public.reservations
