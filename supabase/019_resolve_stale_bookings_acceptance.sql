@@ -217,13 +217,15 @@ begin
 
   perform set_config('request.jwt.claim.sub', receptionist_id::text, true);
   if not exists (
-    select 1 from public.pos_list_unresolved_stale_bookings()
-    where reservation_id = seated_id
+    select 1
+    from public.pos_list_unresolved_stale_bookings() as listed
+    where listed.reservation_id = seated_id
   ) or not exists (
-    select 1 from public.pos_list_unresolved_stale_bookings()
-    where reservation_id = open_bill_id
-      and resolution_label = 'Payable'
-      and bill_status ilike '%Open%'
+    select 1
+    from public.pos_list_unresolved_stale_bookings() as listed
+    where listed.reservation_id = open_bill_id
+      and listed.resolution_label = 'Payable'
+      and listed.bill_status ilike '%Open%'
   ) then
     raise exception 'FAIL: Receptionist could not see unresolved and Payable list rows.';
   end if;
