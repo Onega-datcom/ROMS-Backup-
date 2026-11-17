@@ -62,3 +62,4 @@
 .reservation-filter-group{align-items:flex-start;flex-direction:column;gap:6px}
 .reservation-filter-group .reservation-filters button{box-sizing:border-box;height:40px}
 .reservation-meal-filter{display:flex;align-items:flex-start;flex-direction:column;gap:6px}
+.reservation-filters button.active,.reservation-date-shortcuts button.active{font-weight:inherit}
