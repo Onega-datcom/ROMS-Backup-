@@ -1390,7 +1390,7 @@ function chargeCatalogPage() {
       <div class="two-column-grid">
         <div class="panel">
           <div class="sub-panel-header"><strong>Charge items</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+          <div class="table-scroll"><table class="charge-items-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
         </div>
         <div class="panel">
           <div class="sub-panel-header"><strong>Package tiers</strong></div>

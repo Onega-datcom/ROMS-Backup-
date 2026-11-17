@@ -328,6 +328,15 @@ td {
   text-align: left;
 }
 
+.charge-catalog-panel .charge-items-table th {
+  font-size: 11px;
+}
+
+.charge-catalog-panel .charge-items-table th:nth-child(3),
+.charge-catalog-panel .charge-items-table td:nth-child(3) {
+  text-align: center;
+}
+
 .physical-count-table th:nth-child(5),
 .physical-count-table td:nth-child(5) {
   text-align: center;
