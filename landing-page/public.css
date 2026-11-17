@@ -427,12 +427,12 @@ body:has(#publicApp > .hero) .logo .logo-subtitle {
 body:has(#publicApp > .hero) nav {
   flex: 0 1 auto;
   gap: clamp(14px, 2vw, 28px);
-  margin-left: 0;
+  margin-left: auto;
 }
 
 body:has(#publicApp > .hero) .header-actions {
   gap: 14px;
-  margin-left: auto;
+  margin-left: 14px;
 }
 
 nav a {
