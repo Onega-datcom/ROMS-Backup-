@@ -247,6 +247,10 @@ textarea {
   white-space: nowrap;
 }
 
+.catalog-toolbar .category-tabs {
+  margin: 0;
+}
+
 .catalog-toolbar .filter-check input[type="checkbox"] {
   box-sizing: border-box;
   width: 16px;
