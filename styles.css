@@ -605,6 +605,26 @@ th:first-child {
   margin-bottom: 18px;
 }
 
+.report-toolbar .filter-check {
+  display: flex;
+  min-height: 42px;
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.report-toolbar .filter-check input[type="checkbox"] {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 16px;
+}
+
 .report-tabs {
   display: flex;
   flex-wrap: wrap;
