@@ -53,4 +53,8 @@
 
 .reservation-filters[aria-label="Filter by booking type"]{display:grid;flex:0 0 auto;grid-template-columns:42px 102px 80px}
 .reservation-filters[aria-label="Filter by booking type"] button{box-sizing:border-box;width:100%}
+.reservation-filters[aria-label="Filter by booking type"] button[data-reservation-type-filter="All"].active{background:#fff;border-color:var(--line);color:var(--muted);font-weight:400}
+.reservation-filter-bar{align-items:center}
+.reservation-meal-filter{white-space:nowrap}
+.reservation-meal-filter select{box-sizing:border-box;flex:0 0 96px;width:96px;height:40px;min-height:40px}
 @media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
