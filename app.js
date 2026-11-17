@@ -2580,6 +2580,10 @@ async function handleSubmit(form, submitter = null) {
   const data = Object.fromEntries(new FormData(form));
   const type = form.dataset.type;
   const editId = form.dataset.id;
+  if (type === 'reservation-seating') {
+    await transitionReservation(editId, 'Seated', Number(data.actualCovers));
+    return;
+  }
   if (type === 'reservation-confirmation') {
     await saveReservationConfirmation(form, data);
     return;
@@ -3312,33 +3316,63 @@ async function handleSubmit(form, submitter = null) {
   toast(successMessage);
   render();
 }
-async function transitionReservation(itemId, nextStatus) {
+async function transitionReservation(itemId, nextStatus, seatedCovers) {
+  const restoreSeatingSubmit = () => {
+    if (seatedCovers !== undefined) restoreModalSubmit(document.querySelector('#modalForm'), 'Seat reservation');
+  };
   const reservation = all('reservations').find(item => item.id === itemId);
-  if (!reservation) return toast('Reservation not found.', 'error');
+  if (!reservation) {
+    restoreSeatingSubmit();
+    return toast('Reservation not found.', 'error');
+  }
   if (nextStatus === 'Completed') {
+    restoreSeatingSubmit();
     return toast('Reservations are completed automatically when their linked bill is closed and fully settled.', 'error');
   }
-  if (reservation.date < today()) return toast('Past reservations are kept for history and cannot change status.', 'error');
+  if (reservation.date < today()) {
+    restoreSeatingSubmit();
+    return toast('Past reservations are kept for history and cannot change status.', 'error');
+  }
   const valid = { Pending: ['Confirmed', 'Cancelled'], Confirmed: ['Seated', 'No-show', 'Cancelled'], Seated: ['Completed'] };
-  if (!valid[reservation.status]?.includes(nextStatus)) return toast('That reservation status transition is not valid.', 'error');
+  if (!valid[reservation.status]?.includes(nextStatus)) {
+    restoreSeatingSubmit();
+    return toast('That reservation status transition is not valid.', 'error');
+  }
   if (nextStatus === 'Confirmed') return openReservationConfirmation(reservation);
   if (nextStatus === 'No-show' && !confirm(`Mark ${reservation.name} as a no-show?`)) return;
   let actualCovers = reservation.actualCovers;
   if (nextStatus === 'Seated') {
-    const entered = prompt('How many actual covers were seated?', String(reservation.guests || 1));
-    if (entered === null) return;
-    actualCovers = Number(entered);
-    if (!Number.isInteger(actualCovers) || actualCovers < 1) return toast('Actual covers must be a positive whole number.', 'error');
+    if (seatedCovers === undefined) return reservationSeatingForm(reservation);
+    actualCovers = Number(seatedCovers);
+    if (!Number.isInteger(actualCovers) || actualCovers < 1) {
+      restoreSeatingSubmit();
+      return toast('Actual covers must be a positive whole number.', 'error');
+    }
   }
   const updated = { ...reservation, status: nextStatus, actualCovers, seatedAt: nextStatus === 'Seated' ? new Date().toISOString() : reservation.seatedAt, completedAt: nextStatus === 'Completed' ? new Date().toISOString() : reservation.completedAt };
   try {
     await saveRecord('reservations', updated);
     if (reservation.table) await refetchCollection('restaurantTables');
+    if (seatedCovers !== undefined) {
+      state.modalDirty = false;
+      closeModal();
+    }
     toast(`Reservation marked ${nextStatus}.`);
     render();
   } catch (error) {
+    if (seatedCovers !== undefined) restoreModalSubmit(document.querySelector('#modalForm'), 'Seat reservation');
     toast(friendlyRpcError(error), 'error');
   }
+}
+function reservationSeatingForm(reservation) {
+  modal(
+    'Seat reservation',
+    `<p class="form-intro">Enter the actual number of covers seated for ${esc(reservationDisplayName(reservation))}.</p><label>Actual covers<input name="actualCovers" type="number" min="1" step="1" value="${Number(reservation.actualCovers || reservation.guests || 1)}" required></label>`,
+    'Seat reservation'
+  );
+  const form = document.querySelector('#modalForm');
+  form.dataset.type = 'reservation-seating';
+  form.dataset.id = reservation.id;
 }
 function openReservationConfirmation(reservation) {
   const reservations = all('reservations');
@@ -5278,6 +5312,7 @@ document.addEventListener('submit', async event => {
   form.querySelectorAll('input[type="number"]').forEach(control => {
     if (control.value !== '' && (!Number.isFinite(Number(control.value)) || Number(control.value) < Number(control.min || 0))) { showFieldError(control, `Enter a number of ${control.min && Number(control.min) > 0 ? 'at least ' + control.min : 'zero or more'}.`); valid = false; }
     if (['batchYield', 'prepTarget'].includes(control.name) && control.value !== '' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number.'); valid = false; }
+    if (form.dataset.type === 'reservation-seating' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number of actual covers.'); valid = false; }
     if (form.dataset.type === 'revenue' && ['adult_customers', 'child_customers', 'senior_pwd_customers'].includes(control.name) && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number of customers.'); valid = false; }
   });
   if (['reservation', 'walk-in'].includes(form.dataset.type)) {
