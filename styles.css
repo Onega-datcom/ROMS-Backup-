@@ -178,6 +178,14 @@ textarea {
   align-content: start;
 }
 
+#modalForm[data-type="charge-item"] .form-grid label {
+  align-content: start;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label.required-field::before {
+  content: none;
+}
+
 .modal.physical-count-modal .form-grid label[data-unit]::after {
   top: 44px;
 }
