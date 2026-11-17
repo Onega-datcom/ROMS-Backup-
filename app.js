@@ -4745,11 +4745,18 @@ function render() {
   const revenueScrollLeft = state.view === 'revenue'
     ? document.querySelector('.revenue-records-panel .table-scroll')?.scrollLeft || 0
     : null;
+  const approvalsScrollLeft = state.view === 'approvals'
+    ? document.querySelector('.table-panel .table-scroll')?.scrollLeft || 0
+    : null;
   try {
     app.innerHTML = renderPage();
     if (revenueScrollLeft !== null) {
       const tableScroll = app.querySelector('.revenue-records-panel .table-scroll');
       if (tableScroll) tableScroll.scrollLeft = revenueScrollLeft;
+    }
+    if (approvalsScrollLeft !== null) {
+      const tableScroll = app.querySelector('.table-panel .table-scroll');
+      if (tableScroll) tableScroll.scrollLeft = approvalsScrollLeft;
     }
   } catch (error) {
     console.error(`Could not render the ${state.view} module.`, error);
