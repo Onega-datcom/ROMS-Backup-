@@ -472,22 +472,6 @@ body:has(#publicApp > .hero) .hero-photo img {
   object-position: center 56%;
 }
 
-body:has(#publicApp > .hero) .intro {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-
-.intro-copy {
-  max-width: 540px;
-}
-
-.intro-image {
-  display: block;
-  width: 100%;
-  height: clamp(280px, 34vw, 420px);
-  border-radius: 10px;
-  object-fit: cover;
-}
-
 .intro,
 .split,
 .contact,
@@ -586,14 +570,6 @@ body:has(#publicApp > .hero) .intro {
     display: none;
   }
 
-  body:has(#publicApp > .hero) .intro {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .intro-image {
-    height: 320px;
-  }
-
   body:has(#publicApp > .hero) .header-actions {
     margin-left: 0;
   }
@@ -649,10 +625,6 @@ body:has(#publicApp > .hero) .intro {
   body:has(#publicApp > .hero) .hero h1 em {
     font-size: clamp(42px, 11vw, 56px);
     letter-spacing: -1.2px;
-  }
-
-  .intro-image {
-    height: 260px;
   }
 
   .cards article img,
