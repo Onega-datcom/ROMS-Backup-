@@ -1049,7 +1049,7 @@ function roleDashboard() {
   const counts = all('physicalCounts');
   const shortages = counts.filter(item => item.actual < item.expected).length;
   const roleCopy = {
-    Administrator: ['Dashboard'],
+    Administrator: ['Overview', 'Here’s what is happening across Isobel today.'],
     Manager: ['Operational summary', 'Monitor cost, stock health, waste, and variance.'],
     'Inventory Clerk': ['Inventory control center', 'Keep supplies accurate, available, and ready for service.'],
     'Chef / Kitchen Staff': ['Kitchen workspace', 'Focus on recipes, production, and waste during today’s shift.'],
