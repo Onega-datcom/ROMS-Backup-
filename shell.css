@@ -2315,7 +2315,7 @@ a:focus-visible {
 #headerUserMenuSlot .header-user-trigger:hover,
 #headerUserMenuSlot .header-user-trigger:focus-visible {
   color: #3b2a20;
-  border-color: transparent;
+  border-color: var(--line);
   background: transparent !important;
   box-shadow: none;
 }
