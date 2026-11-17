@@ -690,7 +690,7 @@ function userMenuMarkup(placement) {
     <button class="user-menu-trigger ${header ? 'header-user-trigger' : 'sidebar-user-trigger'}" type="button" data-popover-trigger="user-${placement}" aria-controls="${id}" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu for ${esc(currentUserName())}">
       <span class="avatar user-avatar">${esc(currentUserInitials())}</span>
       <span class="user-copy"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></span>
-      ${shellIcon(header ? 'chevron' : 'more')}
+      ${header ? shellIcon('chevron') : ''}
     </button>
     <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
       <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
