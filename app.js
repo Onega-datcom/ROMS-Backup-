@@ -822,12 +822,10 @@ function nav() {
   return `<div class="sidebar-top">
       <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">R</span><span class="brand-copy"><strong>Restaurant</strong><small>OPERATION MANAGEMENT SYSTEM</small></span>
+        <span class="brand-mark" aria-hidden="true">i</span><span class="brand-copy"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></span>
         <button class="sidebar-collapse" type="button" data-shell-action="toggle-sidebar" aria-label="${collapseLabel}" title="${collapseLabel}">${shellIcon('panel')}</button>
       </div>
-      <div class="workspace-switcher" aria-label="Restaurant workspace">
-        <span class="avatar restaurant-avatar">${shellIcon('restaurant')}</span><span class="workspace-copy"><span>Workspace</span><strong>Restaurant</strong></span>
-      </div>
+      <div class="workspace-switcher" aria-label="Workspace">WORKSPACE</div>
     </div>
     <nav class="sidebar-nav" aria-label="Main">${overview}${groups}</nav>
     <div class="sidebar-bottom">${guide}${userMenuMarkup('sidebar')}</div>`;

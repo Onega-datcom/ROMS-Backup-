@@ -2278,3 +2278,52 @@ a:focus-visible {
     padding: 30px 24px;
   }
 }
+
+/* Admin shell presentation refinements */
+.sidebar .workspace-switcher {
+  display: block;
+  min-height: 0;
+  margin: 0 1px 14px;
+  border: 0;
+  border-radius: 0;
+  padding: 8px 5px;
+  color: #dccdb3;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.sidebar-collapsed .workspace-switcher {
+  display: none;
+}
+
+.sidebar .user-avatar,
+.header-user-trigger .user-avatar {
+  color: #3b2a20;
+  background: #dccdb3;
+}
+
+.sidebar .user-menu-trigger:hover {
+  color: #f5f0e6;
+  background: transparent;
+}
+
+.search-launcher {
+  margin-right: auto;
+}
+
+.topbar > .top-actions {
+  margin-left: 0;
+}
+
+.sync-status {
+  display: none;
+}
+
+@media (min-width: 1025px) {
+  .search-launcher > svg {
+    display: none;
+  }
+}
