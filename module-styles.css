@@ -58,3 +58,7 @@
 .reservation-meal-filter select{box-sizing:border-box;width:96px;height:40px;min-height:40px}
 @media(max-width:760px){.reservation-filter-bar{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
+.reservation-filter-bar{align-items:start}
+.reservation-filter-group{align-items:flex-start;flex-direction:column;gap:6px}
+.reservation-filter-group .reservation-filters button{box-sizing:border-box;height:40px}
+.reservation-meal-filter{display:flex;align-items:flex-start;flex-direction:column;gap:6px}
