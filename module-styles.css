@@ -50,4 +50,7 @@
 .reservation-list-panel .reservation-card{width:100%;max-width:320px;min-width:0;margin:0}
 @media(max-width:1350px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1050px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.reservation-filters[aria-label="Filter by booking type"]{display:grid;flex:0 0 auto;grid-template-columns:42px 102px 80px}
+.reservation-filters[aria-label="Filter by booking type"] button{box-sizing:border-box;width:100%}
 @media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
