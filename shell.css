@@ -2130,8 +2130,7 @@ a:focus-visible {
   --fc-button-hover-border-color: #3b2a20;
 }
 
-.full-calendar-panel .fc button[aria-pressed="true"],
-.full-calendar-panel .fc .fc-button-active {
+.full-calendar-panel [role="tab"][aria-selected="true"] {
   border-color: #cde5dc !important;
   background: var(--mint) !important;
   color: var(--teal-dark) !important;
