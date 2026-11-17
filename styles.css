@@ -1036,6 +1036,7 @@ th:first-child {
 .production-date-bar strong,.production-date-bar small{display:block}
 .production-date-bar small{margin-top:4px;color:var(--muted);font-size:11px}
 .production-category-tabs{margin:0 0 16px}
+.category-tabs.production-category-tabs button.active{font-weight:400}
 .production-dish-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}
 .production-dish-card{min-width:0;padding:17px;background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow)}
 .production-dish-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
