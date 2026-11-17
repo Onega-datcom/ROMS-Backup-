@@ -3487,6 +3487,9 @@ function chargeItemForm(item = {}) {
   modal(item.id ? 'Edit charge item' : 'Create charge item', content, item.id ? 'Save charge' : 'Create charge');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'charge-item';
+  form.querySelectorAll('.form-grid > label > input[type="checkbox"]').forEach(input => {
+    input.closest('label').classList.add('checkbox-field');
+  });
   if (item.id) form.dataset.id = item.id;
 }
 function billExtraLineMarkup(line = {}, disabled = false) {

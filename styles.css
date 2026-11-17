@@ -186,6 +186,22 @@ textarea {
   content: none;
 }
 
+#modalForm[data-type="charge-item"] .form-grid label.checkbox-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label.checkbox-field > input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 18px;
+}
+
 .modal.physical-count-modal .form-grid label[data-unit]::after {
   top: 44px;
 }
