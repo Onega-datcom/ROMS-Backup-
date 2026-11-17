@@ -2120,6 +2120,11 @@ a:focus-visible {
   background: #e9e0d0;
 }
 
+.full-calendar-panel {
+  --fc-classic-button-strong: var(--mint);
+  --fc-classic-button-strong-border: #cde5dc;
+}
+
 .full-calendar-panel .fc {
   --fc-border-color: #e4d9c6;
   --fc-neutral-bg-color: #f8f4ec;
@@ -2128,8 +2133,6 @@ a:focus-visible {
   --fc-button-border-color: #806448;
   --fc-button-hover-bg-color: #3b2a20;
   --fc-button-hover-border-color: #3b2a20;
-  --fc-classic-button-strong: var(--mint);
-  --fc-classic-button-strong-border: #cde5dc;
 }
 
 .full-calendar-panel [role="tab"][aria-selected="true"],
