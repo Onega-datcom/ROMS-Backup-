@@ -2128,8 +2128,9 @@ a:focus-visible {
   --fc-button-border-color: #806448;
   --fc-button-hover-bg-color: #3b2a20;
   --fc-button-hover-border-color: #3b2a20;
-  --fc-button-active-bg-color: #117f76;
-  --fc-button-active-border-color: #117f76;
+  --fc-classic-button-strong: #117f76;
+  --fc-classic-button-strong-border: #117f76;
+  --fc-classic-button-foreground: #fff;
 }
 
 .full-calendar-panel .fc .fc-button-primary:not(:disabled).fc-button-active,
