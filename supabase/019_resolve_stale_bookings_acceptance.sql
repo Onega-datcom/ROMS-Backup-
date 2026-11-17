@@ -178,7 +178,7 @@ begin
   );
   update public.reservations
   set status = 'Cancelled'
-  where id in (cancel_id, cancelled_id);
+  where id = cancelled_id;
 
   -- The completed-status fixture must satisfy the settled-bill guard.
   insert into public.pos_bills (
