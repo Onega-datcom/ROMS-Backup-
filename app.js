@@ -1379,7 +1379,7 @@ function chargeCatalogPage() {
   const discountRows = discounts.length ? discounts.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.discountType)}</td><td>${esc(item.appliesTo || 'bill')}</td><td>${item.discountType === 'percent' ? `${Number(item.value || 0).toFixed(2)}%` : money(item.value || 0)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No discount presets defined.</td></tr>';
   const settingsRows = settings.length ? settings.map(item => `<tr><td>${esc(item.key)}</td><td>${esc(item.type)}</td><td>${esc(String(item.value || ''))}</td><td>${state.role === 'Administrator' && ['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(item.key) ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-pos-setting" data-id="${esc(item.id)}">Edit</button>` : ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No operating settings saved yet.</td></tr>';
   return `
-    <section class="panel">
+    <section class="panel charge-catalog-panel">
       <div class="panel-header">
         <div>
           <div class="panel-title">Charge catalog</div>

@@ -324,6 +324,10 @@ td {
   text-align: left;
 }
 
+.charge-catalog-panel th {
+  text-align: left;
+}
+
 .physical-count-table th:nth-child(5),
 .physical-count-table td:nth-child(5) {
   text-align: center;
