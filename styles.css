@@ -131,6 +131,18 @@ textarea {
   gap: var(--space-4);
 }
 
+.pos-bill-customer-grid > label {
+  align-content: start;
+  grid-template-rows: auto 50px;
+}
+
+.pos-bill-customer-grid > label > input,
+.pos-bill-customer-grid > label > select {
+  box-sizing: border-box;
+  height: 50px;
+  min-height: 50px;
+}
+
 .required-field::after {
   content: 'Required';
   color: var(--muted);
