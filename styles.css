@@ -271,6 +271,11 @@ td {
   text-align: left;
 }
 
+.physical-count-table th:nth-child(5),
+.physical-count-table td:nth-child(5) {
+  text-align: center;
+}
+
 td:first-child,
 th:first-child {
   white-space: normal;

@@ -1037,7 +1037,8 @@ function pageHeader(eyebrow, title, subtitle, action = '') { return `<div class=
 function tablePage(config) {
   const rows = config.rows || [];
   const emptyMessage = config.emptyMessage || 'No records found. Add your first record to get started.';
-  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
+  const tableClass = config.tableClass ? ` ${esc(config.tableClass)}` : '';
+  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel${tableClass}"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
 }
 function stockStatus(item) { return item.stock <= 0 ? 'Out of Stock' : item.stock <= item.minimum ? 'Low Stock' : 'Healthy'; }
 function roleDashboard() {
@@ -1349,6 +1350,7 @@ function countsPage() {
     subtitle: 'Compare expected system stock with what is physically on hand.',
     action: canSubmitCount ? '<button class="primary-btn" data-action="open-count">+ Record count</button>' : '',
     search: 'counts',
+    tableClass: 'physical-count-table',
     headers: ['Ingredient', 'Expected', 'Actual count', 'Variance', 'Result', 'Count date', ''],
     rows
   });
