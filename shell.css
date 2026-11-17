@@ -2327,3 +2327,7 @@ a:focus-visible {
     display: none;
   }
 }
+
+.topbar > .breadcrumb {
+  display: none;
+}
