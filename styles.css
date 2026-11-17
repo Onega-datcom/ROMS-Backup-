@@ -136,6 +136,10 @@ textarea {
   grid-template-rows: auto 50px;
 }
 
+.pos-bill-customer-grid > label.required-field::before {
+  content: none;
+}
+
 .pos-bill-customer-grid > label > input,
 .pos-bill-customer-grid > label > select {
   box-sizing: border-box;
