@@ -296,6 +296,10 @@ td {
   text-align: left;
 }
 
+.waste-history-panel th {
+  text-align: left;
+}
+
 .physical-count-table th:nth-child(5),
 .physical-count-table td:nth-child(5) {
   text-align: center;
