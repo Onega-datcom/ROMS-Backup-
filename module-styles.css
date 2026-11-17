@@ -50,4 +50,94 @@
 .reservation-list-panel .reservation-card{width:100%;max-width:320px;min-width:0;margin:0}
 @media(max-width:1350px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1050px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.reservation-filters[aria-label="Filter by booking type"]{display:grid;flex:0 0 auto;grid-template-columns:42px 102px 80px}
+.reservation-filters[aria-label="Filter by booking type"] button{box-sizing:border-box;width:100%}
+.reservation-filter-bar{display:grid;grid-template-columns:minmax(0,1fr) max-content max-content;align-items:center}
+.reservation-meal-filter{display:grid;grid-template-columns:max-content 96px;align-items:center;gap:8px;white-space:nowrap}
+.reservation-meal-filter select{box-sizing:border-box;width:96px;height:40px;min-height:40px}
+@media(max-width:760px){.reservation-filter-bar{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
+.reservation-filter-bar{align-items:start}
+.reservation-filter-group{align-items:flex-start;flex-direction:column;gap:6px}
+.reservation-filter-group .reservation-filters button{box-sizing:border-box;height:40px}
+.reservation-meal-filter{display:flex;align-items:flex-start;flex-direction:column;gap:6px}
+.reservation-filters button.active,.reservation-date-shortcuts button.active{font-weight:inherit}
+
+@media (max-width: 720px) {
+  .content,
+  .panel,
+  .table-panel,
+  .metric-card,
+  .catalog-card,
+  .table-scroll {
+    min-width: 0;
+  }
+
+  .table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+  }
+
+  .panel-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .toolbar > .search-box {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .toolbar > select {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
+  .toolbar > .record-count {
+    margin-left: auto;
+  }
+
+  .two-column-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .production-date-bar {
+    flex-wrap: wrap;
+  }
+
+  .production-progress-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .recipe-prep-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 340px) {
+  .metric-grid,
+  .recipe-prep-summary,
+  .waste-filters,
+  .production-history-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .production-history-filters .compact-btn {
+    grid-column: auto;
+  }
+
+  .production-start-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
