@@ -63,3 +63,81 @@
 .reservation-filter-group .reservation-filters button{box-sizing:border-box;height:40px}
 .reservation-meal-filter{display:flex;align-items:flex-start;flex-direction:column;gap:6px}
 .reservation-filters button.active,.reservation-date-shortcuts button.active{font-weight:inherit}
+
+@media (max-width: 720px) {
+  .content,
+  .panel,
+  .table-panel,
+  .metric-card,
+  .catalog-card,
+  .table-scroll {
+    min-width: 0;
+  }
+
+  .table-scroll {
+    width: 100%;
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+  }
+
+  .panel-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .toolbar > .search-box {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .toolbar > select {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
+  .toolbar > .record-count {
+    margin-left: auto;
+  }
+
+  .two-column-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .production-date-bar {
+    flex-wrap: wrap;
+  }
+
+  .production-progress-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .recipe-prep-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 340px) {
+  .metric-grid,
+  .recipe-prep-summary,
+  .waste-filters,
+  .production-history-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .production-history-filters .compact-btn {
+    grid-column: auto;
+  }
+
+  .production-start-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
