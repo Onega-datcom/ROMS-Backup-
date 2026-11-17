@@ -168,8 +168,11 @@ begin
       non_walkin_reservation_id, 'Legacy entry point must be retired.'
     );
     raise exception 'FAIL: legacy Walk-in RPC was still executable.';
-  exception when insufficient_privilege then
-    non_walkin_blocked := true;
+  exception
+    when sqlstate '0A000' then
+      non_walkin_blocked := true;
+    when insufficient_privilege then
+      non_walkin_blocked := true;
   end;
   result := public.pos_resolve_stale_booking(
     non_walkin_reservation_id, 'close_without_charge',
