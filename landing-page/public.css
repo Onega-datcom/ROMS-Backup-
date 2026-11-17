@@ -387,3 +387,248 @@ textarea:focus {
     padding-left: 24px;
   }
 }
+
+/* Figma Make-inspired public landing refinements */
+.logo {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  font: inherit;
+  letter-spacing: 0;
+}
+
+.logo .logo-name {
+  color: inherit;
+  font: italic 400 38px/.95 Georgia, serif;
+  letter-spacing: -1.2px;
+  text-transform: lowercase;
+}
+
+.logo .logo-subtitle {
+  color: #806448;
+  font: 700 8px/1.35 'DM Sans', sans-serif;
+  letter-spacing: 1.55px;
+}
+
+body:has(#publicApp > .hero) #publicApp > header {
+  height: 88px;
+  justify-content: flex-start;
+  gap: clamp(24px, 4vw, 58px);
+  padding-right: 6vw;
+  padding-left: 6vw;
+}
+
+body:has(#publicApp > .hero) .logo .logo-subtitle {
+  color: #e9e0d0;
+}
+
+body:has(#publicApp > .hero) nav {
+  flex: 0 1 auto;
+  gap: clamp(14px, 2vw, 28px);
+  margin-left: 0;
+}
+
+body:has(#publicApp > .hero) .header-actions {
+  gap: 14px;
+  margin-left: auto;
+}
+
+nav a {
+  font-size: 12px;
+  letter-spacing: .15px;
+}
+
+body:has(#publicApp > .hero) .hero h1,
+body:has(#publicApp > .hero) .hero h1 em {
+  max-width: 720px;
+  font: 400 clamp(48px, 5.2vw, 72px)/1.04 Georgia, serif;
+  letter-spacing: -1.7px;
+}
+
+body:has(#publicApp > .hero) .hero h1 em {
+  color: #dccdb3;
+}
+
+body:has(#publicApp > .hero) .hero-copy {
+  padding-right: 10vw;
+  padding-left: 12vw;
+}
+
+body:has(#publicApp > .hero) .hero-copy small {
+  color: #dccdb3;
+  font-size: 10px;
+  letter-spacing: 1.7px;
+}
+
+body:has(#publicApp > .hero) .hero p {
+  max-width: 490px;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+body:has(#publicApp > .hero) .hero-photo img {
+  object-position: center 56%;
+}
+
+.intro,
+.split,
+.contact,
+.section,
+.gallery,
+.status-section {
+  background: #f5f0e6;
+}
+
+.intro,
+.split,
+.contact {
+  align-items: center;
+  gap: clamp(36px, 6vw, 80px);
+}
+
+.section {
+  padding-top: clamp(68px, 7vw, 92px);
+  padding-bottom: clamp(68px, 7vw, 92px);
+}
+
+.cards article,
+.menu-grid article,
+.packages article,
+.value-grid div {
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.cards article img,
+.menu-grid article img {
+  height: 240px;
+}
+
+.quote {
+  color: #3b2a20;
+  background: #e9e0d0;
+}
+
+.quote > b {
+  color: #806448;
+}
+
+.quote blockquote {
+  font-size: clamp(30px, 4vw, 44px);
+}
+
+.quote span {
+  color: #655e49;
+}
+
+.cta {
+  background: #3b2a20;
+}
+
+.cta small {
+  color: #dccdb3;
+}
+
+.cta h2 em {
+  color: #dccdb3;
+}
+
+.cta .outline.light {
+  border-color: #dccdb3;
+  color: #fffdf8;
+}
+
+.cta .outline.light:hover {
+  color: #3b2a20;
+  background: #f5f0e6;
+}
+
+@media (max-width: 850px) {
+  body:has(#publicApp > .hero) #publicApp > header {
+    display: grid;
+    height: auto;
+    min-height: 88px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 24px;
+    padding: 14px 8vw 10px;
+  }
+
+  body:has(#publicApp > .hero) nav {
+    display: flex;
+    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+    gap: 20px;
+    overflow-x: auto;
+    padding: 2px 0 5px;
+    scrollbar-width: none;
+  }
+
+  body:has(#publicApp > .hero) nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  body:has(#publicApp > .hero) .header-actions {
+    margin-left: 0;
+  }
+
+  body:has(#publicApp > .hero) .menu-toggle {
+    display: none;
+  }
+
+  body:has(#publicApp > .hero) .hero-copy {
+    padding: 165px 8vw 70px;
+  }
+
+  body:has(#publicApp > .hero) .hero h1,
+  body:has(#publicApp > .hero) .hero h1 em {
+    font-size: clamp(48px, 7vw, 62px);
+  }
+}
+
+@media (max-width: 560px) {
+  body:has(#publicApp > .hero) #publicApp > header {
+    min-height: 0;
+    gap: 10px;
+    padding: 12px 24px 8px;
+  }
+
+  body:has(#publicApp > .hero) .logo .logo-name {
+    font-size: 34px;
+  }
+
+  body:has(#publicApp > .hero) .logo .logo-subtitle {
+    font-size: 7px;
+    letter-spacing: 1.25px;
+  }
+
+  body:has(#publicApp > .hero) .header-actions {
+    display: none;
+  }
+
+  body:has(#publicApp > .hero) nav {
+    gap: 18px;
+    padding-bottom: 5px;
+  }
+
+  body:has(#publicApp > .hero) nav a {
+    font-size: 11px;
+  }
+
+  body:has(#publicApp > .hero) .hero-copy {
+    padding: 160px 24px 60px;
+  }
+
+  body:has(#publicApp > .hero) .hero h1,
+  body:has(#publicApp > .hero) .hero h1 em {
+    font-size: clamp(42px, 11vw, 56px);
+    letter-spacing: -1.2px;
+  }
+
+  .cards article img,
+  .menu-grid article img {
+    height: 220px;
+  }
+}
