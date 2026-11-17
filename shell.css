@@ -2258,6 +2258,17 @@ a:focus-visible {
   font-size: 13px;
 }
 
+.login-card > .eyebrow:empty,
+.login-card > p:empty,
+.login-card > small:empty,
+.login-card > h1:has(> br):has(> em:empty) {
+  display: none;
+}
+
+.login-brand {
+  margin-bottom: 20px;
+}
+
 @media (max-width: 720px) {
   .login-screen {
     padding: 16px;
