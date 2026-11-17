@@ -2128,8 +2128,15 @@ a:focus-visible {
   --fc-button-border-color: #806448;
   --fc-button-hover-bg-color: #3b2a20;
   --fc-button-hover-border-color: #3b2a20;
-  --fc-button-active-bg-color: #3b2a20;
-  --fc-button-active-border-color: #3b2a20;
+  --fc-button-active-bg-color: #117f76;
+  --fc-button-active-border-color: #117f76;
+}
+
+.full-calendar-panel .fc .fc-button-primary:not(:disabled).fc-button-active,
+.full-calendar-panel .fc .fc-button-primary:not(:disabled):active {
+  border-color: #117f76;
+  background: #117f76;
+  color: #fff;
 }
 
 .palette-backdrop {
