@@ -2128,9 +2128,12 @@ a:focus-visible {
   --fc-button-border-color: #806448;
   --fc-button-hover-bg-color: #3b2a20;
   --fc-button-hover-border-color: #3b2a20;
+  --fc-classic-button-strong: var(--mint);
+  --fc-classic-button-strong-border: #cde5dc;
 }
 
-.full-calendar-panel [role="tab"][aria-selected="true"] {
+.full-calendar-panel [role="tab"][aria-selected="true"],
+.full-calendar-panel [role="tab"][aria-selected="true"]:hover {
   border-color: #cde5dc !important;
   background: var(--mint) !important;
   color: var(--teal-dark) !important;
