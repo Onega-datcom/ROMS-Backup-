@@ -694,8 +694,6 @@ function userMenuMarkup(placement) {
     </button>
     <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
       <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
-      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Help / ROMS guide</span></button>
-      <div class="popover-divider"></div>
       <button type="button" role="menuitem" class="danger-menu-item" data-shell-action="sign-out">${shellIcon('logout')}<span>Sign out</span></button>
     </div>
   </div>`;
@@ -806,18 +804,6 @@ function nav() {
     </section>`;
   }).join('');
   const overview = canAccess('dashboard') ? `<div class="nav-single-wrap">${renderNavItem('dashboard', 'dashboard', 'Dashboard', { single: true })}</div>` : '';
-  const guideDismissed = readShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`) === 'true';
-  const shortScreen = window.matchMedia('(max-height: 700px)').matches;
-  const guideCollapsed = readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`) === 'true'
-    || collapsed
-    || shortScreen;
-  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="ROMS guide">
-    <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="ROMS guide" aria-expanded="${!guideCollapsed}">
-      <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>ROMS guide</strong><span>Learn the workflow</span></span>
-    </button>
-    <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss ROMS guide" title="Dismiss guide">${shellIcon('close')}</button>
-    <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
-  </section>`;
   const collapseLabel = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   return `<div class="sidebar-top">
       <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
@@ -828,7 +814,7 @@ function nav() {
       <div class="workspace-switcher" aria-label="Workspace">WORKSPACE</div>
     </div>
     <nav class="sidebar-nav" aria-label="Main">${overview}${groups}</nav>
-    <div class="sidebar-bottom">${guide}${userMenuMarkup('sidebar')}</div>`;
+    <div class="sidebar-bottom">${userMenuMarkup('sidebar')}</div>`;
 }
 function saveSidebarGroups(groups) {
   const next = Array.isArray(groups) ? groups.filter(id => sidebarGroups.some(group => group.id === id)).slice(0, 1) : [];
