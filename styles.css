@@ -897,6 +897,10 @@ th:first-child {
   row-gap: 14px !important;
 }
 
+.product-form .product-planning-grid > label.required-field::before {
+  content: none;
+}
+
 .product-expiry-toggle {
   display: flex !important;
   align-items: flex-start;
