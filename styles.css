@@ -334,6 +334,15 @@ td {
   text-align: center;
 }
 
+.report-table-scroll th {
+  font-size: 11px;
+}
+
+.report-table-scroll th:first-child,
+.report-table-scroll td:first-child {
+  text-align: left;
+}
+
 .physical-count-table th:nth-child(5),
 .physical-count-table td:nth-child(5) {
   text-align: center;

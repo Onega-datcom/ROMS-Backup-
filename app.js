@@ -4927,7 +4927,7 @@ function initializeReportCharts() {
     }
   });
 }
-function reportTable(headers, rows, empty = 'No data in this range.') { return `<div class="table-scroll"><table><thead><tr>${headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">${empty}</td></tr>`}</tbody></table></div>`; }
+function reportTable(headers, rows, empty = 'No data in this range.') { return `<div class="table-scroll report-table-scroll"><table><thead><tr>${headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">${empty}</td></tr>`}</tbody></table></div>`; }
 function reportExport(rows, name) { const output = rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); const blob = new Blob([output], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `costtrack-${name}.csv`; link.click(); URL.revokeObjectURL(link.href); }
 async function loadReportData() {
   const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}`;
