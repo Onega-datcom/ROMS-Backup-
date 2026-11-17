@@ -147,6 +147,21 @@ textarea {
   min-height: 50px;
 }
 
+#modalForm[data-type="reservation"] label {
+  align-content: start;
+}
+
+#modalForm[data-type="reservation"] label.required-field::before {
+  content: none;
+}
+
+#modalForm[data-type="reservation"] label > input:not([type="hidden"]),
+#modalForm[data-type="reservation"] label > select {
+  box-sizing: border-box;
+  height: 50px;
+  min-height: 50px;
+}
+
 .required-field::after {
   content: 'Required';
   color: var(--muted);
