@@ -131,12 +131,79 @@ textarea {
   gap: var(--space-4);
 }
 
+.pos-bill-customer-grid > label {
+  align-content: start;
+  grid-template-rows: auto 50px;
+}
+
+.pos-bill-customer-grid > label.required-field::before {
+  content: none;
+}
+
+.pos-bill-customer-grid > label > input,
+.pos-bill-customer-grid > label > select {
+  box-sizing: border-box;
+  height: 50px;
+  min-height: 50px;
+}
+
+#modalForm[data-type="reservation"] label {
+  align-content: start;
+}
+
+#modalForm[data-type="reservation"] label.required-field::before {
+  content: none;
+}
+
+#modalForm[data-type="reservation"] label > input:not([type="hidden"]),
+#modalForm[data-type="reservation"] label > select {
+  box-sizing: border-box;
+  height: 50px;
+  min-height: 50px;
+}
+
 .required-field::after {
   content: 'Required';
   color: var(--muted);
   font-size: 10px;
   font-weight: 500;
   margin-left: var(--space-2);
+}
+
+.modal.physical-count-modal .form-grid label {
+  align-content: start;
+}
+
+#modalForm[data-type="recipe"] .form-grid > label:nth-child(-n + 2) {
+  align-content: start;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label {
+  align-content: start;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label.required-field::before {
+  content: none;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label.checkbox-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+}
+
+#modalForm[data-type="charge-item"] .form-grid label.checkbox-field > input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 18px;
+}
+
+.modal.physical-count-modal .form-grid label[data-unit]::after {
+  top: 44px;
 }
 
 .field-help {
@@ -201,6 +268,27 @@ textarea {
   -webkit-overflow-scrolling: touch;
 }
 
+.catalog-toolbar .filter-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.catalog-toolbar .category-tabs {
+  margin: 0;
+}
+
+.catalog-toolbar .filter-check input[type="checkbox"] {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 16px;
+}
+
 table {
   width: 100%;
   min-width: 620px;
@@ -212,6 +300,57 @@ th,
 td {
   vertical-align: middle;
   white-space: nowrap;
+}
+
+.table-panel .sort-header {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+}
+
+.table-panel th {
+  text-align: left;
+}
+
+.waste-history-panel th {
+  text-align: left;
+}
+
+.charge-catalog-panel th {
+  text-align: left;
+  font-size: 11px;
+}
+
+.charge-catalog-panel .charge-items-table th:nth-child(3),
+.charge-catalog-panel .charge-items-table td:nth-child(3) {
+  text-align: center;
+}
+
+.report-table-scroll th {
+  font-size: 11px;
+}
+
+.report-table-scroll th:not(:first-child),
+.report-table-scroll td:not(:first-child) {
+  text-align: center;
+}
+
+.report-table-scroll th:first-child,
+.report-table-scroll td:first-child {
+  text-align: left;
+}
+
+.physical-count-table th:nth-child(5),
+.physical-count-table td:nth-child(5) {
+  text-align: center;
 }
 
 td:first-child,
@@ -289,20 +428,62 @@ th:first-child {
 }
 
 .table-management-toolbar {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 2fr);
   align-items: end;
   gap: 12px;
   margin-bottom: 12px;
 }
 
 .table-management-toolbar label {
-  min-width: 150px;
-  flex: 1;
+  min-width: 0;
+  width: 100%;
 }
 
 .table-management-toolbar .table-management-search {
-  flex: 2;
+  min-width: 0;
+}
+
+.table-management-toolbar input,
+.table-management-toolbar select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  box-sizing: border-box;
+}
+
+.table-management-toolbar input:focus,
+.table-management-toolbar select:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.table-management-toolbar input:focus-visible,
+.table-management-toolbar select:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--teal);
+}
+
+@media (max-width: 1300px) {
+  .table-management-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .table-management-toolbar .table-management-search {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .table-management-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .table-management-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .table-management-note {
@@ -436,6 +617,26 @@ th:first-child {
   align-items: end;
   gap: 10px;
   margin-bottom: 18px;
+}
+
+.report-toolbar .filter-check {
+  display: flex;
+  min-height: 42px;
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.report-toolbar .filter-check input[type="checkbox"] {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 16px;
 }
 
 .report-tabs {
@@ -824,6 +1025,10 @@ th:first-child {
   row-gap: 14px !important;
 }
 
+.product-form .product-planning-grid > label.required-field::before {
+  content: none;
+}
+
 .product-expiry-toggle {
   display: flex !important;
   align-items: flex-start;
@@ -903,6 +1108,7 @@ th:first-child {
 .production-date-bar strong,.production-date-bar small{display:block}
 .production-date-bar small{margin-top:4px;color:var(--muted);font-size:11px}
 .production-category-tabs{margin:0 0 16px}
+.category-tabs.production-category-tabs button.active{font-weight:400}
 .production-dish-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}
 .production-dish-card{min-width:0;padding:17px;background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow)}
 .production-dish-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}

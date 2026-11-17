@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="CostTrack back-of-house restaurant costing and inventory management">
-    <title>CostTrack | BOH Cost Management</title>
+    <title>Restaurant Operation Management System</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="module-styles.css">
     <link rel="stylesheet" href="auth-status.css">
-    <link rel="stylesheet" href="shell.css">
+    <link rel="stylesheet" href="shell.css?v=calendar-tab-highlight">
   </head>
   <body>
     <a class="skip-link" href="#app">Skip to main content</a>
@@ -30,7 +30,7 @@
           <nav class="breadcrumb" aria-label="Breadcrumb"><span>Overview</span><strong id="pageCrumb">Dashboard</strong></nav>
           <button class="search-launcher" id="searchLauncher" type="button" aria-label="Search or jump to a page (Control K)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 4.2 4.2"></path></svg>
-            <span class="search-launcher-label">Search or jump to…</span>
+            <span class="search-launcher-label">Search</span>
             <kbd>Ctrl K</kbd>
           </button>
           <div class="top-actions">
@@ -48,7 +48,7 @@
     <div id="commandPaletteRoot"></div>
     <div id="modalRoot"></div>
     <div id="toastRoot" aria-live="polite"></div>
-    <div id="loadingState" class="loading-state" role="status" aria-live="polite">Checking your secure session…</div>
+    <div id="loadingState" class="loading-state" role="status" aria-live="polite">Loading…</div>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdn.jsdelivr.net/npm/fullcalendar@7.1.4/all/global.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/fullcalendar@7.1.4/themes/classic/global.min.js"></script>

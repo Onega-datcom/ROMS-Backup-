@@ -92,12 +92,14 @@ try {
   console.warn('Reservation filter preferences could not be restored.', error);
 }
 if (!['Lunch', 'Dinner'].includes(state.reservationMealPeriodFilter)) state.reservationMealPeriodFilter = 'All';
+if (!['status', 'type', 'meal', 'date'].includes(state.reservationFilterHighlightGroup)) state.reservationFilterHighlightGroup = 'status';
 function persistReservationFilters() {
   sessionStorage.setItem('costtrack_reservation_filters', JSON.stringify({
     reservationFilter: state.reservationFilter,
     reservationTypeFilter: state.reservationTypeFilter,
     reservationMealPeriodFilter: state.reservationMealPeriodFilter,
-    reservationDateFilter: state.reservationDateFilter
+    reservationDateFilter: state.reservationDateFilter,
+    reservationFilterHighlightGroup: state.reservationFilterHighlightGroup
   }));
 }
 const roleAccess = {
@@ -165,7 +167,7 @@ function currentUserInitials() {
 }
 function dashboardGreeting() {
   const firstName = currentUserName().split(/[\s@._-]+/).filter(Boolean)[0];
-  return firstName ? `Good morning, ${esc(firstName)}.` : 'Welcome to CostTrack.';
+  return firstName ? `Good morning, ${esc(firstName)}.` : 'Welcome to ROMS.';
 }
 async function save(key, value) {
   if (key === 'users') {
@@ -714,11 +716,11 @@ function userMenuMarkup(placement) {
     <button class="user-menu-trigger ${header ? 'header-user-trigger' : 'sidebar-user-trigger'}" type="button" data-popover-trigger="user-${placement}" aria-controls="${id}" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu for ${esc(currentUserName())}">
       <span class="avatar user-avatar">${esc(currentUserInitials())}</span>
       <span class="user-copy"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></span>
-    ${header ? '' : shellIcon('more')}
+      ${header ? shellIcon('chevron') : ''}
     </button>
     <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
       <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
-      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Help / CostTrack guide</span></button>
+      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Isobel guide</span></button>
       <div class="popover-divider"></div>
       <button type="button" role="menuitem" class="danger-menu-item" data-shell-action="sign-out">${shellIcon('logout')}<span>Sign out</span></button>
     </div>
@@ -834,23 +836,21 @@ function nav() {
   const guideCollapsed = readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`) === 'true'
     || collapsed
     || shortScreen;
-  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="CostTrack guide">
-    <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="CostTrack guide" aria-expanded="${!guideCollapsed}">
-      <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>CostTrack guide</strong><span>Learn the workflow</span></span>
-    </button>
-    <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss CostTrack guide" title="Dismiss guide">${shellIcon('close')}</button>
-    <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
-  </section>`;
+  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="Isobel guide">
+      <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="Isobel guide" aria-expanded="${!guideCollapsed}">
+        <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>Isobel guide</strong><span>Learn the workflow</span></span>
+      </button>
+      <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss Isobel guide" title="Dismiss guide">${shellIcon('close')}</button>
+      <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
+    </section>`;
   const collapseLabel = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   return `<div class="sidebar-top">
       <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
       <div class="brand">
-        <span class="brand-mark">CT</span><span class="brand-copy"><strong>COST<span>TRACK</span></strong><small>BOH cost management</small></span>
+        <span class="brand-mark" aria-hidden="true">i</span><span class="brand-copy"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></span>
         <button class="sidebar-collapse" type="button" data-shell-action="toggle-sidebar" aria-label="${collapseLabel}" title="${collapseLabel}">${shellIcon('panel')}</button>
       </div>
-      <div class="workspace-switcher" aria-label="Restaurant workspace">
-        <span class="avatar restaurant-avatar">${shellIcon('restaurant')}</span><span class="workspace-copy"><span>Workspace</span><strong>Restaurant</strong></span>
-      </div>
+      <div class="workspace-switcher" aria-label="Workspace">WORKSPACE</div>
     </div>
     <nav class="sidebar-nav" aria-label="Main">${overview}${groups}</nav>
     <div class="sidebar-bottom">${guide}${userMenuMarkup('sidebar')}</div>`;
@@ -917,7 +917,7 @@ function renderShellChrome() {
   if (period) {
     const month = new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     period.innerHTML = `${shellIcon('calendar')}<span>${esc(month)}</span>`;
-    period.title = 'Current month display. Report filters use a separate date range.';
+    period.title = 'Current month. Reports use a separate date range.';
     period.setAttribute('aria-label', `Current reporting month ${month}. Display only; reports use a separate date range.`);
   }
 }
@@ -976,7 +976,7 @@ function openCommandPalette(trigger = document.querySelector('#searchLauncher'))
   state.paletteSelection = 0;
   root.innerHTML = `<div class="palette-backdrop" data-palette-backdrop>
     <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="paletteTitle">
-      <h2 id="paletteTitle" class="sr-only">Search or jump to</h2>
+      <h2 id="paletteTitle" class="sr-only">Search or  jump to</h2>
       <div class="palette-search">${shellIcon('search')}<input id="paletteSearch" type="search" role="combobox" aria-expanded="true" aria-controls="paletteResults" aria-autocomplete="list" aria-activedescendant="" placeholder="Search pages and actions…" autocomplete="off"><kbd>Esc</kbd></div>
       <div class="palette-results" id="paletteResults" role="listbox" aria-label="Pages and actions"></div>
       <div class="palette-hint"><span>↑↓ to navigate</span><span>Enter to select</span><span>Esc to close</span></div>
@@ -1065,14 +1065,15 @@ function login(message = '') {
   document.querySelector('#appShell').classList.add('is-hidden');
   document.querySelector('#loginScreen').classList.remove('is-hidden');
   const recovering = passwordRecoveryMode || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
-  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><div class="brand-mark">CT</div><strong>COST<span>TRACK</span></strong></div><span class="eyebrow">Back-of-house cost management</span><h1>Know your food cost.<br><em>Run a smarter kitchen.</em></h1><p>Track ingredients, recipes, production, waste, and variance in one focused workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Work email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Sign in to CostTrack <span>→</span></button></form><button class="link-button" id="resetPasswordButton" type="button">Send password reset link</button><small>Accounts are provisioned by your CostTrack administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
+  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></div><span class="eyebrow">Restaurant operations workspace</span><h1>Run a smarter restaurant.<br><em>From kitchen to service.</em></h1><p>Manage inventory, recipes, production, reservations, and daily operations in one workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Log in</button></form><button class="link-button" id="resetPasswordButton" type="button">Forgot password?</button><small>Accounts are provisioned by your administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
 }
 function metric(label, value, icon, tone, foot) { return `<div class="metric-card"><div class="metric-top"><span>${label}</span><i class="metric-icon ${tone}">${icon}</i></div><div class="metric-value">${value}</div><div class="metric-foot">${foot}</div></div>`; }
 function pageHeader(eyebrow, title, subtitle, action = '') { return `<div class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`; }
 function tablePage(config) {
   const rows = config.rows || [];
   const emptyMessage = config.emptyMessage || 'No records found. Add your first record to get started.';
-  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
+  const tableClass = config.tableClass ? ` ${esc(config.tableClass)}` : '';
+  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel${tableClass}"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
 }
 function stockStatus(item) { return item.stock <= 0 ? 'Out of Stock' : item.stock <= item.minimum ? 'Low Stock' : 'Healthy'; }
 function roleDashboard() {
@@ -1087,7 +1088,7 @@ function roleDashboard() {
   const counts = all('physicalCounts');
   const shortages = counts.filter(item => item.actual < item.expected).length;
   const roleCopy = {
-    Administrator: ['System overview', 'Your complete CostTrack workspace at a glance.'],
+    Administrator: ['Overview', 'Here’s what is happening across Isobel today.'],
     Manager: ['Operational summary', 'Monitor cost, stock health, waste, and variance.'],
     'Inventory Clerk': ['Inventory control center', 'Keep supplies accurate, available, and ready for service.'],
     'Chef / Kitchen Staff': ['Kitchen workspace', 'Focus on recipes, production, and waste during today’s shift.'],
@@ -1382,6 +1383,7 @@ function countsPage() {
     subtitle: 'Compare expected system stock with what is physically on hand.',
     action: canSubmitCount ? '<button class="primary-btn" data-action="open-count">+ Record count</button>' : '',
     search: 'counts',
+    tableClass: 'physical-count-table',
     headers: ['Ingredient', 'Expected', 'Actual count', 'Variance', 'Result', 'Count date', ''],
     rows
   });
@@ -1410,7 +1412,7 @@ function chargeCatalogPage() {
   const discountRows = discounts.length ? discounts.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.discountType)}</td><td>${esc(item.appliesTo || 'bill')}</td><td>${item.discountType === 'percent' ? `${Number(item.value || 0).toFixed(2)}%` : money(item.value || 0)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No discount presets defined.</td></tr>';
   const settingsRows = settings.length ? settings.map(item => `<tr><td>${esc(item.key)}</td><td>${esc(item.type)}</td><td>${esc(String(item.value || ''))}</td><td>${state.role === 'Administrator' && ['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(item.key) ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-pos-setting" data-id="${esc(item.id)}">Edit</button>` : ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No operating settings saved yet.</td></tr>';
   return `
-    <section class="panel">
+    <section class="panel charge-catalog-panel">
       <div class="panel-header">
         <div>
           <div class="panel-title">Charge catalog</div>
@@ -1421,7 +1423,7 @@ function chargeCatalogPage() {
       <div class="two-column-grid">
         <div class="panel">
           <div class="sub-panel-header"><strong>Charge items</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+          <div class="table-scroll"><table class="charge-items-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
         </div>
         <div class="panel">
           <div class="sub-panel-header"><strong>Package tiers</strong></div>
@@ -1716,7 +1718,7 @@ async function openForm(type, item) {
     return;
   }
   else if (type === 'production') modal('Log production batch', `<div class="form-grid"><label>Recipe<select name="recipeId" required>${options(all('recipes'))}</select></label><label>Batches<input name="quantity" type="number" min="1" step="1" required></label><label>Covers produced <small class="field-help">Optional</small><input name="coversProduced" type="number" min="0" step="1"></label><label>Mode<select name="mode"><option>Batch production</option><option>End-of-day sales summary</option></select></label><label>Date<input name="date" type="date" value="${today()}" required></label></div>`);
-  else if (type === 'count') modal('Record physical count', `<div class="form-grid"><label>Ingredient<select name="ingredientId" required>${options(all('ingredients'))}</select></label><label>Expected quantity<input name="expected" type="number" min="0" step=".01" required></label><label>Actual count<input name="actual" type="number" min="0" step=".01" required></label><label>Count date<input name="date" type="date" value="${today()}" required></label></div>`);
+  else if (type === 'count') modal('Record physical count', `<div class="form-grid"><label>Ingredient<select name="ingredientId" required>${options(all('ingredients'))}</select></label><label>Expected quantity<input name="expected" type="number" min="0" step=".01" required></label><label>Actual count<input name="actual" type="number" min="0" step=".01" required></label><label>Count date<input name="date" type="date" value="${today()}" required></label></div>`, 'Save record', 'physical-count-modal');
   else if (type === 'user') {
     if (!item) return toast('Select a user to view their details.', 'error');
     const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
@@ -1772,7 +1774,7 @@ function receivingLineMarkup(line, index) {
   const products = all('ingredients');
   const product = products.find(item => item.id === line.ingredientId);
   const expiryRequired = Boolean(product?.trackExpiry);
-  return `<fieldset class="receipt-line" data-line-index="${index}" data-id="${esc(line.id)}"><legend>Product ${index + 1}</legend>${state.receivingDraft.length > 1 ? `<button type="button" class="receipt-remove-line" data-action="remove-receiving-line" data-index="${index}" aria-label="Remove product ${index + 1}">Remove</button>` : ''}<div class="receipt-line-grid"><label>Product<select name="ingredient_${index}" data-field="ingredientId" required><option value="">Choose a product</option>${products.map(item => `<option value="${esc(item.id)}" ${line.ingredientId === item.id ? 'selected' : ''}>${esc(item.name)} · ${esc(item.unit)}</option>`).join('')}</select></label><label>Quantity received<input name="quantity_${index}" data-field="quantity" type="number" min=".0001" step=".0001" value="${esc(line.quantity)}" placeholder="0.00" required></label><label>Unit cost <span class="field-help">Per stocking unit</span><input name="unitCost_${index}" data-field="unitCost" type="number" min="0" step=".01" value="${esc(line.unitCost)}" placeholder="₱ 0.00" required></label><label>Lot / batch number <span class="field-help">Optional</span><input name="batchCode_${index}" data-field="batchCode" value="${esc(line.batchCode)}" maxlength="100" placeholder="Printed on package"></label><label>Expiration date <span class="field-help" data-expiration-help>${expiryRequired ? 'Required for this product' : 'Optional — add when available'}</span><input name="expirationDate_${index}" data-field="expirationDate" type="date" value="${esc(line.expirationDate)}" ${expiryRequired ? 'required' : ''}></label></div><div class="receipt-line-total">Line total <strong data-receipt-line-total>${money(Number(line.quantity || 0) * Number(line.unitCost || 0))}</strong></div></fieldset>`;
+  return `<fieldset class="receipt-line" data-line-index="${index}" data-id="${esc(line.id)}"><legend>Product ${index + 1}</legend>${state.receivingDraft.length > 1 ? `<button type="button" class="receipt-remove-line" data-action="remove-receiving-line" data-index="${index}" aria-label="Remove product ${index + 1}">Remove</button>` : ''}<div class="receipt-line-grid"><label>Product<select name="ingredient_${index}" data-field="ingredientId" required><option value="">Choose a product</option>${products.map(item => `<option value="${esc(item.id)}" ${line.ingredientId === item.id ? 'selected' : ''}>${esc(item.name)} · ${esc(item.unit)}</option>`).join('')}</select></label><label>Quantity received<input name="quantity_${index}" data-field="quantity" type="number" min=".0001" step=".0001" value="${esc(line.quantity)}" placeholder="0.00" required></label><label>Unit cost<input name="unitCost_${index}" data-field="unitCost" type="number" min="0" step=".01" value="${esc(line.unitCost)}" placeholder="₱ 0.00" required><span class="field-help">Per stocking unit</span></label><label>Lot / batch number<input name="batchCode_${index}" data-field="batchCode" value="${esc(line.batchCode)}" maxlength="100" placeholder="Printed on package"><span class="field-help">Optional</span></label><label>Expiration date<input name="expirationDate_${index}" data-field="expirationDate" type="date" value="${esc(line.expirationDate)}" ${expiryRequired ? 'required' : ''}><span class="field-help" data-expiration-help>${expiryRequired ? 'Required for this product' : 'Optional — add when available'}</span></label></div><div class="receipt-line-total">Line total <strong data-receipt-line-total>${money(Number(line.quantity || 0) * Number(line.unitCost || 0))}</strong></div></fieldset>`;
 }
 function updateReceivingExpiryRequirements(form) {
   form.querySelectorAll('.receipt-line').forEach(line => {
@@ -2228,7 +2230,7 @@ function reservationsPage() {
     .map(status => `<button type="button" class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
     .join('');
   const typeFilters = ['All', 'Reservation', 'Walk-in']
-    .map(type => `<button type="button" class="${state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
+    .map(type => `<button type="button" class="${state.reservationFilterHighlightGroup === 'type' && state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
     .join('');
   const hasActiveFilters = unresolvedMode
     ? state.reservationTypeFilter !== 'All' || Boolean(String(state.query || '').trim())
@@ -3644,6 +3646,9 @@ function chargeItemForm(item = {}) {
   modal(item.id ? 'Edit charge item' : 'Create charge item', content, item.id ? 'Save charge' : 'Create charge');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'charge-item';
+  form.querySelectorAll('.form-grid > label > input[type="checkbox"]').forEach(input => {
+    input.closest('label').classList.add('checkbox-field');
+  });
   if (item.id) form.dataset.id = item.id;
 }
 function billExtraLineMarkup(line = {}, disabled = false) {
@@ -3762,7 +3767,7 @@ function billForm(item = {}) {
   const content = `<p class="field-help">${editing ? `Bill ${esc(item.billNumber)} · ${esc(item.status)}${item.createdAt ? ` · Created ${esc(item.createdAt)}` : ''}` : 'Cash-only billing. Sales do not deduct inventory. Comped guests count as served at zero.'}</p>
     ${reservationPrefill}
     <div class="pos-headcount-warning is-hidden" data-bill-headcount-warning role="status" aria-live="polite"></div>
-    <div class="form-grid">
+    <div class="form-grid pos-bill-customer-grid">
       <label>Customer name<input name="customerName" value="${esc(item.customerName || selectedReservation?.name || 'Walk-in')}" maxlength="160" ${disabled} required></label>
       <label>Seated reservation<select name="reservationId" ${disabled || editing ? 'disabled' : ''}><option value="">Walk-in / no reservation</option>${reservations}</select>${editing ? `<input type="hidden" name="reservationId" value="${esc(item.reservationId || '')}">` : ''}</label>
       <label>Table (optional)<select name="tableId" ${disabled}><option value="">No table</option>${tableOptions}</select></label>
@@ -4435,7 +4440,7 @@ async function openAuthenticatedSession(session) {
     .single();
   if (error || !profile || !roleAccess[profile.role]) {
     await window.supabaseClient.auth.signOut();
-    throw new Error('Your account has no valid CostTrack role profile. Ask an administrator to provision your profile.');
+    throw new Error('Your account has no valid ROMS role profile. Ask an administrator to provision your profile.');
   }
   state.user = profile;
   state.role = profile.role;
@@ -4802,7 +4807,7 @@ function modal(title, content, submit = 'Save record', modalClass = '') {
   modalOpener = document.activeElement;
   state.modalDirty = false;
   const submitButton = submit ? `<button class="primary-btn modal-submit" type="submit">${submit}</button>` : '';
-  document.querySelector('#modalRoot').innerHTML = `<div class="modal-backdrop" role="presentation"><div class="modal${modalClass ? ` ${esc(modalClass)}` : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1"><div class="modal-header"><div><div class="eyebrow">CostTrack workspace</div><h2 id="modalTitle">${title}</h2></div></div><form id="modalForm" novalidate>${content}<div class="modal-actions"><button type="button" class="ghost-btn" data-action="close-modal">Cancel</button>${submitButton}</div></form></div></div>`;
+  document.querySelector('#modalRoot').innerHTML = `<div class="modal-backdrop" role="presentation"><div class="modal${modalClass ? ` ${esc(modalClass)}` : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1"><div class="modal-header"><div><div class="eyebrow">ROMS workspace</div><h2 id="modalTitle">${title}</h2></div></div><form id="modalForm" novalidate>${content}<div class="modal-actions"><button type="button" class="ghost-btn" data-action="close-modal">Cancel</button>${submitButton}</div></form></div></div>`;
   const form = document.querySelector('#modalForm');
   form.querySelectorAll('label').forEach((label, index) => {
     const control = label.querySelector('input, select, textarea');
@@ -4909,8 +4914,22 @@ function render() {
     app.innerHTML = '<div class="panel error-state" role="alert">This module is unavailable. Please return to the dashboard or contact your administrator.</div>';
     return;
   }
+  const revenueScrollLeft = state.view === 'revenue'
+    ? document.querySelector('.revenue-records-panel .table-scroll')?.scrollLeft || 0
+    : null;
+  const approvalsScrollLeft = state.view === 'approvals'
+    ? document.querySelector('.table-panel .table-scroll')?.scrollLeft || 0
+    : null;
   try {
     app.innerHTML = renderPage();
+    if (revenueScrollLeft !== null) {
+      const tableScroll = app.querySelector('.revenue-records-panel .table-scroll');
+      if (tableScroll) tableScroll.scrollLeft = revenueScrollLeft;
+    }
+    if (approvalsScrollLeft !== null) {
+      const tableScroll = app.querySelector('.table-panel .table-scroll');
+      if (tableScroll) tableScroll.scrollLeft = approvalsScrollLeft;
+    }
   } catch (error) {
     console.error(`Could not render the ${state.view} module.`, error);
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
@@ -5129,7 +5148,7 @@ function initializeReportCharts() {
     }
   });
 }
-function reportTable(headers, rows, empty = 'No data in this range.') { return `<div class="table-scroll"><table><thead><tr>${headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">${empty}</td></tr>`}</tbody></table></div>`; }
+function reportTable(headers, rows, empty = 'No data in this range.') { return `<div class="table-scroll report-table-scroll"><table><thead><tr>${headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty-state">${empty}</td></tr>`}</tbody></table></div>`; }
 function reportExport(rows, name) { const output = rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); const blob = new Blob([output], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `costtrack-${name}.csv`; link.click(); URL.revokeObjectURL(link.href); }
 async function loadReportData() {
   const [start, end] = dateRangeBounds(); const key = `${state.reportTab}|${start}|${end}|${state.reportGrouping}|${state.reportIncludeWaste}|${state.reportPage}`;
@@ -5258,6 +5277,7 @@ document.addEventListener('click', event => {
     const unresolvedMode = state.reservationFilter === 'Unresolved';
     state.reservationFilter = unresolvedMode ? 'Unresolved' : 'All';
     state.reservationTypeFilter = 'All';
+    state.reservationFilterHighlightGroup = 'status';
     state.reservationMealPeriodFilter = 'All';
     state.reservationDateFilter = 'All';
     state.calendarDate = today();
@@ -5280,7 +5300,7 @@ document.addEventListener('click', event => {
     return;
   }
   const typeFilter = event.target.closest('[data-reservation-type-filter]');
-  if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.query = ''; persistReservationFilters(); render(); return; }
+  if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.reservationFilterHighlightGroup = 'type'; state.query = ''; persistReservationFilters(); render(); return; }
   const dateFilter = event.target.closest('[data-reservation-date-filter]');
   if (dateFilter) { state.reservationFilter = 'All'; state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
