@@ -834,7 +834,7 @@ function sidebarGroupState() {
   const defaultGroup = activeGroup || sidebarGroups.find(group =>
     group.items.some(([view]) => canAccess(view))
   )?.id;
-  return hasPreference && groups.length ? groups : (defaultGroup ? [defaultGroup] : []);
+  return hasPreference ? groups : (defaultGroup ? [defaultGroup] : []);
 }
 
 function renderNavItem(view, icon, label, options = {}) {
@@ -861,7 +861,6 @@ function userMenuMarkup(placement) {
     </button>
     <div class="shell-popover user-popover" id="${id}" data-popover-panel="user-${placement}" role="menu" aria-label="Account menu" hidden>
       <div class="user-popover-heading"><strong>${esc(currentUserName())}</strong><span>${esc(state.role || '')}</span></div>
-      <button type="button" role="menuitem" data-shell-action="show-guide">${shellIcon('help')}<span>Isobel guide</span></button>
       <div class="popover-divider"></div>
       <button type="button" role="menuitem" class="danger-menu-item" data-shell-action="sign-out">${shellIcon('logout')}<span>Sign out</span></button>
     </div>
@@ -1242,18 +1241,6 @@ function nav() {
     </section>`;
   }).join('');
   const overview = canAccess('dashboard') ? `<div class="nav-single-wrap">${renderNavItem('dashboard', 'dashboard', 'Dashboard', { single: true })}</div>` : '';
-  const guideDismissed = readShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`) === 'true';
-  const shortScreen = window.matchMedia('(max-height: 700px)').matches;
-  const guideCollapsed = readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`) === 'true'
-    || collapsed
-    || shortScreen;
-  const guide = guideDismissed ? '' : `<section class="help-card ${guideCollapsed ? 'is-collapsed' : ''}" aria-label="Isobel guide">
-      <button class="help-toggle" type="button" data-shell-action="toggle-guide" aria-label="Isobel guide" aria-expanded="${!guideCollapsed}">
-        <span class="help-icon">${shellIcon('help')}</span><span class="help-copy"><strong>Isobel guide</strong><span>Learn the workflow</span></span>
-      </button>
-      <button class="help-dismiss" type="button" data-shell-action="dismiss-guide" aria-label="Dismiss Isobel guide" title="Dismiss guide">${shellIcon('close')}</button>
-      <p class="help-details" ${guideCollapsed ? 'hidden' : ''}>Use the sidebar to move between restaurant workflows. The New menu shows actions available to your role.</p>
-    </section>`;
   const collapseLabel = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   return `<div class="sidebar-top">
       <button class="drawer-close" type="button" data-shell-action="close-drawer" aria-label="Close navigation">${shellIcon('close')}<span>Close</span></button>
@@ -1264,7 +1251,7 @@ function nav() {
       <div class="workspace-switcher" aria-label="Workspace">WORKSPACE</div>
     </div>
     <nav class="sidebar-nav" aria-label="Main">${overview}${groups}</nav>
-    <div class="sidebar-bottom">${guide}${userMenuMarkup('sidebar')}</div>`;
+    <div class="sidebar-bottom">${userMenuMarkup('sidebar')}</div>`;
 }
 function saveSidebarGroups(groups) {
   const next = Array.isArray(groups) ? groups.filter(id => sidebarGroups.some(group => group.id === id)).slice(0, 1) : [];
@@ -1456,27 +1443,11 @@ function openMobileDrawer() {
   document.querySelector('#mobileMenu')?.setAttribute('aria-expanded', 'true');
   sidebar.querySelector('.drawer-close')?.focus();
 }
-function showGuide() {
-  if (window.matchMedia('(max-height: 700px)').matches) {
-    toast('Use the sidebar for navigation. The New menu only shows actions allowed for your role.');
-    return;
-  }
-  writeShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`, 'false');
-  writeShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`, 'false');
-  if (window.matchMedia('(max-width: 1024px)').matches) openMobileDrawer();
-  else {
-    document.querySelector('#appShell').classList.remove('sidebar-collapsed');
-    writeShellPreference(`costtrack_sidebar_collapsed_${state.role}`, 'false');
-  }
-  const sidebar = document.querySelector('#sidebar');
-  sidebar.innerHTML = nav();
-  sidebar.querySelector('[data-shell-action="toggle-guide"]')?.focus();
-}
 function login(message = '') {
   document.querySelector('#appShell').classList.add('is-hidden');
   document.querySelector('#loginScreen').classList.remove('is-hidden');
   const recovering = passwordRecoveryMode || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
-  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></div><span class="eyebrow">Restaurant operations workspace</span><h1>Run a smarter restaurant.<br><em>From kitchen to service.</em></h1><p>Manage inventory, recipes, production, reservations, and daily operations in one workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Log in</button></form><button class="link-button" id="resetPasswordButton" type="button">Forgot password?</button><small>Accounts are provisioned by your administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
+  document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></div>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Log in</button></form><button class="link-button" id="resetPasswordButton" type="button">Forgot password?</button>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
 }
 function metric(label, value, icon, tone, foot) { return `<div class="metric-card"><div class="metric-top"><span>${label}</span><i class="metric-icon ${tone}">${icon}</i></div><div class="metric-value">${value}</div><div class="metric-foot">${foot}</div></div>`; }
 function pageHeader(eyebrow, title, subtitle, action = '') { return `<div class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`; }
@@ -1487,6 +1458,12 @@ function tablePage(config) {
   return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel${tableClass}"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
 }
 function stockStatus(item) { return item.stock <= 0 ? 'Out of Stock' : item.stock <= item.minimum ? 'Low Stock' : 'Healthy'; }
+function formatStockQuantity(value) {
+  const quantity = Number(value);
+  return Number.isFinite(quantity)
+    ? new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(quantity)
+    : '—';
+}
 function roleDashboard() {
   const ingredients = all('ingredients').filter(item => item.isActive !== false);
   const out = ingredients.filter(item => stockStatus(item) === 'Out of Stock').length;
@@ -1536,9 +1513,9 @@ function roleDashboard() {
         : [metric('Low stock items', low + out, '!', 'red-icon', 'Needs attention')];
   const recipeCategories = [...new Set(activeRecipes.map(item => item.category))];
   const kitchenPanel = `<div class="panel"><div class="panel-header"><div><div class="panel-title">Kitchen activity</div><div class="panel-subtitle">Active recipes and production by category</div></div><button class="text-btn" data-view="production">Open production board →</button></div><div class="dashboard-list">${activeRecipes.slice(0, 5).map(item => `<div class="dashboard-list-row"><span class="recipe-icon">◇</span><div><strong>${esc(item.name)}</strong><small>${esc(item.category)} · ${item.ingredients.length} ingredients</small></div>${canSeeRecipeCosts ? `<span class="tag">${money(recipePortionCost(item))} / portion</span>` : ''}</div>`).join('') || '<p class="panel-subtitle">No active recipes are available.</p>'}</div><div class="category-chips">${recipeCategories.map(item => `<span>${esc(item)}</span>`).join('')}</div></div>`;
-  const inventoryPanel = `<div class="panel inventory-health-panel"><div class="panel-header"><div><div class="panel-title">Inventory health</div><div class="panel-subtitle">Filter stock levels for quick action</div></div><button class="text-btn" data-view="ingredients">Manage inventory →</button></div><div class="quick-filters">${['All', 'Out of Stock', 'Low Stock', 'Healthy'].map(item => `<button class="${state.ingredientStatus === item ? 'active' : ''}" data-dashboard-status="${item}">${item}<b>${item === 'All' ? ingredients.length : ingredients.filter(x => stockStatus(x) === item).length}</b></button>`).join('')}</div><div class="dashboard-list">${ingredients.filter(item => state.ingredientStatus === 'All' || stockStatus(item) === state.ingredientStatus).slice(0, 6).map(item => `<div class="dashboard-list-row" data-view="ingredients"><span class="ingredient-dot">${item.name[0]}</span><div><strong>${esc(item.name)}</strong><small>${item.stock} ${item.unit} · minimum ${item.minimum}</small></div><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></div>`).join('')}</div></div>`;
-  const charts = `<div class="panel empty-state"><div class="panel-title">Cost analytics</div><p>Authoritative trend charts are available in Reports.</p><button class="text-btn" data-view="reports">Open Reports →</button></div>`;
-  const reservationPanel = `<div class="panel reservation-summary-panel"><div class="panel-header"><div><div class="panel-title">Reservation service</div><div class="panel-subtitle">${pendingReservations} bookings need attention · ${todayReservations.length} today</div></div><button class="text-btn" data-view="reservations">Manage reservations →</button></div><div class="dashboard-list">${todayReservations.slice(0, 4).map(item => `<div class="dashboard-list-row"><span class="ingredient-dot">${esc(item.name.charAt(0))}</span><div><strong>${esc(item.name)}</strong><small>${esc(item.time)} · ${item.guests} guests · ${esc(item.table || 'Unassigned')}</small></div><span class="status">${esc(item.status)}</span></div>`).join('') || '<p class="panel-subtitle">No reservations scheduled for today.</p>'}</div></div>`;
+  const inventoryPanel = `<div class="panel inventory-health-panel"><div class="panel-header"><div><div class="panel-title">Inventory health</div><div class="panel-subtitle">Filter stock levels for quick action</div></div><button class="text-btn" data-view="ingredients">Manage inventory</button></div><div class="quick-filters">${['All', 'Out of Stock', 'Low Stock', 'Healthy'].map(item => `<button class="${state.ingredientStatus === item ? 'active' : ''}" data-dashboard-status="${item}">${item}<b>${item === 'All' ? ingredients.length : ingredients.filter(x => stockStatus(x) === item).length}</b></button>`).join('')}</div><div class="dashboard-list">${ingredients.filter(item => state.ingredientStatus === 'All' || stockStatus(item) === state.ingredientStatus).slice(0, 6).map(item => `<div class="dashboard-list-row" data-view="ingredients"><span class="ingredient-dot">${item.name[0]}</span><div><strong>${esc(item.name)}</strong><small>${item.stock} ${item.unit} · minimum ${item.minimum}</small></div><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></div>`).join('')}</div></div>`;
+  const charts = `<div class="panel empty-state"><div class="panel-title">Cost analytics</div><p>Authoritative trend charts are available in Reports.</p><button class="text-btn" data-view="reports">Open Reports</button></div>`;
+  const reservationPanel = `<div class="panel reservation-summary-panel"><div class="panel-header"><div><div class="panel-title">Reservation service</div><div class="panel-subtitle">${pendingReservations} bookings need attention · ${todayReservations.length} today</div></div><button class="text-btn" data-view="reservations">Manage reservations</button></div><div class="dashboard-list">${todayReservations.slice(0, 4).map(item => `<div class="dashboard-list-row"><span class="ingredient-dot">${esc(item.name.charAt(0))}</span><div><strong>${esc(item.name)}</strong><small>${esc(item.time)} · ${item.guests} guests · ${esc(item.table || 'Unassigned')}</small></div><span class="status">${esc(item.status)}</span></div>`).join('') || '<p class="panel-subtitle">No reservations scheduled for today.</p>'}</div></div>`;
   const revenueDashboardErrorPanel = canAccessRevenue() && revenueDashboardError
     ? `<div class="panel error-state" role="alert">${esc(revenueDashboardError)} <button class="ghost-btn" data-action="retry-revenue-dashboard">Retry dashboard</button></div>`
     : '';
@@ -1557,8 +1534,8 @@ function ingredientCardsPage() {
   const canManageProducts = window.CostTrackLogic.canPerformInventoryAction(state.role, 'product.manage');
   const sorted = filtered.slice().sort((a, b) => { const key = state.ingredientSort === 'stock' ? Number(a.stock) - Number(b.stock) : state.ingredientSort === 'cost' ? Number(a.cost) - Number(b.cost) : state.ingredientSort === 'status' ? stockStatus(a).localeCompare(stockStatus(b)) : a.name.localeCompare(b.name); return state.ingredientSortDirection === 'asc' ? key : -key; });
   const toggle = `<button class="ghost-btn compact-btn" data-action="toggle-ingredient-view">${state.ingredientView === 'cards' ? 'Table view' : 'Card view'}</button>`;
-  const cardMarkup = sorted.length ? sorted.map(item => `<article class="catalog-card"><div class="catalog-card-top"><span class="ingredient-dot large-dot">${item.name[0]}</span><div class="product-status-group"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span><span class="product-active-status ${item.isActive === false ? 'is-inactive' : ''}">${item.isActive === false ? 'Inactive' : 'Active'}</span></div></div><h3>${esc(item.name)}</h3><span class="tag">${esc(item.category)}</span><div class="catalog-stat"><div><small>Current stock</small><strong>${item.stock} <em>${item.unit}</em></strong></div>${canSeeCost ? `<div><small>Cost / unit</small><strong>${money(item.cost)}</strong></div>` : ''}</div><div class="catalog-card-footer"><span>Minimum ${item.minimum} ${item.unit}</span><div class="card-actions">${actions('ingredient', item.id, item)}</div></div></article>`).join('') : `<div class="panel empty-state">No ingredients match these filters.${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">Add product</button>' : ''}</div>`;
-  const tableMarkup = `<div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${[['name','Ingredient'],['stock','Stock'],...(canSeeCost ? [['cost','Cost / unit']] : []),['status','Status'],['','']].map(([key, label]) => key ? `<th><button class="sort-header" data-sort-ingredient="${key}">${label} ↕</button></th>` : '<th></th>').join('')}</tr></thead><tbody>${sorted.length ? sorted.map(item => `<tr><td><strong>${esc(item.name)}</strong><small class="sub-cell">${esc(item.category)} · ${esc(item.unit)} · ${item.isActive === false ? 'Inactive' : 'Active'}</small></td><td>${item.stock} ${esc(item.unit)}</td>${canSeeCost ? `<td>${money(item.cost)}</td>` : ''}<td><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></td><td>${actions('ingredient', item.id, item)}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No ingredients match these filters.</td></tr>`}</tbody></table></div></div>`;
+  const cardMarkup = sorted.length ? sorted.map(item => `<article class="catalog-card"><div class="catalog-card-top"><span class="ingredient-dot large-dot">${item.name[0]}</span><div class="product-status-group"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span><span class="product-active-status ${item.isActive === false ? 'is-inactive' : ''}">${item.isActive === false ? 'Inactive' : 'Active'}</span></div></div><h3>${esc(item.name)}</h3><span class="tag">${esc(item.category)}</span><div class="catalog-stat"><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} <em>${item.unit}</em></strong></div>${canSeeCost ? `<div><small>Cost / unit</small><strong>${money(item.cost)}</strong></div>` : ''}</div><div class="catalog-card-footer"><span>Minimum ${item.minimum} ${item.unit}</span><div class="card-actions">${actions('ingredient', item.id, item)}</div></div></article>`).join('') : `<div class="panel empty-state">No ingredients match these filters.${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">Add product</button>' : ''}</div>`;
+  const tableMarkup = `<div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${[['name','Ingredient'],['stock','Stock'],...(canSeeCost ? [['cost','Cost / unit']] : []),['status','Status'],['','']].map(([key, label]) => key ? `<th><button class="sort-header" data-sort-ingredient="${key}">${label} ↕</button></th>` : '<th></th>').join('')}</tr></thead><tbody>${sorted.length ? sorted.map(item => `<tr><td><strong>${esc(item.name)}</strong><small class="sub-cell">${esc(item.category)} · ${esc(item.unit)} · ${item.isActive === false ? 'Inactive' : 'Active'}</small></td><td>${formatStockQuantity(item.stock)} ${esc(item.unit)}</td>${canSeeCost ? `<td>${money(item.cost)}</td>` : ''}<td><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></td><td>${actions('ingredient', item.id, item)}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No ingredients match these filters.</td></tr>`}</tbody></table></div></div>`;
   return `${pageHeader('Inventory', 'Products', 'Review product stock and reorder thresholds.', `${toggle} ${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">+ Add product</button>' : ''}`)}<div class="catalog-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search products or categories..." value="${esc(state.query)}"></div><select data-filter="ingredientCategory"><option>All categories</option>${categories.map(item => `<option ${state.ingredientCategory === item ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select><label class="filter-check"><input type="checkbox" data-low-stock-filter ${state.ingredientStatus === 'Low Stock' ? 'checked' : ''}> Low stock only</label><span class="record-count">${filtered.length} products</span></div>${state.ingredientView === 'cards' ? `<div class="ingredient-card-grid">${cardMarkup}</div>` : tableMarkup}`;
 }
 function recipeCardsPage() {
@@ -1963,17 +1940,28 @@ function shiftsPage() {
 function approvalsPage() {
   const approvals = all('billApprovals').slice().sort((a, b) => String(b.requestedAt || '').localeCompare(String(a.requestedAt || '')));
   const canDecide = ['Administrator', 'Manager'].includes(state.role);
+  const shortId = value => {
+    const id = String(value || '');
+    return id.length > 12 ? `${id.slice(0, 8)}…` : id || '—';
+  };
+  const shortDate = value => {
+    if (!value) return '';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? String(value).slice(0, 16)
+      : date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' });
+  };
   const rows = approvals.map(item => {
     const bill = all('posBills').find(record => record.id === item.billId);
     const label = item.requestType === 'void' ? 'Void bill' : '100% discount';
     const canReview = canDecide && item.status === 'Pending' && item.requestedBy !== state.user?.id;
     const decision = item.decidedBy
-      ? `<small>Decision by ${esc(item.decidedBy)} · ${esc(item.decidedAt || '')}${item.decisionReason ? ` · ${esc(item.decisionReason)}` : ''}</small>`
+      ? `<small title="${esc(`Decision by ${item.decidedBy} · ${item.decidedAt || ''}${item.decisionReason ? ` · ${item.decisionReason}` : ''}`)}">By ${esc(shortId(item.decidedBy))} · ${esc(shortDate(item.decidedAt))}${item.decisionReason ? ` · ${esc(item.decisionReason)}` : ''}</small>`
       : '';
     const actions = canReview
       ? `<button class="ghost-btn compact-btn" data-action="approve-approval" data-id="${esc(item.id)}">Approve</button><button class="ghost-btn compact-btn" data-action="reject-approval" data-id="${esc(item.id)}">Reject</button>`
       : '';
-    return `<tr><td><strong>${esc(bill?.billNumber || item.billId)}</strong><small>${esc(label)}</small></td><td><span class="status ${item.status === 'Approved' ? 'status-good' : item.status === 'Pending' ? 'status-low' : 'status-out'}">${esc(item.status)}</span>${decision}</td><td>${esc(item.requestReason)}<small>Requested by ${esc(item.requestedBy)} · ${esc(item.requestedAt || '')}</small></td><td>${actions}</td></tr>`;
+    return `<tr><td><strong>${esc(bill?.billNumber || shortId(item.billId))}</strong><small>${esc(label)}</small></td><td><span class="status ${item.status === 'Approved' ? 'status-good' : item.status === 'Pending' ? 'status-low' : 'status-out'}">${esc(item.status)}</span>${decision}</td><td>${esc(item.requestReason)}<small title="${esc(`Requested by ${item.requestedBy} · ${item.requestedAt || ''}`)}">By ${esc(shortId(item.requestedBy))} · ${esc(shortDate(item.requestedAt))}</small></td><td>${actions}</td></tr>`;
   });
   return tablePage({
     eyebrow: 'Front of House',
@@ -2468,22 +2456,38 @@ function productLifecycleDialogMarkup(product, details) {
   const recipeList = activeRecipes.length
     ? `<div class="product-lifecycle-recipes"><strong>Active recipes that use this product</strong><ul>${activeRecipes.map(recipe => `<li>${esc(recipe.name)} <small>(${esc(recipe.source)})</small></li>`).join('')}</ul></div>`
     : '';
+  const deleteRestriction = details.is_used
+    ? '<p class="product-lifecycle-blocker" role="status">This product has recorded history, so it cannot be permanently deleted. Deactivating it keeps past records available.</p>'
+    : '';
   return `<p class="product-lifecycle-summary"><strong>${esc(product.name)}</strong> is currently ${details.is_active ? 'active' : 'inactive'}.</p>
     ${usages ? `<div class="product-lifecycle-usage"><strong>Recorded uses</strong><ul>${usages}</ul><small>These records remain available in history and reports.</small></div>` : '<p class="product-lifecycle-usage">No recorded uses were found.</p>'}
-    ${recipeList}<div class="product-lifecycle-actions">${actionMarkup}</div>`;
+    ${deleteRestriction}${recipeList}<div class="product-lifecycle-actions">${actionMarkup}</div>`;
 }
 async function manageProductLifecycle(productId) {
   if (state.role !== 'Administrator') return toast('Only Administrators can manage product lifecycle.', 'error');
   const product = ingredient(productId);
   if (!product) return toast('This product is no longer available. Reload the page and try again.', 'error');
+  const backdrop = modal(`Manage ${esc(product.name)}`,
+    '<p class="product-lifecycle-loading" role="status">Checking product usage...</p>',
+    null, 'product-lifecycle-modal', 'read-only');
   try {
     const details = await window.supabaseRecord.productLifecycle('inspect', productId);
+    if (!backdrop.isConnected) return;
+    if (details.is_active && !details.is_used) {
+      await confirmProductLifecycleAction('delete', productId);
+      return;
+    }
     modal(`Manage ${esc(product.name)}`, productLifecycleDialogMarkup(product, details), null, 'product-lifecycle-modal', 'form');
     const form = document.querySelector('#modalForm');
     form.dataset.type = 'product-lifecycle-actions';
     form.dataset.id = productId;
   } catch (error) {
     console.error('Product lifecycle details could not be loaded.', error);
+    if (backdrop.isConnected) {
+      modal(`Manage ${esc(product.name)}`,
+        `<p class="error-state" role="alert">Product usage could not be checked. ${esc(error.message || 'Try again.')}</p>`,
+        null, 'product-lifecycle-modal', 'read-only');
+    }
     toast(error.message || 'Product lifecycle details could not be loaded.', 'error');
   }
 }
@@ -2560,7 +2564,7 @@ async function confirmProductLifecycleAction(action, productId) {
     {
       title: deleting ? 'Delete product?' : 'Reactivate product?',
       confirmLabel: deleting ? 'Delete permanently' : 'Reactivate',
-      modalClass: 'product-lifecycle-confirmation'
+      modalClass: 'confirmation-modal product-lifecycle-confirmation'
     }
   );
   if (confirmed) await runProductLifecycle(action, product);
@@ -2570,7 +2574,7 @@ function viewRecord(type, item) {
     const movements = all('inventoryTransactions').filter(row => row.ingredientId === item.id).slice().reverse();
     const canSeeCost = ['Administrator', 'Manager', 'Inventory Clerk'].includes(state.role);
     const movementRows = movements.length ? movements.map(row => `<tr><td>${esc(row.date)}</td><td>${esc(row.type)}</td><td>${row.quantity} ${esc(item.unit)}</td>${canSeeCost ? `<td>${money(row.unitCost)}</td>` : ''}<td>${esc(row.user || '—')}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No stock movements recorded yet.</td></tr>`;
-    modal(item.name, `<div class="detail-grid"><div><small>Category</small><strong>${esc(item.category)}</strong></div><div><small>Stock status</small><strong>${stockStatus(item)}</strong></div><div><small>Current stock</small><strong>${item.stock} ${esc(item.unit)}</strong></div>${canSeeCost ? `<div><small>Cost per unit</small><strong>${money(item.cost)}</strong></div>` : ''}<div><small>Minimum stock</small><strong>${item.minimum} ${esc(item.unit)}</strong></div><div><small>Preferred supplier</small><strong>${esc(item.preferredSupplier || 'Not set')}</strong></div><div><small>Expiry tracking</small><strong>${item.trackExpiry ? 'Required on each receipt' : 'Not required'}</strong></div>${item.notes ? `<div class="full"><small>Product notes</small><strong>${esc(item.notes)}</strong></div>` : ''}<div class="full"><small>Stock movement history</small><div class="table-scroll"><table><thead><tr><th>Date</th><th>Type</th><th>Quantity</th>${canSeeCost ? '<th>Unit cost</th>' : ''}<th>User</th></tr></thead><tbody>${movementRows}</tbody></table></div></div></div>`, null, '', 'read-only');
+    modal(item.name, `<div class="detail-grid"><div><small>Category</small><strong>${esc(item.category)}</strong></div><div><small>Stock status</small><strong>${stockStatus(item)}</strong></div><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} ${esc(item.unit)}</strong></div>${canSeeCost ? `<div><small>Cost per unit</small><strong>${money(item.cost)}</strong></div>` : ''}<div><small>Minimum stock</small><strong>${item.minimum} ${esc(item.unit)}</strong></div><div><small>Preferred supplier</small><strong>${esc(item.preferredSupplier || 'Not set')}</strong></div><div><small>Expiry tracking</small><strong>${item.trackExpiry ? 'Required on each receipt' : 'Not required'}</strong></div>${item.notes ? `<div class="full"><small>Product notes</small><strong>${esc(item.notes)}</strong></div>` : ''}<div class="full"><small>Stock movement history</small><div class="table-scroll"><table><thead><tr><th>Date</th><th>Type</th><th>Quantity</th>${canSeeCost ? '<th>Unit cost</th>' : ''}<th>User</th></tr></thead><tbody>${movementRows}</tbody></table></div></div></div>`, null, '', 'read-only');
   }
   if (type === 'recipe') {
     const canSeeCosts = ['Administrator', 'Manager'].includes(state.role);
@@ -2994,7 +2998,7 @@ function reservationsPage() {
     ? unresolvedRows.length
     : status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
   const statusFilters = ['All', 'Unresolved', 'Confirmed', 'Pending', 'Seated', 'Completed', 'No-show', 'Cancelled']
-    .map(status => `<button type="button" class="${state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
+    .map(status => `<button type="button" class="${state.reservationFilterHighlightGroup === 'status' && state.reservationFilter === status ? 'active' : ''}" data-reservation-filter="${status}">${status} <b>${counts(status)}</b></button>`)
     .join('');
   const typeFilters = ['All', 'Reservation', 'Walk-in']
     .map(type => `<button type="button" class="${state.reservationFilterHighlightGroup === 'type' && state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
@@ -3010,8 +3014,8 @@ function reservationsPage() {
   const clearFiltersButton = hasActiveFilters
     ? '<button type="button" class="text-btn reservation-clear-filters" data-reservation-clear-filters>Clear filters</button>'
     : '';
-  const dateControls = unresolvedMode ? '' : `<label class="reservation-date-field">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div>`;
-  const mealPeriodFilter = unresolvedMode ? '' : `<label class="reservation-meal-filter">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label>`;
+  const dateControls = unresolvedMode ? '' : `<label class="reservation-date-field ${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'All' ? 'is-filter-active' : ''}">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div>`;
+  const mealPeriodFilter = unresolvedMode ? '' : `<label class="reservation-meal-filter ${state.reservationFilterHighlightGroup === 'meal' ? 'is-filter-active' : ''}">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label>`;
   const unresolvedList = state.unresolvedBookings.loading
     ? '<div class="empty-table" role="status" aria-live="polite">Loading unresolved bookings…</div>'
     : state.unresolvedBookings.error
@@ -4747,9 +4751,13 @@ async function printShiftReport(shiftId) {
 document.addEventListener('click', event => {
   const actionElement = event.target.closest('[data-action]');
   const action = actionElement?.dataset.action;
-  if (!['open-table-form', 'edit-table', 'assign-table', 'delete-table', 'apply-table-layout', 'mark-table-clean'].includes(action)) return;
+  if (!['open-table-form', 'edit-table', 'assign-table', 'delete-table', 'apply-table-layout', 'mark-table-clean', 'manage-product'].includes(action)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
+  if (action === 'manage-product') {
+    void manageProductLifecycle(actionElement.dataset.id);
+    return;
+  }
   if (action === 'open-table-form') return tableForm();
   if (action === 'apply-table-layout') return applyRestaurantTableLayout();
   const table = all('restaurantTables').find(item => item.id === actionElement.dataset.id);
@@ -4971,8 +4979,6 @@ document.addEventListener('click', event => {
     state.recipeDraft.splice(Number(action.dataset.index), 1);
     renderRecipeModal();
     state.modalDirty = true;
-  } else if (name === 'manage-product') {
-    manageProductLifecycle(action.dataset.id);
   } else if (name === 'product-lifecycle-delete' || name === 'product-lifecycle-reactivate') {
     const form = document.querySelector('#modalForm[data-type="product-lifecycle-actions"]');
     const lifecycleAction = name === 'product-lifecycle-delete' ? 'delete' : 'reactivate';
@@ -5146,11 +5152,12 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-report-group]')) { state.reportGrouping = event.target.value; state.reportPage = 1; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; state.reportPage = 1; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; state.reportPage = 1; reportRequestKey = ''; render(); }
-  if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; persistReservationFilters(); render(); }
+  if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; state.reservationFilterHighlightGroup = 'meal'; persistReservationFilters(); render(); }
   if (event.target.matches('[data-reservation-list-date]')) {
     state.calendarDate = event.target.value || today();
     state.reservationFilter = 'All';
     state.reservationDateFilter = 'All';
+    state.reservationFilterHighlightGroup = 'date';
     state.reservationMealPeriodFilter = 'All';
     state.query = '';
     persistReservationFilters();
@@ -5404,26 +5411,6 @@ document.addEventListener('click', event => {
       writeShellPreference(`costtrack_sidebar_collapsed_${state.role}`, String(collapsed));
       document.querySelector('#sidebar').innerHTML = nav();
       document.querySelector('[data-shell-action="toggle-sidebar"]')?.focus();
-    } else if (action === 'toggle-guide') {
-      if (window.matchMedia('(max-height: 700px)').matches) {
-        toast('Use the sidebar for navigation. The New menu only shows actions allowed for your role.');
-        return;
-      }
-      if (document.querySelector('#appShell').classList.contains('sidebar-collapsed')) {
-        showGuide();
-        return;
-      }
-      const collapsed = !readShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`);
-      writeShellPreference(`costtrack_sidebar_guide_collapsed_${state.role}`, String(collapsed));
-      document.querySelector('#sidebar').innerHTML = nav();
-      document.querySelector('[data-shell-action="toggle-guide"]')?.focus();
-    } else if (action === 'dismiss-guide') {
-      writeShellPreference(`costtrack_sidebar_guide_dismissed_${state.role}`, 'true');
-      document.querySelector('#sidebar').innerHTML = nav();
-      document.querySelector('.sidebar-user-trigger')?.focus();
-    } else if (action === 'show-guide') {
-      closeShellPopovers(false);
-      showGuide();
     } else if (action === 'close-drawer') {
       closeMobileDrawer();
     } else if (action === 'sign-out') {
@@ -5701,7 +5688,7 @@ function confirmInApp(message, {
     const backdrop = modal(title, `<p class="confirmation-message">${esc(message).replace(/\n/g, '<br>')}</p>`, confirmLabel, modalClass, 'confirmation');
     const context = modalContexts.get(backdrop);
     context.resolve = resolve;
-    backdrop.querySelector('[data-action="close-modal"]').textContent = cancelLabel;
+    backdrop.querySelector('.modal-actions [data-action="close-modal"]').textContent = cancelLabel;
   });
 }
 
@@ -6191,7 +6178,8 @@ function reportsPage() {
   const pagination = state.reportTab === 'closed_bill_summary'
     ? `<div class="toolbar-inline report-pagination"><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.max(1, state.reportPage - 1)}" ${state.reportPage <= 1 ? 'disabled' : ''}>Previous</button><span>Page ${state.reportPage} of ${pageCount} · ${Number(data.total_rows || 0)} bills</span><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.min(pageCount, state.reportPage + 1)}" ${state.reportPage >= pageCount ? 'disabled' : ''}>Next</button></div>`
     : '';
-  return `${pageHeader('Management insight', 'Reports & analytics', 'Revenue and customer counts derive from closed POS bills. Deposits and cash movements are shown separately in operational reports.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs" role="tablist" aria-label="Report categories">${tabs.map(([tab, label]) => `<button type="button" role="tab" aria-selected="${state.reportTab === tab}" class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group ${state.reportTab === 'daily_revenue' ? 'disabled' : ''}><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state" role="status">Loading report…</div>' : error ? `<div class="panel error-state" role="alert">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">${state.reportTab === 'food_cost' ? 'New production logs use cost snapshots. Older logs are estimated from current ingredient costs; waste is valued at current cost.' : 'Net sales exclude voided bills, deposits, and all legacy revenue records.'}</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel report-table-panel">${reportTable(headers, tableRows, tableEmptyMessage, tableFooter)}${pagination}</div>`}`;
+  const reportTableClass = state.reportTab === 'waste' ? 'report-table-panel report-waste-table' : 'report-table-panel';
+  return `${pageHeader('Management insight', 'Reports & analytics', 'Revenue and customer counts derive from closed POS bills. Deposits and cash movements are shown separately in operational reports.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs" role="tablist" aria-label="Report categories">${tabs.map(([tab, label]) => `<button type="button" role="tab" aria-selected="${state.reportTab === tab}" class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group ${state.reportTab === 'daily_revenue' ? 'disabled' : ''}><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state" role="status">Loading report…</div>' : error ? `<div class="panel error-state" role="alert">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">${state.reportTab === 'food_cost' ? 'New production logs use cost snapshots. Older logs are estimated from current ingredient costs; waste is valued at current cost.' : 'Net sales exclude voided bills, deposits, and all legacy revenue records.'}</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel ${reportTableClass}">${reportTable(headers, tableRows, tableEmptyMessage, tableFooter)}${pagination}</div>`}`;
 }
 
 let backdropMouseDown = null;
@@ -6278,6 +6266,7 @@ document.addEventListener('click', event => {
   const filter = event.target.closest('[data-reservation-filter]');
   if (filter) {
     state.reservationFilter = filter.dataset.reservationFilter;
+    state.reservationFilterHighlightGroup = 'status';
     state.query = '';
     if (state.reservationFilter === 'Unresolved') {
       state.reservationDateFilter = 'All';
@@ -6291,7 +6280,7 @@ document.addEventListener('click', event => {
   const typeFilter = event.target.closest('[data-reservation-type-filter]');
   if (typeFilter) { state.reservationTypeFilter = typeFilter.dataset.reservationTypeFilter; state.reservationFilterHighlightGroup = 'type'; state.query = ''; persistReservationFilters(); render(); return; }
   const dateFilter = event.target.closest('[data-reservation-date-filter]');
-  if (dateFilter) { state.reservationFilter = 'All'; state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.calendarDate = today(); persistReservationFilters(); render(); return; }
+  if (dateFilter) { state.reservationFilter = 'All'; state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.reservationFilterHighlightGroup = 'date'; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
 document.addEventListener('change', event => {
   if (event.target.matches('[data-reservation-calendar-filter]')) {
