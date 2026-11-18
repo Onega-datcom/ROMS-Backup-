@@ -7,6 +7,38 @@ const g = { name: 'Gram', abbreviation: 'g', dimension: 'weight', conversionToBa
 const liter = { name: 'Liter', abbreviation: 'L', dimension: 'volume', conversionToBase: 1000 };
 const asOfDate = '2026-11-11';
 
+test('closed-bill report totals keep voids separate and ignore unrelated legacy values', () => {
+  const totals = logic.closedBillRevenueTotals([
+    {
+      closed_bill_count: 2,
+      net_revenue: 1150,
+      discount_total: 100,
+      customers_served: 9,
+      voided_bill_count: 2,
+      voided_bill_amount: 450,
+      legacy_revenue: 9999
+    },
+    {
+      closed_bill_count: 0,
+      net_revenue: 0,
+      discount_total: 0,
+      customers_served: 0,
+      voided_bill_count: 0,
+      voided_bill_amount: 0
+    }
+  ]);
+
+  assert.deepEqual(totals, {
+    closedBillCount: 2,
+    netRevenue: 1150,
+    discountTotal: 100,
+    customersServed: 9,
+    voidedBillCount: 2,
+    voidedBillAmount: 450
+  });
+  assert.throws(() => logic.closedBillRevenueTotals(null), /must be an array/);
+});
+
 test('Lunch reservations fall back to the active All Day rate', () => {
   const rates = [{
     mealPeriod: 'All Day',
@@ -67,6 +99,70 @@ test('buffet rate lookup matches weekday, weekend, and holiday day types case-in
 test('converts compatible units and rejects incompatible dimensions', () => {
   assert.equal(logic.convertQuantity(4000, g, kg), 4);
   assert.throws(() => logic.convertQuantity(1, kg, liter), /dimensions differ/);
+});
+
+test('recipe cost breakdown separates total batch cost from cost per portion', () => {
+  const recipe = {
+    batchYield: 4,
+    wastage: 10,
+    ingredients: [
+      { ingredientId: 'rice', quantity: 2 },
+      { ingredientId: 'chicken', quantity: 4 }
+    ]
+  };
+  const ingredients = [
+    { id: 'rice', name: 'Rice', unit: 'kg', cost: 10, stock: 7 },
+    { id: 'chicken', name: 'Chicken', unit: 'kg', cost: 5, stock: 10 }
+  ];
+  const breakdown = logic.recipeCostBreakdown(recipe, ingredients);
+
+  assert.equal(breakdown.totalBatchCost, 44);
+  assert.equal(breakdown.costPerPortion, 11);
+  assert.deepEqual(breakdown.ingredients.map(line => [line.name, line.lineCost, line.costPercent]), [
+    ['Rice', 22, 50],
+    ['Chicken', 22, 50]
+  ]);
+  assert.equal(logic.computedRecipeCost(recipe, ingredients), 44);
+  assert.deepEqual(logic.recipeStockAvailability(recipe, ingredients), {
+    batches: 2,
+    limitingIngredientId: 'chicken'
+  });
+  assert.equal(logic.recipeFoodCostPercent(breakdown.costPerPortion, 449), 11 / 449 * 100);
+});
+
+test('production cost stays fixed to its snapshot after recipe cost changes', () => {
+  const originalRecipe = {
+    batchYield: 4,
+    wastage: 10,
+    ingredients: [{ ingredientId: 'rice', quantity: 2 }]
+  };
+  const originalIngredients = [{ id: 'rice', name: 'Rice', unit: 'kg', cost: 10, stock: 7 }];
+  const log = { quantity: 1, batchCostSnapshot: 22 };
+  const editedRecipe = { ...originalRecipe, ingredients: [{ ingredientId: 'rice', quantity: 8 }] };
+  const editedIngredients = [{ ...originalIngredients[0], cost: 20 }];
+
+  assert.equal(logic.productionLogCost(log, editedRecipe, editedIngredients), 22);
+  assert.equal(logic.productionLogCost({ quantity: 2 }, editedRecipe, editedIngredients), 352);
+});
+
+test('recipe sanity warning flags an implausible unit quantity without blocking cost', () => {
+  const recipe = {
+    batchYield: 30,
+    wastage: 0,
+    ingredients: [{ ingredientId: 'oil', quantity: 101 }]
+  };
+  const ingredients = [{ id: 'oil', name: 'Cooking oil', unit: 'kg', cost: 20, stock: 500 }];
+  const warnings = logic.recipeSanityWarnings(recipe, ingredients, 449);
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /101 kg.*verify the unit/);
+  assert.equal(logic.recipeCostBreakdown(recipe, ingredients).totalBatchCost, 2020);
+});
+
+test('inactive recipe state is preserved and recognized', () => {
+  assert.equal(logic.isRecipeActive({ isActive: true }), true);
+  assert.equal(logic.isRecipeActive({ is_active: false }), false);
+  assert.equal(logic.isRecipeActive({}), true);
 });
 
 test('plans FIFO consumption across batches using each batch cost', () => {
@@ -150,19 +246,178 @@ test('computes stock health and batch-weighted average cost', () => {
   ], asOfDate), 123.75);
 });
 
+test('modal type rules restrict backdrop and Escape behavior', () => {
+  for (const type of ['form', 'money']) {
+    assert.equal(logic.modalInteraction(type, 'backdrop'), 'ignore');
+    assert.equal(logic.modalInteraction(type, 'escape'), 'request-close');
+  }
+  assert.equal(logic.modalInteraction('read-only', 'backdrop'), 'close');
+  assert.equal(logic.modalInteraction('read-only', 'escape'), 'close');
+  assert.equal(logic.modalInteraction('confirmation', 'backdrop'), 'ignore');
+  assert.equal(logic.modalInteraction('confirmation', 'escape'), 'cancel');
+  for (const type of ['popover', 'menu']) {
+    assert.equal(logic.modalInteraction(type, 'backdrop'), 'close');
+    assert.equal(logic.modalInteraction(type, 'escape'), 'close');
+  }
+});
+
+test('notification feed deduplicates items and badge count equals unread rows', () => {
+  const feed = logic.buildNotificationFeed([
+    {
+      key: 'stock:flour',
+      dedupeKey: 'stock:flour',
+      category: 'stock',
+      title: 'Low stock',
+      severity: 'warning',
+      action: { view: 'receiving', label: 'Receive stock' }
+    },
+    {
+      key: 'system:legacy-low-flour',
+      dedupeKey: 'stock:flour',
+      category: 'stock',
+      title: 'Low stock',
+      severity: 'warning',
+      action: { view: 'receiving', label: 'Receive stock' }
+    },
+    {
+      key: 'reservation:r1',
+      category: 'reservation',
+      title: 'Pending reservation',
+      severity: 'info',
+      action: { view: 'reservations', label: 'Review reservation' }
+    }
+  ], 'Manager', ['reservation:r1']);
+
+  assert.equal(feed.length, 2);
+  assert.equal(logic.notificationUnreadCount(feed), feed.filter(item => !item.isRead).length);
+  assert.equal(logic.notificationUnreadCount(feed), 1);
+});
+
+test('notification role visibility excludes unauthorized operational and revenue alerts', () => {
+  const stock = { category: 'stock' };
+  const reservation = { category: 'reservation' };
+  const pos = { category: 'pos' };
+  const revenue = { category: 'system', type: 'Missing revenue entry' };
+
+  assert.equal(logic.notificationVisibleToRole(stock, 'Inventory Clerk'), true);
+  assert.equal(logic.notificationVisibleToRole(stock, 'Receptionist'), false);
+  assert.equal(logic.notificationVisibleToRole(reservation, 'Receptionist'), true);
+  assert.equal(logic.notificationVisibleToRole(reservation, 'Inventory Clerk'), false);
+  assert.equal(logic.notificationVisibleToRole(pos, 'Manager'), true);
+  assert.equal(logic.notificationVisibleToRole(pos, 'Receptionist'), false);
+  assert.equal(logic.notificationVisibleToRole(revenue, 'Chef / Kitchen Staff'), false);
+  assert.equal(logic.notificationVisibleToRole(revenue, 'Receptionist'), false);
+});
+
+test('notification actions are role-safe and point to the intended workflow', () => {
+  const approval = {
+    category: 'pos',
+    action: { view: 'approvals', label: 'Open approval' }
+  };
+  const unresolved = {
+    category: 'unresolved',
+    action: { view: 'reservations', label: 'View unresolved bookings' }
+  };
+
+  assert.equal(logic.notificationActionForRole(approval, 'Manager').view, 'approvals');
+  assert.equal(logic.notificationActionForRole(approval, 'Receptionist'), null);
+  assert.equal(logic.notificationActionForRole(unresolved, 'Receptionist').view, 'reservations');
+});
+
+test('calendar legend and event presentation share accessible colors for every status', () => {
+  const legend = logic.reservationCalendarStatusLegend();
+  assert.deepEqual(legend.map(entry => entry.status), [
+    'Pending', 'Confirmed', 'Seated', 'Checked-in', 'Completed', 'Cancelled', 'No-show'
+  ]);
+
+  const relativeLuminance = hex => {
+    const channels = hex.match(/[a-f\d]{2}/gi).map(channel => parseInt(channel, 16) / 255)
+      .map(channel => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  for (const { status, ...presentation } of legend) {
+    assert.deepEqual(logic.reservationCalendarStatusPresentation(status), presentation);
+    const contrast = relativeLuminance(presentation.color) > relativeLuminance(presentation.contrastColor)
+      ? (relativeLuminance(presentation.color) + 0.05) / (relativeLuminance(presentation.contrastColor) + 0.05)
+      : (relativeLuminance(presentation.contrastColor) + 0.05) / (relativeLuminance(presentation.color) + 0.05);
+    assert.ok(contrast >= 4.5, `${status} event text contrast is below WCAG AA`);
+  }
+});
+
+test('past unresolved marker applies only to earlier unresolved reservation statuses', () => {
+  for (const status of ['Pending', 'Confirmed', 'Seated', 'Checked-in']) {
+    assert.equal(logic.isPastUnresolvedReservation(status, '2026-11-17', '2026-11-18'), true);
+    assert.equal(logic.isPastUnresolvedReservation(status, '2026-11-18', '2026-11-18'), false);
+  }
+  for (const status of ['Completed', 'Cancelled', 'No-show']) {
+    assert.equal(logic.isPastUnresolvedReservation(status, '2026-11-17', '2026-11-18'), false);
+  }
+});
+
+test('formats server timestamps as 12-hour Asia/Manila date and time', () => {
+  assert.equal(
+    logic.formatManilaTimestamp('2026-11-17T22:18:00.000Z'),
+    '18/11/2026, 6:18 AM'
+  );
+  assert.throws(() => logic.formatManilaTimestamp('not-a-timestamp'), /invalid timestamp/i);
+});
+
+test('save completion does not wait for a separate list refresh', async () => {
+  let releaseRefresh;
+  let refreshFailure;
+  const pendingRefresh = new Promise((resolve, reject) => {
+    releaseRefresh = resolve;
+  });
+  const outcome = await logic.saveThenRefresh(
+    async () => ({ id: 'saved-record' }),
+    () => pendingRefresh,
+    error => { refreshFailure = error; }
+  );
+
+  assert.deepEqual(outcome.saved, { id: 'saved-record' });
+  releaseRefresh();
+  await outcome.refresh;
+  assert.equal(refreshFailure, undefined);
+
+  const failedRefresh = new Error('refresh failed');
+  const failedOutcome = await logic.saveThenRefresh(
+    async () => 'committed',
+    async () => { throw failedRefresh; },
+    error => { refreshFailure = error; }
+  );
+  assert.equal(failedOutcome.saved, 'committed');
+  await failedOutcome.refresh;
+  assert.equal(refreshFailure, failedRefresh);
+
+  let refreshStarted = false;
+  await assert.rejects(logic.saveThenRefresh(
+    async () => { throw new Error('save failed'); },
+    async () => { refreshStarted = true; },
+    () => {}
+  ), /save failed/);
+  assert.equal(refreshStarted, false);
+});
+
 test('tracks buffet prep targets across ready and cooking batches', () => {
   const progress = logic.productionProgress([
     { status: 'Ready', expectedCovers: 30 },
-    { status: 'Cooking', batchYield: 30, batchCount: 1 },
+    { status: 'Ready', expectedCovers: 10 },
+    { status: 'Cooking', expectedCovers: 30 },
+    { status: 'Cooking', batchYield: 20, batchCount: 1 },
     { status: 'Cancelled', expectedCovers: 50 }
   ], 100);
   assert.deepEqual(progress, {
     target: 100,
-    ready: 30,
-    cooking: 30,
-    remaining: 40,
-    remainingAfterCooking: 70
+    ready: 40,
+    cooking: 50,
+    remaining: 10,
+    remainingAfterCooking: 60
   });
+  assert.equal(logic.productionProgress([
+    { status: 'Ready', expectedCovers: 65 },
+    { status: 'Cooking', expectedCovers: 45 },
+    { status: 'Cooking', expectedCovers: 20 }
+  ], 100).remaining, 0);
   assert.throws(() => logic.productionProgress([], -1), /cannot be negative/);
 });
 

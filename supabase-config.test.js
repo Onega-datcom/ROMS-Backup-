@@ -29,6 +29,65 @@ function loadSupabaseRecord(rpc, clientOverrides = {}) {
   return { record: mockWindow.supabaseRecord, timers };
 }
 
+test('wasteServerTime uses the guarded server-time RPC and clears its timeout', async () => {
+  let call;
+  const expected = '2026-11-17T22:18:00.000Z';
+  const { record, timers } = loadSupabaseRecord((name) => {
+    call = name;
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: expected, error: null });
+      }
+    };
+  });
+
+  assert.equal(await record.wasteServerTime(), expected);
+  assert.equal(call, 'costtrack_waste_server_time');
+  assert.equal(timers.size, 0);
+});
+
+test('waste save uses the RPC result including the database timestamp', async () => {
+  let rpcName;
+  let rpcArgs;
+  const savedAt = '2026-11-17T22:18:00.123Z';
+  const { record } = loadSupabaseRecord((name, args) => {
+    rpcName = name;
+    rpcArgs = args;
+    return {
+      abortSignal() {
+        return Promise.resolve({
+          data: {
+            id: 'WASTE-1',
+            ingredient_id: 'ING-1',
+            quantity: 0.5,
+            reason: 'Expired',
+            waste_date: '2026-11-18',
+            recorded_at: savedAt,
+            production_log_id: null,
+            notes: ''
+          },
+          error: null
+        });
+      }
+    };
+  });
+
+  const saved = await record.upsert('wasteLogs', {
+    id: 'WASTE-1',
+    ingredientId: 'ING-1',
+    quantity: 0.5,
+    reason: 'Expired',
+    recordedAt: '1900-01-01T00:00:00.000Z',
+    notes: ''
+  });
+
+  assert.equal(rpcName, 'costtrack_log_waste');
+  assert.equal(Object.hasOwn(rpcArgs.payload, 'recorded_at'), false);
+  assert.equal(Object.hasOwn(rpcArgs.payload, 'waste_date'), false);
+  assert.equal(saved.recordedAt, savedAt);
+  assert.equal(saved.date, '2026-11-18');
+});
+
 test('posSaveBill aborts and rejects a pending RPC after 15 seconds', async () => {
   let signal;
   const { record, timers } = loadSupabaseRecord(() => ({
@@ -124,6 +183,110 @@ test('posSaveBill returns a successful RPC response without waiting for its time
 
   assert.equal(await record.posSaveBill({}), expected);
   assert.equal(timers.size, 0);
+});
+
+test('recipe mapping preserves active state and saves without legacy menu price', async () => {
+  const savedRow = {
+    id: 'REC-1',
+    name: 'Test Stew',
+    category: 'Main Course',
+    wastage: 5,
+    batch_yield: 4,
+    prep_target: 12,
+    prep_notes: '',
+    is_active: false,
+    updated_at: '2026-11-18T00:00:00Z',
+    ingredients: [{ ingredient_id: 'ING-1', quantity: 2 }]
+  };
+  let rpcCall;
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    rpcCall = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: savedRow, error: null });
+      }
+    };
+  });
+
+  const saved = await record.upsert('recipes', {
+    id: 'REC-1',
+    name: 'Test Stew',
+    category: 'Main Course',
+    wastage: 5,
+    batchYield: 4,
+    prepTarget: 12,
+    prepNotes: '',
+    isActive: false,
+    ingredients: [{ ingredientId: 'ING-1', quantity: 2 }]
+  });
+
+  assert.equal(rpcCall.name, 'save_recipe');
+  assert.equal(Object.hasOwn(rpcCall.args.payload, 'menu_price'), false);
+  assert.equal(rpcCall.args.payload.is_active, false);
+  assert.equal(JSON.stringify(rpcCall.args.payload.ingredients), JSON.stringify([{ ingredient_id: 'ING-1', quantity: 2 }]));
+  assert.equal(saved.isActive, false);
+  assert.equal(Object.hasOwn(saved, 'price'), false);
+  assert.equal(JSON.stringify(saved.ingredients), JSON.stringify([{ ingredientId: 'ING-1', quantity: 2 }]));
+  assert.equal(timers.size, 0);
+});
+
+test('product lifecycle RPC uses the guarded timeout and product mapping retains inactive state', async () => {
+  let call;
+  const inspection = {
+    action: 'inspect',
+    product_id: 'ING-7',
+    is_active: false,
+    is_used: true,
+    usage: { physical_counts: 2 },
+    active_recipes: []
+  };
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: inspection, error: null });
+      }
+    };
+  });
+
+  const product = record.mapRecord('ingredients', {
+    id: 'ING-7',
+    name: 'Archived product',
+    category: 'Dry Goods',
+    unit: 'kg',
+    cost: '5.25',
+    stock: '0',
+    minimum: '1',
+    is_active: false,
+    updated_at: '2026-11-18T00:00:00Z'
+  });
+  assert.equal(product.isActive, false);
+
+  assert.equal(await record.productLifecycle('inspect', 'ING-7'), inspection);
+  assert.equal(call.name, 'costtrack_product_lifecycle');
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args)), {
+    action_value: 'inspect',
+    product_id_value: 'ING-7',
+    reason_value: null
+  });
+  assert.equal(timers.size, 0);
+});
+
+test('production log mapping retains its immutable cost snapshot', () => {
+  const { record } = loadSupabaseRecord(() => ({}));
+  const mapped = record.mapRecord('productionLogs', {
+    id: 'PROD-1',
+    recipe_id: 'REC-1',
+    quantity: 1,
+    covers_produced: 18,
+    batch_cost_snapshot: '328.5000',
+    cost_snapshot_at: '2026-11-18T02:30:00Z',
+    production_date: '2026-11-18',
+    mode: 'Buffet batch #1'
+  });
+
+  assert.equal(mapped.batchCostSnapshot, 328.5);
+  assert.equal(mapped.costSnapshotAt, '2026-11-18T02:30:00Z');
 });
 
 test('posCloseBill sends the bill, tender, and idempotency key and clears its timeout', async () => {
@@ -360,4 +523,62 @@ test('posSeatAndOpenWalkIn aborts after the 15-second timeout', async () => {
   await assert.rejects(pending, /Walk-in seat-and-bill request timed out after 15 seconds\..*same form.*idempotency key/);
   assert.equal(signal.aborted, true);
   assert.equal(timers.size, 0);
+});
+
+test('notification read-state adapters validate and use the shared RPCs', async () => {
+  const calls = [];
+  const { record, timers } = loadSupabaseRecord((name, args) => {
+    calls.push({ name, args });
+    return {
+      abortSignal() {
+        return Promise.resolve({
+          data: name === 'costtrack_notification_read_keys' ? ['stock:flour'] : 2,
+          error: null
+        });
+      }
+    };
+  });
+
+  assert.deepEqual(await record.notificationReadKeys(), ['stock:flour']);
+  assert.equal(await record.markNotificationsRead(['stock:flour', 'reservation:r1']), 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { name: 'costtrack_notification_read_keys' },
+    {
+      name: 'costtrack_mark_notifications_read',
+      args: { p_notification_keys: ['stock:flour', 'reservation:r1'] }
+    }
+  ]);
+  assert.equal(timers.size, 0);
+  await assert.rejects(record.markNotificationsRead([1]), /array of strings/);
+});
+
+test('notification and expiry batch records map the fields used by the bell', () => {
+  const { record } = loadSupabaseRecord(() => ({}));
+  const notification = record.mapRecord('notifications', {
+    id: 'NOTICE-1',
+    type: 'low_stock',
+    severity: 'warning',
+    message: 'Flour is low',
+    target_roles: ['Administrator', 'Inventory Clerk'],
+    reference_type: 'ingredient',
+    reference_id: 'ING-1',
+    is_resolved: false,
+    dedupe_key: 'stock:ING-1',
+    created_at: '2026-11-18T02:30:00Z'
+  });
+  const batch = record.mapRecord('inventoryBatches', {
+    id: 'BATCH-1',
+    product_id: 'ING-1',
+    quantity_remaining: '3',
+    expiration_date: '2026-11-20',
+    received_date: '2026-11-10',
+    status: 'Active',
+    created_at: '2026-11-10T02:30:00Z'
+  });
+
+  assert.equal(notification.dedupeKey, 'stock:ING-1');
+  assert.deepEqual(notification.targetRoles, ['Administrator', 'Inventory Clerk']);
+  assert.equal(notification.createdAt, '2026-11-18T02:30:00Z');
+  assert.equal(batch.quantityRemaining, 3);
+  assert.equal(batch.expirationDate, '2026-11-20');
 });

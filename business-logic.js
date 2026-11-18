@@ -44,6 +44,18 @@
     { id: 'CAS-4-B1', seats: 4, tableType: 'Casual', area: 'Back' },
     { id: 'CAS-2-F1', seats: 2, tableType: 'Casual', area: 'Front' }
   ];
+  const RESERVATION_CALENDAR_STATUS = Object.freeze({
+    Pending: Object.freeze({ eventClass: 'pending', color: '#fff0cc', contrastColor: '#5c3b00' }),
+    Confirmed: Object.freeze({ eventClass: 'confirmed', color: '#e4f4f1', contrastColor: '#12594f' }),
+    Seated: Object.freeze({ eventClass: 'seated', color: '#e3f2df', contrastColor: '#285a2b' }),
+    'Checked-in': Object.freeze({ eventClass: 'checked-in', color: '#e3f2df', contrastColor: '#285a2b' }),
+    Completed: Object.freeze({ eventClass: 'completed', color: '#eeeeee', contrastColor: '#414141' }),
+    Cancelled: Object.freeze({ eventClass: 'cancelled', color: '#fae9e7', contrastColor: '#7c2822' }),
+    'No-show': Object.freeze({ eventClass: 'no-show', color: '#fae9e7', contrastColor: '#7c2822' })
+  });
+  const PAST_UNRESOLVED_RESERVATION_STATUSES = new Set([
+    'Pending', 'Confirmed', 'Seated', 'Checked-in'
+  ]);
 
   function number(value, label) {
     const parsed = Number(value);
@@ -104,6 +116,103 @@
       status: daysUntilExpiry <= days ? 'Expiring soon' : 'Active',
       daysUntilExpiry
     };
+  }
+
+  const notificationRoleAccess = {
+    stock: ['Administrator', 'Manager', 'Inventory Clerk'],
+    expiry: ['Administrator', 'Manager', 'Inventory Clerk'],
+    reservation: ['Administrator', 'Manager', 'Receptionist'],
+    unresolved: ['Administrator', 'Manager', 'Receptionist'],
+    pos: ['Administrator', 'Manager']
+  };
+  const notificationViewAccess = {
+    ingredients: ['Administrator', 'Manager', 'Inventory Clerk'],
+    receiving: ['Administrator', 'Manager', 'Inventory Clerk'],
+    reservations: ['Administrator', 'Manager', 'Receptionist'],
+    shifts: ['Administrator', 'Manager', 'Receptionist'],
+    cashier: ['Administrator', 'Manager', 'Receptionist'],
+    approvals: ['Administrator', 'Manager'],
+    reports: ['Administrator', 'Manager'],
+    revenue: ['Administrator', 'Manager']
+  };
+
+  function notificationVisibleToRole(item, role) {
+    if (!item || !role) return false;
+    const category = item.category || item.kind;
+    const allowedRoles = notificationRoleAccess[category];
+    if (allowedRoles && !allowedRoles.includes(role)) return false;
+    if (Array.isArray(item.targetRoles) && !item.targetRoles.includes(role)) return false;
+    if (item.type === 'Missing revenue entry' && !['Administrator', 'Manager'].includes(role)) return false;
+    return true;
+  }
+
+  function notificationActionForRole(item, role) {
+    if (!notificationVisibleToRole(item, role) || !item?.action) return null;
+    const allowedRoles = notificationViewAccess[item.action.view];
+    return allowedRoles?.includes(role) ? item.action : null;
+  }
+
+  function buildNotificationFeed(items, role, readKeys = []) {
+    const readKeySet = new Set(readKeys);
+    const deduplicated = new Map();
+    for (const item of items || []) {
+      if (!notificationVisibleToRole(item, role)) continue;
+      const key = String(item.key || item.id || '');
+      if (!key) continue;
+      const dedupeKey = String(item.dedupeKey || key);
+      const candidate = {
+        ...item,
+        key: dedupeKey,
+        dedupeKey,
+        isRead: Boolean(item.isRead || readKeySet.has(key) || readKeySet.has(dedupeKey))
+      };
+      const previous = deduplicated.get(dedupeKey);
+      if (!previous) {
+        deduplicated.set(dedupeKey, candidate);
+        continue;
+      }
+      const severityRank = { critical: 3, warning: 2, info: 1 };
+      const chosen = (severityRank[candidate.severity] || 0) > (severityRank[previous.severity] || 0)
+        ? candidate
+        : previous;
+      deduplicated.set(dedupeKey, {
+        ...chosen,
+        isRead: previous.isRead && candidate.isRead,
+        createdAt: [previous.createdAt, candidate.createdAt]
+          .filter(Boolean)
+          .sort()
+          .pop() || null
+      });
+    }
+    return [...deduplicated.values()].sort((left, right) => {
+      if (left.isRead !== right.isRead) return left.isRead ? 1 : -1;
+      const severityRank = { critical: 3, warning: 2, info: 1 };
+      const severityOrder = (severityRank[right.severity] || 0) - (severityRank[left.severity] || 0);
+      if (severityOrder) return severityOrder;
+      return String(right.createdAt || '').localeCompare(String(left.createdAt || ''));
+    });
+  }
+
+  function notificationUnreadCount(items) {
+    return (items || []).filter(item => !item.isRead).length;
+  }
+
+  function formatNotificationRelativeTime(value, now = Date.now()) {
+    const timestamp = new Date(value).getTime();
+    if (!Number.isFinite(timestamp)) return 'Just now';
+    const seconds = Math.round((timestamp - now) / 1000);
+    if (Math.abs(seconds) < 60) return 'Just now';
+    const units = [
+      ['year', 31536000],
+      ['month', 2592000],
+      ['week', 604800],
+      ['day', 86400],
+      ['hour', 3600],
+      ['minute', 60]
+    ];
+    const [unit, unitSeconds] = units.find(([, size]) => Math.abs(seconds) >= size);
+    return new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+      .format(Math.round(seconds / unitSeconds), unit);
   }
 
   function availableStock(batches, asOfDate) {
@@ -289,17 +398,121 @@
     };
   }
 
-  function computedRecipeCost(recipe, ingredients) {
+  function recipeCostBreakdown(recipe, ingredients) {
+    if (!recipe || !Array.isArray(recipe.ingredients)) {
+      throw new TypeError('Recipe ingredients must be an array.');
+    }
     const ingredientById = new Map(ingredients.map(item => [item.id, item]));
-    const wastage = Number(recipe.wastage || 0);
+    const wastage = Number(recipe.wastage ?? 0);
     if (!Number.isFinite(wastage) || wastage < 0) throw new RangeError('Recipe wastage must be a non-negative number.');
-    const baseCost = recipe.ingredients.reduce((sum, line) => {
+    const batchYield = Number(recipe.batchYield ?? recipe.batch_yield ?? 30);
+    if (!Number.isInteger(batchYield) || batchYield <= 0) {
+      throw new RangeError('Portions per base recipe must be a positive whole number.');
+    }
+    const ingredientsCost = recipe.ingredients.map(line => {
       const item = ingredientById.get(line.ingredientId);
       const quantity = Number(line.quantity);
-      if (!item || !Number.isFinite(quantity) || quantity <= 0) throw new RangeError('Recipe ingredients must reference valid inventory with positive quantities.');
-      return sum + Number(item.cost) * quantity;
-    }, 0);
-    return baseCost * (1 + wastage / 100);
+      const unitCost = Number(item?.cost);
+      if (!item || !Number.isFinite(quantity) || quantity <= 0
+        || !Number.isFinite(unitCost) || unitCost < 0) {
+        throw new RangeError('Recipe ingredients must reference valid inventory with positive quantities and costs.');
+      }
+      return {
+        ingredientId: item.id,
+        name: item.name || 'Ingredient',
+        quantity,
+        unit: item.unit || '',
+        unitCost,
+        baseCost: quantity * unitCost
+      };
+    });
+    const baseCost = ingredientsCost.reduce((sum, line) => sum + line.baseCost, 0);
+    const wastageFactor = 1 + wastage / 100;
+    const totalBatchCost = baseCost * wastageFactor;
+    return {
+      batchYield,
+      totalBatchCost,
+      costPerPortion: totalBatchCost / batchYield,
+      ingredients: ingredientsCost.map(line => ({
+        ...line,
+        lineCost: line.baseCost * wastageFactor,
+        costPercent: baseCost ? line.baseCost / baseCost * 100 : 0
+      }))
+    };
+  }
+
+  function computedRecipeCost(recipe, ingredients) {
+    return recipeCostBreakdown(recipe, ingredients).totalBatchCost;
+  }
+
+  function productionLogCost(log, recipe, ingredients) {
+    const snapshot = log?.batchCostSnapshot ?? log?.batch_cost_snapshot;
+    if (snapshot != null) {
+      const savedCost = Number(snapshot);
+      if (!Number.isFinite(savedCost) || savedCost < 0) {
+        throw new RangeError('Production cost snapshot must be a non-negative number.');
+      }
+      return savedCost;
+    }
+    const quantity = Number(log?.quantity ?? 0);
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      throw new RangeError('Production quantity must be a non-negative number.');
+    }
+    return computedRecipeCost(recipe, ingredients) * quantity;
+  }
+
+  function recipeStockAvailability(recipe, ingredients) {
+    if (!recipe || !Array.isArray(recipe.ingredients) || !recipe.ingredients.length) return null;
+    const ingredientById = new Map(ingredients.map(item => [item.id, item]));
+    let batches = Infinity;
+    let limitingIngredientId = null;
+    for (const line of recipe.ingredients) {
+      const item = ingredientById.get(line.ingredientId);
+      const quantity = Number(line.quantity);
+      if (!item || !Number.isFinite(quantity) || quantity <= 0) return null;
+      const available = Math.floor(Math.max(0, Number(item.stock || 0)) / quantity);
+      if (available < batches) {
+        batches = available;
+        limitingIngredientId = item.id;
+      }
+    }
+    return { batches, limitingIngredientId };
+  }
+
+  function recipeSanityWarnings(recipe, ingredients, adultRate) {
+    const breakdown = recipeCostBreakdown(recipe, ingredients);
+    const warnings = [];
+    for (const line of breakdown.ingredients) {
+      const unit = line.unit.trim().toLowerCase();
+      const quantityLimit = ['kg', 'kilogram', 'kilograms', 'l', 'liter', 'liters', 'litre', 'litres'].includes(unit)
+        ? 100
+        : ['g', 'gram', 'grams', 'ml', 'milliliter', 'milliliters', 'millilitre', 'millilitres'].includes(unit)
+          ? 100000
+          : 10000;
+      if (line.quantity > quantityLimit) {
+        warnings.push(`${line.name}: ${line.quantity} ${line.unit} per base recipe seems unusually high; verify the unit.`);
+      }
+      if (line.unitCost > 10000 || line.lineCost > 100000) {
+        warnings.push(`${line.name}: ingredient cost seems unusually high; verify the unit cost and quantity.`);
+      }
+    }
+    const adultRateValue = Number(adultRate);
+    if (Number.isFinite(adultRateValue) && adultRateValue > 0
+      && breakdown.costPerPortion > adultRateValue) {
+      warnings.push('Cost per portion exceeds the adult buffet rate; verify ingredient quantities and costs.');
+    }
+    return warnings;
+  }
+
+  function recipeFoodCostPercent(costPerPortion, adultRate) {
+    const cost = Number(costPerPortion);
+    const rate = Number(adultRate);
+    if (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(rate) || rate <= 0) return null;
+    return cost / rate * 100;
+  }
+
+  function isRecipeActive(recipe) {
+    return recipe?.isActive !== false && recipe?.is_active !== false;
   }
 
   function reservationRevenue(reservation, rates = {}) {
@@ -329,6 +542,22 @@
       return null;
     }
     return adults * adultRate + seniorPwdCount * seniorPwdRate + children * childRate;
+  }
+
+  function closedBillRevenueTotals(rows) {
+    if (!Array.isArray(rows)) throw new TypeError('Closed-bill report rows must be an array.');
+    const sum = key => rows.reduce((total, row) => {
+      const value = Number(row?.[key]);
+      return total + (Number.isFinite(value) ? value : 0);
+    }, 0);
+    return {
+      closedBillCount: sum('closed_bill_count'),
+      netRevenue: sum('net_revenue'),
+      discountTotal: sum('discount_total'),
+      customersServed: sum('customers_served'),
+      voidedBillCount: sum('voided_bill_count'),
+      voidedBillAmount: sum('voided_bill_amount')
+    };
   }
 
   function normalizeReservationGuestCounts(adults, seniorPwdCount, children) {
@@ -594,17 +823,77 @@
     };
   }
 
+  function modalInteraction(type, interaction) {
+    if (interaction === 'backdrop') return ['read-only', 'popover', 'menu'].includes(type) ? 'close' : 'ignore';
+    if (interaction !== 'escape') return 'ignore';
+    if (type === 'confirmation') return 'cancel';
+    if (['read-only', 'popover', 'menu'].includes(type)) return 'close';
+    if (['form', 'money'].includes(type)) return 'request-close';
+    return 'ignore';
+  }
+
+  function reservationCalendarStatusPresentation(status) {
+    return RESERVATION_CALENDAR_STATUS[status] || RESERVATION_CALENDAR_STATUS.Pending;
+  }
+
+  function reservationCalendarStatusLegend() {
+    return Object.entries(RESERVATION_CALENDAR_STATUS).map(([status, presentation]) => ({
+      status,
+      ...presentation
+    }));
+  }
+
+  function isPastUnresolvedReservation(status, reservationDate, currentDate) {
+    return reservationDate < currentDate && PAST_UNRESOLVED_RESERVATION_STATUSES.has(status);
+  }
+
+  function formatManilaTimestamp(value) {
+    const timestamp = new Date(value);
+    if (Number.isNaN(timestamp.getTime())) throw new Error('The server returned an invalid timestamp.');
+    const date = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Manila', day: '2-digit', month: '2-digit', year: 'numeric'
+    }).format(timestamp);
+    const time = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true
+    }).format(timestamp);
+    return `${date}, ${time}`;
+  }
+
+  async function saveThenRefresh(saveOperation, refreshOperation, onRefreshError) {
+    const saved = await saveOperation();
+    const refresh = Promise.resolve()
+      .then(refreshOperation)
+      .catch(error => {
+        onRefreshError(error);
+      });
+    return { saved, refresh };
+  }
+
   const logic = {
     assertInventoryRole,
     availableStock,
     batchStatus,
     buildReservationRecord,
     canPerformInventoryAction,
+    closedBillRevenueTotals,
+    formatManilaTimestamp,
+    isPastUnresolvedReservation,
+    buildNotificationFeed,
+    formatNotificationRelativeTime,
+    modalInteraction,
+    notificationActionForRole,
+    notificationUnreadCount,
+    notificationVisibleToRole,
+    reservationCalendarStatusLegend,
+    reservationCalendarStatusPresentation,
+    recipeCostBreakdown,
     activeBuffetRate,
     convertQuantity,
     createRevenueRecord,
     createStockMovement,
     computedRecipeCost,
+    productionLogCost,
+    isRecipeActive,
     orderBatches,
     formatReservationTime,
     isReservationTimeWithinOpenHours,
@@ -617,6 +906,10 @@
     normalizeReservationGuestCounts,
     reservationEndTime,
     reservationStayLimitReached,
+    recipeFoodCostPercent,
+    recipeSanityWarnings,
+    recipeStockAvailability,
+    saveThenRefresh,
     reservationTimeSlots,
     reservationTimeOverlaps,
     stockHealth,

@@ -63,7 +63,7 @@ Examples:
 ```text
 GET    /rest/v1/reservations
 PATCH  /rest/v1/restaurant_tables
-DELETE /rest/v1/waste_logs
+GET    /rest/v1/waste_logs
 ```
 
 Endpoint inventory and purpose:
@@ -74,18 +74,32 @@ Endpoint inventory and purpose:
 | `/rest/v1/product_categories` | GET | Load active product categories for product forms |
 | `/rest/v1/units` | GET | Load active measurement units |
 | `/rest/v1/suppliers` | GET | Load active suppliers |
-| `/rest/v1/ingredients` | GET, POST, PATCH, DELETE | Read and manage ingredient/product records |
+| `/rest/v1/ingredients` | GET | Read active and inactive product records; application writes use guarded RPCs |
 | `/rest/v1/recipes` | GET, POST, PATCH, DELETE | Read and manage recipe records when direct table access is used |
 | `/rest/v1/inventory_transactions` | GET, POST, PATCH, DELETE | Read and manage inventory movements |
 | `/rest/v1/production_logs` | GET, POST, PATCH, DELETE | Read and manage production records |
 | `/rest/v1/revenue_records` | GET | Read historical revenue archive (read-only for application roles) |
-| `/rest/v1/waste_logs` | GET, POST, PATCH, DELETE | Read and manage waste records |
+| `/rest/v1/waste_logs` | GET, validated POST | Read waste records; inserts are append-only and database-validated |
 | `/rest/v1/physical_counts` | GET, POST, PATCH, DELETE | Read and manage physical stock counts |
 | `/rest/v1/reservations` | GET, POST, PATCH, DELETE | Read and manage reservations |
 | `/rest/v1/restaurant_tables` | GET, POST, PATCH, DELETE | Read and manage restaurant tables |
 | `/rest/v1/buffet_rates` | GET, POST, PATCH, DELETE | Read and manage buffet rates |
 
 Some sensitive product, recipe, waste, receiving, and production operations use RPC instead of direct table writes so the database can validate the complete transaction. The actual filters, selected columns, and version checks are defined in `supabase-config.js`.
+
+Product lifecycle writes are performed through `costtrack_product_lifecycle(action_value, product_id_value, reason_value)`, not direct table DML. It is Administrator-only and supports `inspect`, `delete`, `deactivate`, and `reactivate`. Hard deletion is refused for any recorded reference; deactivation requires a reason and is refused while an active recipe uses the product. Every lifecycle change is audited with product and actor identity snapshots. Inactive products remain readable for history and reports but cannot be used in new receiving, recipe, waste, or count entries. Migration 023 adds the audit/RPC/guards without changing the existing Phase 8 `ingredients.is_active` column; migration 024 orders the waste inactive-product guard before stock deduction.
+
+Form save requests use a 15-second client timeout. Once a write succeeds, the UI applies the returned/saved record locally and refreshes the collection separately. A failed refresh is reported as “Saved, but the list could not refresh” with a retry action; it does not change the database write result. A timed-out request is not proof that the server rolled back, so check the list before repeating a non-idempotent operation.
+
+Kitchen waste uses `costtrack_waste_server_time()` for the read-only Manila-local display and `costtrack_log_waste(payload)` for writes. The database ignores client-supplied dates/timestamps and sets the record time and `waste_date` from its current Asia/Manila time. Both the RPC and insert trigger require a supported reason; `Other` requires a non-blank note. The insert trigger remains append-only and deducts stock exactly once. Same-ID retries of the RPC return the original row, while reports continue grouping by `waste_date` and reason and calculating cost from the current ingredient cost. Migration 021 aligns direct-insert access with the RPC/UI roles (Administrator, Manager, Chef / Kitchen Staff); Inventory Clerk retains waste-report read access.
+
+### Buffet recipe costing (migration 022)
+
+Recipes are production formulas, not individually sold items. `costtrack_load_recipes()` returns active state and production fields without exposing legacy `menu_price`; `save_recipe(payload, expected_updated_at)` preserves the stored legacy price without accepting or using a new one. `batch_yield` is the portions per base recipe and remains the stock-scaling basis; `prep_target` remains the separate daily target. Only Administrators and Managers may manage recipes or read recipe costs. Inactive recipes remain readable but the database rejects starting new production batches with them.
+
+The production-log insert trigger records `batch_cost_snapshot` and `cost_snapshot_at` atomically with the stock movement. The snapshot is the total cost of the completed production quantity, including the recipe wastage allowance. It is not updated when recipes or ingredient costs later change. Existing production logs are not backfilled and continue to use current-cost estimates in reports. `pos_revenue_report(food_cost)` and `report_analytics(production)` prefer snapshots where present.
+
+Apply `supabase/022_buffet_recipe_cost_snapshots.sql` after 021, then run `supabase/022_buffet_recipe_cost_snapshots_acceptance.sql`. The rollback restores the pre-022 RPC behavior but deliberately retains the additive active-state and snapshot columns so rollback does not discard data.
 
 ## RPC endpoints
 
@@ -103,8 +117,10 @@ RPC functions used by the application:
 | --- | --- |
 | `costtrack_load_products` | Load products with database-controlled product data |
 | `costtrack_load_recipes` | Load recipes |
+| `costtrack_waste_server_time` | Return the database timestamp used for the waste form display |
 | `costtrack_log_waste` | Record waste and apply its stock movement |
 | `costtrack_save_product` | Create or update a product with validation |
+| `costtrack_product_lifecycle` | Administrator-only product usage inspection, hard delete, deactivation, and reactivation |
 | `save_recipe` | Create or update a recipe |
 | `public_create_reservation` | Create a public reservation |
 | `public_get_reservation_status` | Retrieve public reservation status |
@@ -127,8 +143,10 @@ Full RPC endpoint inventory:
 | --- | --- |
 | `/rest/v1/rpc/costtrack_load_products` | Load products using database-controlled fields |
 | `/rest/v1/rpc/costtrack_load_recipes` | Load recipes using database-controlled fields |
+| `/rest/v1/rpc/costtrack_waste_server_time` | Return the current database timestamp for the waste form |
 | `/rest/v1/rpc/costtrack_log_waste` | Record waste and apply its stock deduction |
 | `/rest/v1/rpc/costtrack_save_product` | Validate and save a product |
+| `/rest/v1/rpc/costtrack_product_lifecycle` | Inspect or change product lifecycle with database authorization and audit |
 | `/rest/v1/rpc/save_recipe` | Validate and save a recipe and its ingredients |
 | `/rest/v1/rpc/public_create_reservation` | Create a reservation from the public booking page |
 | `/rest/v1/rpc/public_get_reservation_status` | Return public status for a reservation |
@@ -323,6 +341,17 @@ Simple table reads are suitable for REST. More sensitive workflows use RPC so th
 - Generating analytics results.
 
 This helps prevent incomplete transactions and makes database rules apply even if a user bypasses the interface.
+
+### Shared notification read state
+
+The header notification panel merges role-visible operational alerts with the existing POS notifications. The client calls:
+
+```js
+await window.supabaseRecord.notificationReadKeys();
+await window.supabaseRecord.markNotificationsRead(['stock:ING-1']);
+```
+
+These adapters call `costtrack_notification_read_keys()` and `costtrack_mark_notifications_read(text[])`. PostgreSQL scopes read-state rows to the caller's application role, and only Managers/Administrators may mark POS notification keys. Realtime publishes role-authorized read-state changes so other sessions can refresh their unread badge. Migration and acceptance instructions are in `SUPABASE-SETUP.md`.
 
 ### What is an endpoint?
 

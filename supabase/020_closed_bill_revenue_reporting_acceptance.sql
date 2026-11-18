@@ -2,6 +2,7 @@
 -- Run as the database owner after migration 020; all fixtures are rolled back.
 
 begin;
+set transaction isolation level repeatable read;
 
 do $$
 declare
@@ -26,6 +27,12 @@ declare
   bill_summary_value jsonb;
   food_cost_value jsonb;
   row_value jsonb;
+  dashboard_before jsonb;
+  daily_before jsonb;
+  trend_before jsonb;
+  customers_before jsonb;
+  food_cost_before jsonb;
+  bill_summary_before jsonb;
   receptionist_denied boolean := false;
 begin
   if to_regclass('public.pos_closed_bill_revenue_v') is null
@@ -72,6 +79,27 @@ begin
   if manager_id is null or receptionist_id is null then
     raise exception 'Acceptance requires Manager/Administrator and Receptionist profiles.';
   end if;
+
+  perform set_config('request.jwt.claim.sub', manager_id::text, true);
+  perform set_config('request.jwt.claim.role', 'authenticated', true);
+
+  dashboard_before := public.pos_revenue_report('dashboard');
+  daily_before := public.pos_revenue_report(
+    'daily_revenue', business_date_value, business_date_value
+  );
+  trend_before := public.pos_revenue_report(
+    'revenue_trend', business_date_value, business_date_value + 1, 'day'
+  );
+  customers_before := public.pos_revenue_report(
+    'customer_count', business_date_value, business_date_value, 'day'
+  );
+  food_cost_before := public.pos_revenue_report(
+    'food_cost', business_date_value, business_date_value
+  );
+  bill_summary_before := public.pos_revenue_report(
+    'closed_bill_summary', business_date_value, business_date_value,
+    'day', true, 1, 500
+  );
 
   insert into public.pos_shifts (
     id, shift_code, opened_by, status, opened_at, closed_at
@@ -152,36 +180,51 @@ begin
     99, 999, 'Confirmed', manager_id::text
   );
 
-  perform set_config('request.jwt.claim.sub', manager_id::text, true);
-  perform set_config('request.jwt.claim.role', 'authenticated', true);
-
   dashboard_value := public.pos_revenue_report('dashboard');
   dashboard_retry_value := public.pos_revenue_report('dashboard');
-  if (dashboard_value->>'today_revenue')::numeric <> 1150
-    or (dashboard_value->>'closed_bill_count')::integer <> 2
-    or (dashboard_value->>'customers_served')::integer <> 9
-    or (dashboard_value->>'adult_count')::integer <> 3
-    or (dashboard_value->>'senior_count')::integer <> 1
-    or (dashboard_value->>'kids_count')::integer <> 4
-    or (dashboard_value->>'comped_count')::integer <> 1
-    or (dashboard_value->>'average_check')::numeric <> 575
-    or (dashboard_value->>'discount_total')::numeric <> 100
-    or (dashboard_value->>'voided_bill_count')::integer <> 2
-    or (dashboard_value->>'voided_bill_amount')::numeric <> 450
+  if (dashboard_value->>'today_revenue')::numeric
+      <> (dashboard_before->>'today_revenue')::numeric + 1150
+    or (dashboard_value->>'closed_bill_count')::integer
+      <> (dashboard_before->>'closed_bill_count')::integer + 2
+    or (dashboard_value->>'customers_served')::integer
+      <> (dashboard_before->>'customers_served')::integer + 9
+    or (dashboard_value->>'adult_count')::integer
+      <> (dashboard_before->>'adult_count')::integer + 3
+    or (dashboard_value->>'senior_count')::integer
+      <> (dashboard_before->>'senior_count')::integer + 1
+    or (dashboard_value->>'kids_count')::integer
+      <> (dashboard_before->>'kids_count')::integer + 4
+    or (dashboard_value->>'comped_count')::integer
+      <> (dashboard_before->>'comped_count')::integer + 1
+    or (dashboard_value->>'average_check')::numeric
+      <> round((
+        (dashboard_before->>'today_revenue')::numeric + 1150
+      ) / ((dashboard_before->>'closed_bill_count')::integer + 2), 2)
+    or (dashboard_value->>'discount_total')::numeric
+      <> (dashboard_before->>'discount_total')::numeric + 100
+    or (dashboard_value->>'voided_bill_count')::integer
+      <> (dashboard_before->>'voided_bill_count')::integer + 2
+    or (dashboard_value->>'voided_bill_amount')::numeric
+      <> (dashboard_before->>'voided_bill_amount')::numeric + 450
     or dashboard_retry_value is distinct from dashboard_value then
-    raise exception 'FAIL: dashboard revenue/count/void metrics or repeat-read count is incorrect: %',
-      dashboard_value;
+    raise exception 'FAIL: dashboard fixture deltas or repeat-read count are incorrect. Before: %, after: %',
+      dashboard_before, dashboard_value;
   end if;
 
   daily_value := public.pos_revenue_report(
     'daily_revenue', business_date_value, business_date_value
   );
   row_value := daily_value->'rows'->0;
-  if (row_value->>'closed_bill_count')::integer <> 2
-    or (row_value->>'net_revenue')::numeric <> 1150
-    or (row_value->>'discount_total')::numeric <> 100
-    or (row_value->>'voided_bill_count')::integer <> 2
-    or (row_value->>'voided_bill_amount')::numeric <> 450 then
+  if (row_value->>'closed_bill_count')::integer
+      <> ((daily_before->'rows'->0->>'closed_bill_count')::integer + 2)
+    or (row_value->>'net_revenue')::numeric
+      <> ((daily_before->'rows'->0->>'net_revenue')::numeric + 1150)
+    or (row_value->>'discount_total')::numeric
+      <> ((daily_before->'rows'->0->>'discount_total')::numeric + 100)
+    or (row_value->>'voided_bill_count')::integer
+      <> ((daily_before->'rows'->0->>'voided_bill_count')::integer + 2)
+    or (row_value->>'voided_bill_amount')::numeric
+      <> ((daily_before->'rows'->0->>'voided_bill_amount')::numeric + 450) then
     raise exception 'FAIL: daily report includes ineligible bills or misses void statistics: %',
       daily_value;
   end if;
@@ -193,22 +236,29 @@ begin
     'customer_count', business_date_value, business_date_value, 'day'
   );
   row_value := customers_value->'rows'->0;
-  if (row_value->>'adult_count')::integer <> 3
-    or (row_value->>'senior_count')::integer <> 1
-    or (row_value->>'kids_count')::integer <> 4
-    or (row_value->>'customers_served')::integer <> 9 then
+  if (row_value->>'adult_count')::integer
+      <> ((customers_before->'rows'->0->>'adult_count')::integer + 3)
+    or (row_value->>'senior_count')::integer
+      <> ((customers_before->'rows'->0->>'senior_count')::integer + 1)
+    or (row_value->>'kids_count')::integer
+      <> ((customers_before->'rows'->0->>'kids_count')::integer + 4)
+    or (row_value->>'customers_served')::integer
+      <> ((customers_before->'rows'->0->>'customers_served')::integer + 9) then
     raise exception 'FAIL: customer report did not use actual bill counts: %',
       customers_value;
   end if;
-  if (trend_value->'rows'->0->>'net_revenue')::numeric <> 1150
-    or (trend_value->'rows'->1->>'net_revenue')::numeric <> 100 then
+  if (trend_value->'rows'->0->>'net_revenue')::numeric
+      <> ((trend_before->'rows'->0->>'net_revenue')::numeric + 1150)
+    or (trend_value->'rows'->1->>'net_revenue')::numeric
+      <> ((trend_before->'rows'->1->>'net_revenue')::numeric + 100) then
     raise exception 'FAIL: close timestamps were not grouped by Manila business date: %',
       trend_value;
   end if;
   food_cost_value := public.pos_revenue_report(
     'food_cost', business_date_value, business_date_value
   );
-  if (food_cost_value->'rows'->0->>'revenue')::numeric <> 1150 then
+  if (food_cost_value->'rows'->0->>'revenue')::numeric
+      <> ((food_cost_before->'rows'->0->>'revenue')::numeric + 1150) then
     raise exception 'FAIL: food-cost denominator includes non-closed or legacy revenue: %',
       food_cost_value;
   end if;
@@ -216,7 +266,13 @@ begin
   shift_value := public.pos_revenue_report(
     'shift_revenue', business_date_value, business_date_value
   );
-  row_value := shift_value->'rows'->0;
+  select rows.row into row_value
+  from jsonb_array_elements(shift_value->'rows') as rows(row)
+  where rows.row->>'shift_id' = shift_id;
+  if row_value is null then
+    raise exception 'FAIL: shift report omitted the acceptance shift: %',
+      shift_value;
+  end if;
   if (row_value->>'net_revenue')::numeric <> 1150
     or (row_value->>'deposit_applied')::numeric <> 300
     or (row_value->>'deposit_receipts')::numeric <> 300 then
@@ -225,15 +281,21 @@ begin
   end if;
 
   bill_summary_value := public.pos_revenue_report(
-    'closed_bill_summary', business_date_value, business_date_value
+    'closed_bill_summary', business_date_value, business_date_value,
+    'day', true, 1, 500
   );
-  if (bill_summary_value->>'total_rows')::integer <> 2
-    or jsonb_array_length(bill_summary_value->'rows') <> 2
+  if (bill_summary_value->>'total_rows')::integer
+      <> ((bill_summary_before->>'total_rows')::integer + 2)
     or exists (
       select 1
       from jsonb_array_elements(bill_summary_value->'rows') as rows(row)
       where row->>'bill_id' in (open_bill_id, voided_closed_bill_id, voided_open_bill_id)
-    ) then
+    )
+    or (
+      select count(*)
+      from jsonb_array_elements(bill_summary_value->'rows') as rows(row)
+      where row->>'bill_id' in (closed_bill_id, second_closed_bill_id)
+    ) <> 2 then
     raise exception 'FAIL: closed-bill summary contains an Open or Voided bill: %',
       bill_summary_value;
   end if;

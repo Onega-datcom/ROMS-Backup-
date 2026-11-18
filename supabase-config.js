@@ -13,6 +13,7 @@ const tableForCollection = {
   ingredients: 'ingredients',
   recipes: 'recipes',
   inventoryTransactions: 'inventory_transactions',
+  inventoryBatches: 'inventory_batches',
   productionLogs: 'production_logs',
   revenueRecords: 'revenue_records',
   wasteLogs: 'waste_logs',
@@ -34,7 +35,8 @@ const tableForCollection = {
   billPayments: 'pos_bill_payments',
   reservationDeposits: 'pos_reservation_deposits',
   billApprovals: 'pos_bill_approvals',
-  posNotifications: 'pos_notifications'
+  posNotifications: 'pos_notifications',
+  notifications: 'notifications'
 };
 
 function rememberVersion(collection, id, updatedAt) {
@@ -59,11 +61,11 @@ function mapDatabaseRecord(collection, row) {
   if (collection === 'recipes') {
     return {
       id: row.id, name: row.name, category: row.category,
-      price: row.menu_price == null ? null : Number(row.menu_price),
       wastage: row.wastage == null ? null : Number(row.wastage),
       batchYield: Number(row.batch_yield || 30),
       prepTarget: Number(row.prep_target || 30),
       prepNotes: row.prep_notes || '',
+      isActive: row.is_active !== false,
       ingredients: (row.recipe_ingredients || row.ingredients || []).map(line => ({
         ingredientId: line.ingredient_id, quantity: Number(line.quantity)
       }))
@@ -79,8 +81,32 @@ function mapDatabaseRecord(collection, row) {
       expirationDate: row.expiration_date || ''
     };
   }
+  if (collection === 'inventoryBatches') {
+    return {
+      id: row.id, productId: row.product_id, batchCode: row.batch_code || '',
+      quantityRemaining: Number(row.quantity_remaining || 0),
+      expirationDate: row.expiration_date || '', receivedDate: row.received_date,
+      status: row.status || 'Active', createdAt: row.created_at || null,
+      updatedAt: row.updated_at || null
+    };
+  }
+  if (collection === 'notifications') {
+    return {
+      id: row.id, type: row.type, severity: row.severity, message: row.message,
+      targetRoles: Array.isArray(row.target_roles) ? row.target_roles : [],
+      referenceType: row.reference_type || '', referenceId: row.reference_id || '',
+      isRead: Boolean(row.is_read), isResolved: Boolean(row.is_resolved),
+      dedupeKey: row.dedupe_key || '', createdAt: row.created_at || null
+    };
+  }
   if (collection === 'productionLogs') {
-    return { id: row.id, recipeId: row.recipe_id, quantity: Number(row.quantity), coversProduced: row.covers_produced == null ? null : Number(row.covers_produced), date: row.production_date, mode: row.mode };
+    return {
+      id: row.id, recipeId: row.recipe_id, quantity: Number(row.quantity),
+      coversProduced: row.covers_produced == null ? null : Number(row.covers_produced),
+      batchCostSnapshot: row.batch_cost_snapshot == null ? null : Number(row.batch_cost_snapshot),
+      costSnapshotAt: row.cost_snapshot_at || null,
+      date: row.production_date, mode: row.mode
+    };
   }
   if (collection === 'wasteLogs') {
     return {
@@ -257,7 +283,8 @@ function mapDatabaseRecord(collection, row) {
   return {
     id: row.id, name: row.name, category: row.category, unit: row.unit,
     cost: row.cost == null ? null : Number(row.cost), stock: Number(row.stock), minimum: Number(row.minimum),
-    preferredSupplier: row.preferred_supplier || '', trackExpiry: Boolean(row.track_expiry), notes: row.notes || ''
+    preferredSupplier: row.preferred_supplier || '', trackExpiry: Boolean(row.track_expiry), notes: row.notes || '',
+    isActive: row.is_active !== false, updatedAt: row.updated_at
   };
 }
 
@@ -270,9 +297,10 @@ function mapApplicationRecord(collection, record) {
   };
   if (collection === 'recipes') return {
     id: record.id, name: record.name, category: record.category,
-    menu_price: record.price, wastage: record.wastage,
+    wastage: record.wastage,
     batch_yield: record.batchYield, prep_target: record.prepTarget,
-    prep_notes: record.prepNotes || '', ingredients: record.ingredients
+    prep_notes: record.prepNotes || '', is_active: record.isActive !== false,
+    ingredients: record.ingredients
   };
   if (collection === 'inventoryTransactions') return {
     id: record.id, ingredient_id: record.ingredientId, quantity: record.quantity,
@@ -283,12 +311,17 @@ function mapApplicationRecord(collection, record) {
     batch_code: record.batchCode || null,
     expiration_date: record.expirationDate ? dateValue(record.expirationDate) : null
   };
+  if (collection === 'inventoryBatches') return {
+    id: record.id, product_id: record.productId, batch_code: record.batchCode || '',
+    quantity_remaining: Number(record.quantityRemaining || 0),
+    expiration_date: record.expirationDate ? dateValue(record.expirationDate) : null,
+    received_date: dateValue(record.receivedDate), status: record.status || 'Active'
+  };
   if (collection === 'productionLogs') return { id: record.id, recipe_id: record.recipeId, quantity: record.quantity, covers_produced: record.coversProduced == null ? null : record.coversProduced, production_date: dateValue(record.date), mode: record.mode };
   if (collection === 'wasteLogs') return {
     id: record.id, ingredient_id: record.ingredientId, quantity: record.quantity,
-    reason: record.reason, waste_date: dateValue(record.date),
-    production_log_id: record.productionLogId || null,
-    recorded_at: record.recordedAt || new Date().toISOString(), notes: record.notes || ''
+    reason: record.reason, production_log_id: record.productionLogId || null,
+    notes: record.notes || ''
   };
   if (collection === 'physicalCounts') return { id: record.id, ingredient_id: record.ingredientId, expected: record.expected, actual: record.actual, count_date: dateValue(record.date) };
   if (collection === 'revenueRecords') return {
@@ -304,6 +337,7 @@ function mapApplicationRecord(collection, record) {
   };
   if (collection === 'reservations') return {
     id: record.id, name: record.name, email: record.email || '', phone: record.phone || '',
+    created_at: record.createdAt || new Date().toISOString(),
     reservation_date: dateValue(record.date), reservation_time: record.time, guests: Number(record.guests || 0),
     adults: record.adults === undefined ? Number(record.guests || 0) : Number(record.adults),
     senior_pwd_count: Number(record.seniorPwdCount || 0), children: Number(record.children || 0),
@@ -400,7 +434,39 @@ function throwIfError(error) {
   if (error) throw new Error(error.message || 'The database operation failed.');
 }
 
+async function withSaveTimeout(requestFactory, label) {
+  const controller = new AbortController();
+  let timeoutId;
+  try {
+    const request = requestFactory(controller.signal);
+    const timeout = new Promise((resolve, reject) => {
+      timeoutId = window.setTimeout(() => {
+        controller.abort();
+        reject(new Error(`${label} timed out after 15 seconds.`));
+      }, POS_BILL_SAVE_TIMEOUT_MS);
+    });
+    return await Promise.race([request, timeout]);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function abortableRequest(request, signal) {
+  return typeof request?.abortSignal === 'function' ? request.abortSignal(signal) : request;
+}
+
 window.supabaseRecord = {
+  async wasteServerTime() {
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('costtrack_waste_server_time'), signal),
+      'Server time request'
+    );
+    throwIfError(error);
+    if (typeof data !== 'string' || Number.isNaN(new Date(data).getTime())) {
+      throw new Error('The database returned an invalid server timestamp.');
+    }
+    return data;
+  },
   async loadProductFormOptions() {
     const client = window.supabaseClient;
     const [categories, units, suppliers] = await Promise.all([
@@ -416,6 +482,57 @@ window.supabaseRecord = {
       units: units.data || [],
       suppliers: (suppliers.data || []).map(item => item.name)
     };
+  },
+  async productLifecycle(action, productId, reason = '') {
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('costtrack_product_lifecycle', {
+        action_value: action,
+        product_id_value: productId,
+        reason_value: reason || null
+      }), signal),
+      'Product lifecycle action'
+    );
+    throwIfError(error);
+    if (!data || typeof data !== 'object') {
+      throw new Error('The database returned an invalid product lifecycle result.');
+    }
+    if (data.action !== action) {
+      throw new Error('The database returned an unexpected product lifecycle action.');
+    }
+    if (data.action === 'delete') recordVersions.delete(`ingredients:${productId}`);
+    else if (data.updated_at) rememberVersion('ingredients', productId, data.updated_at);
+    return data;
+  },
+  async notificationReadKeys() {
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(
+        window.supabaseClient.rpc('costtrack_notification_read_keys'),
+        signal
+      ),
+      'Notification state request'
+    );
+    throwIfError(error);
+    if (!Array.isArray(data) || data.some(key => typeof key !== 'string')) {
+      throw new Error('The database returned invalid notification read state.');
+    }
+    return data;
+  },
+  async markNotificationsRead(notificationKeys) {
+    if (!Array.isArray(notificationKeys) || notificationKeys.some(key => typeof key !== 'string')) {
+      throw new TypeError('Notification keys must be an array of strings.');
+    }
+    if (!notificationKeys.length) return 0;
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('costtrack_mark_notifications_read', {
+        p_notification_keys: notificationKeys
+      }), signal),
+      'Mark notifications read'
+    );
+    throwIfError(error);
+    if (!Number.isInteger(data) || data < 0) {
+      throw new Error('The database returned an invalid notification update count.');
+    }
+    return data;
   },
   async load(collection) {
     const table = tableForCollection[collection];
@@ -475,10 +592,15 @@ window.supabaseRecord = {
     if (!table) throw new Error(`Unknown data collection: ${collection}`);
     const row = mapApplicationRecord(collection, record);
     if (collection === 'wasteLogs') {
-      const { data, error } = await window.supabaseClient.rpc('costtrack_log_waste', { payload: row });
+      const { data, error } = await withSaveTimeout(
+        signal => abortableRequest(window.supabaseClient.rpc('costtrack_log_waste', { payload: row }), signal),
+        'Waste save'
+      );
       throwIfError(error);
       if (data?.updated_at) rememberVersion(collection, record.id, data.updated_at);
-      return;
+      return data?.ingredient_id
+        ? mapDatabaseRecord(collection, data)
+        : { ...record, updatedAt: data?.updated_at || record.updatedAt };
     }
     const dateColumn = {
       inventoryTransactions: 'transaction_date', productionLogs: 'production_date',
@@ -492,40 +614,53 @@ window.supabaseRecord = {
     let result;
     if (collection === 'ingredients') {
       if (version == null && storedVersion) throw new Error('This product changed in another session. Reload the page before saving your change.');
-      const { data, error } = await window.supabaseClient.rpc('costtrack_save_product', {
-        payload: row,
-        expected_updated_at: version || null
-      });
+      const { data, error } = await withSaveTimeout(
+        signal => abortableRequest(window.supabaseClient.rpc('costtrack_save_product', {
+          payload: row,
+          expected_updated_at: version || null
+        }), signal),
+        'Product save'
+      );
       throwIfError(error);
       if (data?.updated_at) rememberVersion(collection, record.id, data.updated_at);
-      return;
+      return data ? mapDatabaseRecord(collection, data) : record;
     }
     if (collection === 'recipes') {
       if (version == null && storedVersion) throw new Error('This recipe changed in another session. Reload the page before saving your change.');
-      const { data, error } = await window.supabaseClient.rpc('save_recipe', {
-        payload: {
-          ...row,
-          ingredients: row.ingredients.map(line => ({
-            ingredient_id: line.ingredientId,
-            quantity: line.quantity
-          }))
-        },
-        expected_updated_at: version || null
-      });
+      const { data, error } = await withSaveTimeout(
+        signal => abortableRequest(window.supabaseClient.rpc('save_recipe', {
+          payload: {
+            ...row,
+            ingredients: row.ingredients.map(line => ({
+              ingredient_id: line.ingredientId,
+              quantity: line.quantity
+            }))
+          },
+          expected_updated_at: version || null
+        }), signal),
+        'Recipe save'
+      );
       throwIfError(error);
       if (data?.updated_at) rememberVersion(collection, record.id, data.updated_at);
-      return;
+      return data ? mapDatabaseRecord(collection, data) : record;
     }
     if (version) {
-      result = await window.supabaseClient.from(table).update(row).eq('id', record.id).eq('updated_at', version).select('updated_at').maybeSingle();
+      result = await withSaveTimeout(signal => abortableRequest(
+        window.supabaseClient.from(table).update(row).eq('id', record.id).eq('updated_at', version).select('updated_at').maybeSingle(),
+        signal
+      ), 'Record save');
       throwIfError(result.error);
       if (!result.data) throw new Error('This record changed in another session. Reload the page before saving your change.');
     } else {
       if (storedVersion) throw new Error('This record changed in another session. Reload the page before saving your change.');
-      result = await window.supabaseClient.from(table).insert(row).select('updated_at').single();
+      result = await withSaveTimeout(signal => abortableRequest(
+        window.supabaseClient.from(table).insert(row).select('updated_at').single(),
+        signal
+      ), 'Record save');
       throwIfError(result.error);
     }
     rememberVersion(collection, record.id, result.data.updated_at);
+    return { ...record, updatedAt: result.data.updated_at };
   },
   async remove(collection, recordId, expectedVersion) {
     if (collection === 'users') throw new Error('User accounts must be managed through Supabase Auth.');
@@ -607,23 +742,26 @@ window.supabaseRecord = {
     }
   },
   async receiveDelivery(payload) {
-    const { data, error } = await window.supabaseClient.rpc('costtrack_receive_delivery', {
-      payload: {
-        supplier_name: payload.supplierName,
-        invoice_number: payload.invoiceNumber,
-        invoice_date: dateValue(payload.invoiceDate),
-        received_date: dateValue(payload.receivedDate),
-        note: payload.note || '',
-        lines: payload.lines.map(line => ({
-          id: line.id,
-          ingredient_id: line.ingredientId,
-          quantity: line.quantity,
-          unit_cost: line.unitCost,
-          batch_code: line.batchCode || null,
-          expiration_date: line.expirationDate ? dateValue(line.expirationDate) : null
-        }))
-      }
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('costtrack_receive_delivery', {
+        payload: {
+          supplier_name: payload.supplierName,
+          invoice_number: payload.invoiceNumber,
+          invoice_date: dateValue(payload.invoiceDate),
+          received_date: dateValue(payload.receivedDate),
+          note: payload.note || '',
+          lines: payload.lines.map(line => ({
+            id: line.id,
+            ingredient_id: line.ingredientId,
+            quantity: line.quantity,
+            unit_cost: line.unitCost,
+            batch_code: line.batchCode || null,
+            expiration_date: line.expirationDate ? dateValue(line.expirationDate) : null
+          }))
+        }
+      }), signal),
+      'Delivery save'
+    );
     throwIfError(error);
     return data;
   },
@@ -863,26 +1001,35 @@ window.supabaseRecord = {
     }
   },
   async posRequestBillVoid(billId, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_request_bill_void_phase3', {
-      p_bill_id: billId,
-      p_reason: reason
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_request_bill_void_phase3', {
+        p_bill_id: billId,
+        p_reason: reason
+      }), signal),
+      'Void request'
+    );
     throwIfError(error);
     return data;
   },
   async posDecideBillApproval(approvalId, decision, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_decide_bill_approval_phase3', {
-      p_approval_id: approvalId,
-      p_decision: decision,
-      p_decision_reason: reason || ''
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_decide_bill_approval_phase3', {
+        p_approval_id: approvalId,
+        p_decision: decision,
+        p_decision_reason: reason || ''
+      }), signal),
+      'Approval save'
+    );
     throwIfError(error);
     return data;
   },
   async posOpenShift(openingCash, notes) {
-    const { data, error } = await window.supabaseClient.rpc('pos_open_shift', {
-      p_opening_cash: openingCash, p_notes: notes || ''
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_open_shift', {
+        p_opening_cash: openingCash, p_notes: notes || ''
+      }), signal),
+      'Shift save'
+    );
     throwIfError(error);
     return data;
   },
@@ -894,32 +1041,44 @@ window.supabaseRecord = {
     return data;
   },
   async posCloseShift(shiftId, countedCash, notes) {
-    const { data, error } = await window.supabaseClient.rpc('pos_close_shift', {
-      p_shift_id: shiftId, p_counted_cash: countedCash, p_notes: notes || ''
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_close_shift', {
+        p_shift_id: shiftId, p_counted_cash: countedCash, p_notes: notes || ''
+      }), signal),
+      'Shift close'
+    );
     throwIfError(error);
     return data;
   },
   async posRecordCashMovement(shiftId, movementType, amount, reason, idempotencyKey) {
-    const { data, error } = await window.supabaseClient.rpc('pos_record_cash_movement', {
-      p_shift_id: shiftId, p_movement_type: movementType,
-      p_amount: amount, p_reason: reason, p_idempotency_key: idempotencyKey
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_record_cash_movement', {
+        p_shift_id: shiftId, p_movement_type: movementType,
+        p_amount: amount, p_reason: reason, p_idempotency_key: idempotencyKey
+      }), signal),
+      'Cash movement save'
+    );
     throwIfError(error);
     return data;
   },
   async posRecordReservationDeposit(reservationId, amount, notes, idempotencyKey) {
-    const { data, error } = await window.supabaseClient.rpc('pos_record_reservation_deposit', {
-      p_reservation_id: reservationId, p_amount: amount, p_notes: notes || '',
-      p_idempotency_key: idempotencyKey
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_record_reservation_deposit', {
+        p_reservation_id: reservationId, p_amount: amount, p_notes: notes || '',
+        p_idempotency_key: idempotencyKey
+      }), signal),
+      'Deposit save'
+    );
     throwIfError(error);
     return data;
   },
   async posReservationDepositDecision(depositId, decision, reason) {
-    const { data, error } = await window.supabaseClient.rpc('pos_reservation_deposit_decision', {
-      p_deposit_id: depositId, p_decision: decision, p_reason: reason
-    });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('pos_reservation_deposit_decision', {
+        p_deposit_id: depositId, p_decision: decision, p_reason: reason
+      }), signal),
+      'Deposit action'
+    );
     throwIfError(error);
     return data;
   },
@@ -939,13 +1098,6 @@ window.supabaseRecord = {
   },
   async posRefreshNotifications() {
     const { data, error } = await window.supabaseClient.rpc('pos_refresh_notifications');
-    throwIfError(error);
-    return data;
-  },
-  async posMarkNotificationRead(notificationId) {
-    const { data, error } = await window.supabaseClient.rpc('pos_mark_notification_read', {
-      p_notification_id: notificationId
-    });
     throwIfError(error);
     return data;
   },
