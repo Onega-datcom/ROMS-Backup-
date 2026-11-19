@@ -283,7 +283,6 @@ test('recipe mapping preserves active state and saves without legacy menu price'
 test('product lifecycle RPC uses the guarded timeout and product mapping retains inactive state', async () => {
   let call;
   const inspection = {
-    action: 'inspect',
     product_id: 'ING-7',
     is_active: false,
     is_used: true,

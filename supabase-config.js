@@ -579,7 +579,17 @@ window.supabaseRecord = {
     if (!data || typeof data !== 'object') {
       throw new Error('The database returned an invalid product lifecycle result.');
     }
-    if (data.action !== action) {
+    if (action === 'inspect') {
+      const validUsage = data.usage && typeof data.usage === 'object' && !Array.isArray(data.usage);
+      if ((data.action !== undefined && data.action !== action)
+        || data.product_id !== productId
+        || typeof data.is_active !== 'boolean'
+        || typeof data.is_used !== 'boolean'
+        || !validUsage
+        || !Array.isArray(data.active_recipes)) {
+        throw new Error('The database returned an invalid product lifecycle inspection result.');
+      }
+    } else if (data.action !== action) {
       throw new Error('The database returned an unexpected product lifecycle action.');
     }
     if (data.action === 'delete') recordVersions.delete(`ingredients:${productId}`);

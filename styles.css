@@ -833,6 +833,7 @@ th:first-child {
 }
 
 .receipt-header-grid {
+  align-items: start;
   row-gap: 14px !important;
 }
 
