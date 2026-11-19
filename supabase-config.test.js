@@ -6,10 +6,11 @@ const vm = require('node:vm');
 
 const configSource = fs.readFileSync(path.join(__dirname, 'supabase-config.js'), 'utf8');
 
-function loadSupabaseRecord(rpc, clientOverrides = {}) {
+function loadSupabaseRecord(rpc, clientOverrides = {}, hash = '') {
   const timers = new Map();
   let nextTimerId = 0;
   const mockWindow = {
+    location: { hash },
     setTimeout(callback, delay) {
       assert.equal(delay, 15000);
       const id = ++nextTimerId;
@@ -25,9 +26,24 @@ function loadSupabaseRecord(rpc, clientOverrides = {}) {
       }
     }
   };
-  vm.runInNewContext(configSource, { window: mockWindow, AbortController });
-  return { record: mockWindow.supabaseRecord, timers };
+  vm.runInNewContext(configSource, { window: mockWindow, AbortController, URLSearchParams });
+  return {
+    record: mockWindow.supabaseRecord,
+    timers,
+    inviteLink: mockWindow.costTrackInviteLink,
+    inviteRoles: mockWindow.costTrackInviteRoles
+  };
 }
+
+test('captures an Auth invitation link before the Supabase client consumes its URL fragment', () => {
+  const { inviteLink } = loadSupabaseRecord(
+    () => ({}),
+    {},
+    '#access_token=invite-token&type=invite'
+  );
+  assert.equal(inviteLink, true);
+  assert.equal(loadSupabaseRecord(() => ({}), {}, '#type=recovery').inviteLink, false);
+});
 
 test('wasteServerTime uses the guarded server-time RPC and clears its timeout', async () => {
   let call;
@@ -44,6 +60,40 @@ test('wasteServerTime uses the guarded server-time RPC and clears its timeout', 
   assert.equal(await record.wasteServerTime(), expected);
   assert.equal(call, 'costtrack_waste_server_time');
   assert.equal(timers.size, 0);
+});
+
+test('updateUserRole calls the protected RPC and returns its changed result', async () => {
+  let call;
+  const { record } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return Promise.resolve({ data: true, error: null });
+  });
+
+  assert.equal(await record.updateUserRole('user-1', 'Manager', 'Role review'), true);
+  assert.equal(call.name, 'costtrack_update_profile_role');
+  assert.equal(call.args.p_user_id, 'user-1');
+  assert.equal(call.args.p_new_role, 'Manager');
+  assert.equal(call.args.p_reason, 'Role review');
+});
+
+test('updateUserRole preserves RPC errors and rejects invalid or unchanged results', async () => {
+  const failed = loadSupabaseRecord(() => Promise.resolve({
+    data: null,
+    error: { message: 'Only Administrators may change user roles' }
+  }));
+  await assert.rejects(
+    failed.record.updateUserRole('user-1', 'Manager'),
+    /Only Administrators may change user roles/
+  );
+
+  const unchanged = loadSupabaseRecord(() => Promise.resolve({ data: false, error: null }));
+  assert.equal(await unchanged.record.updateUserRole('user-1', 'Manager'), false);
+
+  const invalid = loadSupabaseRecord(() => Promise.resolve({ data: null, error: null }));
+  await assert.rejects(
+    invalid.record.updateUserRole('user-1', 'Manager'),
+    /invalid role update result/
+  );
 });
 
 test('waste save uses the RPC result including the database timestamp', async () => {
@@ -523,6 +573,95 @@ test('posSeatAndOpenWalkIn aborts after the 15-second timeout', async () => {
   await assert.rejects(pending, /Walk-in seat-and-bill request timed out after 15 seconds\..*same form.*idempotency key/);
   assert.equal(signal.aborted, true);
   assert.equal(timers.size, 0);
+});
+
+test('inviteUser calls the Edge Function with normalized invitation fields', async () => {
+  let invocation;
+  const { record, inviteRoles } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke(name, options) {
+        invocation = { name, options };
+        return { data: { invitation_id: 'invite-1', status: 'Pending' }, error: null };
+      }
+    }
+  });
+
+  const result = await record.inviteUser({
+    email: '  Staff@Example.com ',
+    fullName: '  Sam Staff  ',
+    role: 'Receptionist'
+  });
+
+  assert.equal(invocation.name, 'invite-user');
+  assert.equal(invocation.options.body.action, 'invite');
+  assert.equal(invocation.options.body.email, 'staff@example.com');
+  assert.equal(invocation.options.body.full_name, 'Sam Staff');
+  assert.equal(invocation.options.body.role, 'Receptionist');
+  assert.equal(result.invitation_id, 'invite-1');
+  assert.deepEqual(Array.from(inviteRoles), ['Manager', 'Receptionist', 'Inventory Clerk', 'Chef / Kitchen Staff']);
+});
+
+test('inviteUser rejects Administrator and surfaces Edge Function error messages', async () => {
+  let invoked = false;
+  const { record } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke() {
+        invoked = true;
+        return {
+          data: null,
+          error: {
+            message: 'Edge Function returned a non-2xx status code',
+            context: { clone: () => ({ json: async () => ({ error: 'A pending invitation already exists.' }) }) }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(
+    record.inviteUser({ email: 'admin@example.com', fullName: 'Admin User', role: 'Administrator' }),
+    /valid staff role/
+  );
+  assert.equal(invoked, false);
+  await assert.rejects(
+    record.inviteUser({ email: 'staff@example.com', fullName: 'Staff User', role: 'Manager' }),
+    /A pending invitation already exists/
+  );
+});
+
+test('loadUserInvites reads required history fields and expiry newest-first', async () => {
+  const invitation = {
+    id: 'invite-1',
+    email: 'staff@example.com',
+    full_name: 'Staff User',
+    role: 'Manager',
+    status: 'Accepted',
+    invited_at: '2026-11-18T12:00:00Z',
+    accepted_at: '2026-11-18T13:00:00Z',
+    expires_at: '2026-11-25T12:00:00Z'
+  };
+  let query;
+  const { record } = loadSupabaseRecord(() => ({}), {
+    from(table) {
+      query = { table };
+      return {
+        select(columns) {
+          query.columns = columns;
+          return this;
+        },
+        order(column, options) {
+          query.order = { column, options };
+          return Promise.resolve({ data: [invitation], error: null });
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(await record.loadUserInvites(), [invitation]);
+  assert.equal(query.table, 'user_invites');
+  assert.equal(query.columns, 'id,email,full_name,role,status,invited_at,accepted_at,expires_at');
+  assert.equal(query.order.column, 'invited_at');
+  assert.equal(query.order.options.ascending, false);
 });
 
 test('notification read-state adapters validate and use the shared RPCs', async () => {

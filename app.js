@@ -19,7 +19,9 @@ const state = {
   notificationMarkingRead: false
 };
 let modalOpener = null;
-let passwordRecoveryMode = new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
+let invitationAcceptanceMode = window.costTrackInviteLink === true;
+let passwordRecoveryMode = invitationAcceptanceMode
+  || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
 let supabaseSyncEnabled = false;
 let realtimeChannel = null;
 let realtimeSubscriptionKey = '';
@@ -78,6 +80,9 @@ state.reportTab = state.reportTab || 'food_cost';
 state.reportGrouping = state.reportGrouping || 'day';
 state.reportIncludeWaste = state.reportIncludeWaste !== false;
 state.reportPage = 1;
+state.inviteFormOpen = false;
+state.userInviteHistory = { rows: [], loading: false, loaded: false, error: '' };
+let userInviteRequestId = 0;
 const reportServerData = {};
 let reportRequestKey = '';
 let reportRequestPending = false;
@@ -354,6 +359,10 @@ function activeBuffetRate(item, date = item?.date || today()) {
 }
 function friendlyRpcError(error) {
   const message = String(error?.message || error || '');
+  if (/users cannot change their own role/i.test(message)) return 'You cannot change your own role. Ask another Administrator.';
+  if (/cannot remove or demote the last administrator/i.test(message)) return 'At least one Administrator must remain in the system.';
+  if (/profile deletion is not supported/i.test(message)) return 'User profiles cannot be deleted from User Management.';
+  if (/role was not changed/i.test(message)) return 'No role change was saved. Reload the user list and try again.';
   if (/reservation start time has already passed|cannot be scheduled in the past/i.test(message)) return 'That reservation time has already passed. Choose a later time.';
   if (/reservation time must be within restaurant hours|two-hour reservation window/i.test(message)) return 'Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.';
   if (/production would make stock negative/i.test(message)) return 'Not enough inventory is available to complete this batch. Ask an Inventory Clerk to check the stock before marking it ready.';
@@ -1475,7 +1484,9 @@ function showGuide() {
 function login(message = '') {
   document.querySelector('#appShell').classList.add('is-hidden');
   document.querySelector('#loginScreen').classList.remove('is-hidden');
-  const recovering = passwordRecoveryMode || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
+  const recovering = passwordRecoveryMode
+    || invitationAcceptanceMode
+    || new URLSearchParams(window.location.hash.slice(1)).get('type') === 'recovery';
   document.querySelector('#loginScreen').innerHTML = `<div class="login-card"><div class="login-brand"><strong>isobel</strong><small>RESTAURANT OPERATIONS</small></div><span class="eyebrow">Restaurant operations workspace</span><h1>Run a smarter restaurant.<br><em>From kitchen to service.</em></h1><p>Manage inventory, recipes, production, reservations, and daily operations in one workspace.</p>${message ? `<p class="auth-message" role="alert">${esc(message)}</p>` : ''}${recovering ? `<form id="passwordRecoveryForm"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary-btn" type="submit">Update password</button></form>` : `<form id="loginForm"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary-btn" type="submit">Log in</button></form><button class="link-button" id="resetPasswordButton" type="button">Forgot password?</button><small>Accounts are provisioned by your administrator.</small>`}</div><div class="login-art"><div><span>Today’s focus</span><strong>Reduce waste.<br>Protect margin.</strong><p>Make every ingredient movement visible from delivery to plate.</p></div><div class="art-stat"><b>${lowStock().length}</b><span>items need attention</span></div></div>`;
 }
 function metric(label, value, icon, tone, foot) { return `<div class="metric-card"><div class="metric-top"><span>${label}</span><i class="metric-icon ${tone}">${icon}</i></div><div class="metric-value">${value}</div><div class="metric-foot">${foot}</div></div>`; }
@@ -1989,10 +2000,53 @@ function approvalsPage() {
 }
 function usersPage() {
   const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
+  const inviteRoles = window.costTrackInviteRoles || [];
+  const inviteHistory = state.userInviteHistory;
+  if (state.role !== 'Administrator') {
+    return '<section class="user-management-page"><div class="panel error-state" role="alert">Only Administrators can access User Management.</div></section>';
+  }
   state.userRoleFilter = state.userRoleFilter || 'All';
   const search = String(state.query || '').toLowerCase();
   const users = all('users').filter(item => state.userRoleFilter === 'All' || item.role === state.userRoleFilter);
   const filtered = users.filter(item => `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase().includes(search));
+  const invitationRows = inviteHistory.rows.map(invite => {
+    const status = invite.status === 'Pending' && new Date(invite.expires_at).getTime() <= Date.now()
+      ? 'Expired'
+      : invite.status;
+    const statusClass = status === 'Accepted' ? 'status-good'
+      : status === 'Pending' ? 'status-low' : 'status-out';
+    return `<tr>
+      <td data-label="Email">${esc(invite.email)}</td>
+      <td data-label="Full Name">${esc(invite.full_name)}</td>
+      <td data-label="Role">${esc(invite.role)}</td>
+      <td data-label="Status"><span class="${statusClass}">${esc(status)}</span></td>
+      <td data-label="Invited Date">${esc(formatInviteDate(invite.invited_at))}</td>
+      <td data-label="Accepted Date">${esc(formatInviteDate(invite.accepted_at))}</td>
+    </tr>`;
+  });
+  const inviteHistoryContent = inviteHistory.error
+    ? `<div class="user-invite-error" role="alert"><span>${esc(inviteHistory.error)}</span><button type="button" class="ghost-btn compact-btn" data-action="retry-user-invites">Retry</button></div>`
+    : inviteHistory.loading || !inviteHistory.loaded
+      ? '<div class="user-invite-loading" role="status">Loading invitation history…</div>'
+      : `<div class="table-scroll"><table class="user-invites-table">
+          <thead><tr><th>Email</th><th>Full Name</th><th>Role</th><th>Status</th><th>Invited Date</th><th>Accepted Date</th></tr></thead>
+          <tbody>${invitationRows.length ? invitationRows.join('') : '<tr><td class="user-invites-empty" colspan="6">No invitations have been sent yet.</td></tr>'}</tbody>
+        </table></div>`;
+  const inviteForm = state.inviteFormOpen
+    ? `<form id="inviteUserForm" class="user-invite-form">
+        <div class="user-invite-form-heading"><h2>Invite a staff member</h2><p>They’ll receive an email with a link to set their password.</p></div>
+        <div class="user-invite-fields">
+          <label>Full Name<input name="fullName" type="text" required maxlength="160" autocomplete="name" placeholder="Staff member’s full name"></label>
+          <label>Email Address<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="name@example.com"></label>
+          <label>Role<select name="role" required><option value="">Select a staff role</option>${inviteRoles.map(role => `<option value="${esc(role)}">${esc(role)}</option>`).join('')}</select></label>
+        </div>
+        <div class="user-invite-actions">
+          <button type="button" class="ghost-btn" data-action="close-invite-user">Cancel</button>
+          <button type="submit" class="primary-btn">${state.inviteSending ? 'Sending…' : 'Send Invitation'}</button>
+        </div>
+      </form>`
+    : '';
+  const inviteAction = `<button type="button" class="primary-btn" data-action="toggle-user-invite" aria-controls="inviteUserForm" aria-expanded="${state.inviteFormOpen}">${state.inviteFormOpen ? 'Hide Invite Form' : 'Invite User'}</button>`;
   if (!document.documentElement.dataset.userDetailsRowsBound) {
     document.documentElement.dataset.userDetailsRowsBound = 'true';
     document.addEventListener('click', event => {
@@ -2020,7 +2074,12 @@ function usersPage() {
   });
   const emptyState = `<tr class="user-empty-row" ${filtered.length ? 'hidden' : ''}><td colspan="3"><div class="user-empty-state"><strong>No users found.</strong><p>Try a different search or role filter.</p></div></td></tr>`;
   return `<section class="user-management-page">
-    ${pageHeader('Administration', 'User Management', 'Manage user profiles, roles, and access permissions.')}
+    ${pageHeader('Administration', 'User Management', 'Manage user profiles, roles, and access permissions.', inviteAction)}
+    ${inviteForm}
+    <div class="panel user-invites-panel">
+      <div class="user-invites-heading"><div><h2>Invitation History</h2><p>Track staff invitations and their current status. Pending invitations expire after seven days.</p></div></div>
+      ${inviteHistoryContent}
+    </div>
     <div class="toolbar user-management-toolbar">
       <div class="search-box">⌕<input id="tableSearch" dir="ltr" placeholder="Search users..." value="${esc(state.query)}" aria-label="Search users"></div>
       <label class="user-filter">Role<select data-user-filter="role" aria-label="Filter by role"><option value="All">All Roles</option>${roles.map(role => `<option value="${esc(role)}" ${state.userRoleFilter === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
@@ -2045,6 +2104,22 @@ function usersPage() {
     .user-management-page .user-empty-state { display: grid; justify-items: center; gap: 8px; padding: 28px 12px; text-align: center; white-space: normal; }
     .user-management-page .user-empty-state p { margin: 0 0 8px; color: var(--muted); }
     .user-management-page .user-empty-row td::before { content: none; }
+    .user-management-page .user-invite-form { margin-bottom: 16px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; box-shadow: var(--shadow); }
+    .user-management-page .user-invite-form-heading { margin-bottom: 16px; }
+    .user-management-page .user-invite-form-heading h2 { margin: 0; font: 700 16px 'Plus Jakarta Sans', sans-serif; }
+    .user-management-page .user-invite-form-heading p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+    .user-management-page .user-invite-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .user-management-page .user-invite-fields label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+    .user-management-page .user-invite-fields input, .user-management-page .user-invite-fields select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; color: var(--ink); font: inherit; font-size: 12px; font-weight: 400; }
+    .user-management-page .user-invite-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .user-management-page .user-invites-panel { margin-bottom: 18px; }
+    .user-management-page .user-invites-heading { margin-bottom: 14px; }
+    .user-management-page .user-invites-heading h2 { margin: 0; font: 700 16px 'Plus Jakarta Sans', sans-serif; }
+    .user-management-page .user-invites-heading p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+    .user-management-page .user-invites-table { min-width: 760px; }
+    .user-management-page .user-invites-table .user-invites-empty { padding: 24px; text-align: center; color: var(--muted); }
+    .user-management-page .user-invite-loading { padding: 16px 0; color: var(--muted); font-size: 12px; }
+    .user-management-page .user-invite-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #e4a4a0; border-radius: 9px; background: var(--red-bg); color: #a44c48; font-size: 12px; }
     @media (max-width: 720px) {
       .user-management-page .user-management-toolbar { align-items: stretch; }
       .user-management-page .user-filter { min-width: 100%; }
@@ -2056,8 +2131,96 @@ function usersPage() {
       .user-management-page .users-table td::before { flex: 0 0 72px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
       .user-management-page .users-table td[data-label="User"] .cell-title { min-width: 0; }
       .user-management-page .user-empty-row td { display: block; }
+      .user-management-page .user-invite-fields { grid-template-columns: 1fr; }
+      .user-management-page .user-invite-actions { display: grid; grid-template-columns: 1fr 1fr; }
+      .user-management-page .user-invites-table { display: block; min-width: 0; }
+      .user-management-page .user-invites-table thead { display: none; }
+      .user-management-page .user-invites-table tbody { display: grid; gap: 10px; }
+      .user-management-page .user-invites-table tr { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+      .user-management-page .user-invites-table td { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; white-space: normal; overflow-wrap: anywhere; }
+      .user-management-page .user-invites-table td::before { flex: 0 0 95px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+      .user-management-page .user-invites-table .user-invites-empty { display: block; }
+      .user-management-page .user-invite-error { align-items: flex-start; flex-direction: column; }
     }
   </style>`;
+}
+
+function formatInviteDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? 'Unavailable'
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function resetUserInviteHistory() {
+  userInviteRequestId += 1;
+  state.inviteFormOpen = false;
+  state.inviteSending = false;
+  state.userInviteHistory = { rows: [], loading: false, loaded: false, error: '' };
+}
+
+async function loadUserInvitations(force = false) {
+  const history = state.userInviteHistory;
+  if (state.role !== 'Administrator' || !state.user || history.loading || (history.loaded && !force)) return;
+  const requestId = ++userInviteRequestId;
+  const userId = state.user.id;
+  history.loading = true;
+  history.error = '';
+  if (state.view === 'users') render();
+  try {
+    const rows = await window.supabaseRecord.loadUserInvites();
+    if (requestId !== userInviteRequestId || state.user?.id !== userId || state.role !== 'Administrator') return;
+    history.rows = rows;
+    history.loaded = true;
+  } catch (error) {
+    if (requestId !== userInviteRequestId || state.user?.id !== userId || state.role !== 'Administrator') return;
+    history.error = error.message || 'Invitation history could not be loaded.';
+    history.loaded = true;
+    console.error('Invitation history could not be loaded.', error);
+  } finally {
+    if (requestId === userInviteRequestId && state.user?.id === userId && state.role === 'Administrator') {
+      history.loading = false;
+      if (state.view === 'users') render();
+    }
+  }
+}
+
+async function submitUserInvitation(form) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
+  if (!form.reportValidity()) return;
+  const fullName = form.elements.fullName.value.trim();
+  const email = form.elements.email.value.trim().toLowerCase();
+  const role = form.elements.role.value;
+  const allowedRoles = window.costTrackInviteRoles || [];
+  if (!fullName || fullName.length > 160) return toast('Enter a full name of no more than 160 characters.', 'error');
+  if (!form.elements.email.validity.valid) return toast('Enter a valid email address.', 'error');
+  if (!allowedRoles.includes(role)) return toast('Select a valid staff role.', 'error');
+
+  const submitButton = form.querySelector('button[type="submit"]');
+  const originalLabel = submitButton.textContent;
+  state.inviteSending = true;
+  form.setAttribute('aria-busy', 'true');
+  form.querySelectorAll('input, select, button').forEach(control => { control.disabled = true; });
+  submitButton.textContent = 'Sending…';
+  try {
+    await window.supabaseRecord.inviteUser({ fullName, email, role });
+    state.inviteFormOpen = false;
+    state.inviteSending = false;
+    state.userInviteHistory.loaded = false;
+    toast(`Invitation sent to ${email}.`);
+    render();
+  } catch (error) {
+    console.error('Staff invitation failed.', error);
+    toast(error.message || 'The invitation could not be sent. Please try again.', 'error');
+  } finally {
+    state.inviteSending = false;
+    form.removeAttribute('aria-busy');
+    if (form.isConnected) {
+      form.querySelectorAll('input, select, button').forEach(control => { control.disabled = false; });
+      submitButton.textContent = originalLabel;
+    }
+  }
 }
 function options(items, valueKey = 'id', labelKey = 'name') { return items.map(x => `<option value="${x[valueKey]}">${esc(x[labelKey])}</option>`).join(''); }
 function updateWasteFormPreview(form) {
@@ -2212,6 +2375,7 @@ async function openForm(type, item) {
     <section class="user-details-section" style="margin-top: 20px">
       <h3 class="panel-title">Role Management</h3>
       <label>Role<select name="role" data-role-save-id="${esc(item.id)}" aria-label="Role for ${esc(item.name || item.email || 'user')}" required>${roles.map(role => `<option value="${esc(role)}" ${item.role === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
+      <label>Reason for role change <small class="field-help">Optional · 500 characters maximum</small><input type="text" name="roleChangeReason" maxlength="500" placeholder="Why is this role changing?"></label>
     </section>`, 'Save Role', 'user-details-modal');
     const form = document.querySelector('#modalForm');
     form.id = 'userDetailsRoleForm';
@@ -4997,6 +5161,11 @@ document.addEventListener('click', event => {
 });
 document.addEventListener('submit', async event => {
   const formId = event.target.getAttribute('id');
+  if (formId === 'inviteUserForm') {
+    event.preventDefault();
+    await submitUserInvitation(event.target);
+    return;
+  }
   if (formId === 'loginForm') {
     event.preventDefault();
     const form = event.target;
@@ -5021,9 +5190,25 @@ document.addEventListener('submit', async event => {
     try {
       const { error } = await window.supabaseClient.auth.updateUser({ password: event.target.elements.password.value });
       if (error) throw error;
+
+      let successMessage = 'Password updated. You are signed in.';
+      if (invitationAcceptanceMode) {
+        const { error: invitationError } = await window.supabaseClient.functions.invoke('invite-user', {
+          body: { action: 'accept' }
+        });
+        if (invitationError) {
+          console.error('Invitation acceptance could not be recorded.', invitationError);
+          successMessage = 'Password updated, but invitation status could not be recorded. Contact an Administrator.';
+        } else {
+          successMessage = 'Password updated. Your invitation is accepted.';
+        }
+      }
+
       passwordRecoveryMode = false;
+      invitationAcceptanceMode = false;
+      window.costTrackInviteLink = false;
       window.location.hash = '';
-      toast('Password updated. You are signed in.');
+      toast(successMessage);
       const { data, error: sessionError } = await window.supabaseClient.auth.getSession();
       if (sessionError) throw sessionError;
       await openAuthenticatedSession(data.session);
@@ -5039,6 +5224,23 @@ document.addEventListener('submit', async event => {
       return;
     }
     handleSubmit(event.target);
+  }
+});
+document.addEventListener('click', event => {
+  const action = event.target.closest('[data-action]')?.dataset.action;
+  if (action === 'toggle-user-invite') {
+    if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
+    if (state.inviteSending) return;
+    state.inviteFormOpen = !state.inviteFormOpen;
+    render();
+    if (state.inviteFormOpen) requestAnimationFrame(() => document.querySelector('#inviteUserForm [name="fullName"]')?.focus());
+  } else if (action === 'close-invite-user') {
+    if (state.inviteSending) return;
+    state.inviteFormOpen = false;
+    render();
+  } else if (action === 'retry-user-invites') {
+    if (state.role !== 'Administrator') return toast('Only Administrators can view invitation history.', 'error');
+    loadUserInvitations(true);
   }
 });
 document.addEventListener('input', event => {
@@ -5254,6 +5456,7 @@ async function openAuthenticatedSession(session) {
   }
   state.user = profile;
   state.role = profile.role;
+  resetUserInviteHistory();
   state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
   window.supabaseRecord.clearVersions();
   const requestedView = window.location.hash.slice(1) || 'dashboard';
@@ -5288,6 +5491,7 @@ async function signOutCurrentUser() {
   closeShellPopovers(false);
   state.user = null;
   state.role = null;
+  resetUserInviteHistory();
   state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
   state.notificationReadKeys = [];
   state.notificationViewAll = false;
@@ -5609,6 +5813,7 @@ window.supabaseClient.auth.onAuthStateChange((event, session) => {
     stopRealtimeSubscriptions();
     state.user = null;
     state.role = null;
+    resetUserInviteHistory();
     supabaseSyncEnabled = false;
     KEYS.forEach(key => { collectionState[key] = []; });
     clearDataStorage();
@@ -5621,6 +5826,11 @@ window.supabaseClient.auth.onAuthStateChange((event, session) => {
 document.querySelector('#loadingState').classList.remove('is-hidden');
 window.supabaseClient.auth.getSession().then(({ data, error }) => {
   if (error) throw error;
+  if (data.session && passwordRecoveryMode) {
+    document.querySelector('#loadingState').classList.add('is-hidden');
+    login();
+    return;
+  }
   if (data.session) return openAuthenticatedSession(data.session);
   document.querySelector('#loadingState').classList.add('is-hidden');
   login();
@@ -5859,6 +6069,7 @@ function render() {
   if (state.view === 'production') {
     loadProductionBoard();
   }
+  if (state.view === 'users' && state.role === 'Administrator') loadUserInvitations();
   const revenueRange = document.querySelector('[data-revenue-range]');
   if (revenueRange) revenueRange.value = state.revenueRange;
   normaliseRenderedStatuses();
@@ -6319,20 +6530,23 @@ document.addEventListener('change', event => {
     }
     if (control.value === previous) return;
     control.disabled = true;
-    window.supabaseClient.from('profiles').update({ role: control.value }).eq('id', userId).then(({ error }) => {
-      if (error) {
-        control.value = previous || control.value;
-        control.disabled = false;
-        toast(friendlyRpcError(error), 'error');
+    let roleUpdated = false;
+    const reason = control.closest('#userDetailsRoleForm')?.querySelector('[name="roleChangeReason"]')?.value || '';
+    window.supabaseRecord.updateUserRole(userId, control.value, reason).then(async changed => {
+      if (!changed) throw new Error('The role was not changed. Reload the user list and try again.');
+      roleUpdated = true;
+      await syncWithSupabase();
+      if (control.closest('#userDetailsRoleForm')) closeModal(true);
+      toast('Role updated successfully.');
+    }).catch(error => {
+      control.disabled = false;
+      if (roleUpdated) {
+        console.error('The role was updated, but the user list could not be refreshed.', error);
+        if (control.closest('#userDetailsRoleForm')) closeModal(true);
+        toast('Role updated, but the user list could not be refreshed. Reload the page to see the saved role.', 'error');
         return;
       }
-      return syncWithSupabase().then(() => {
-        if (control.closest('#userDetailsRoleForm')) closeModal(true);
-        toast('Role updated successfully.');
-      });
-    }).catch(error => {
       control.value = previous || control.value;
-      control.disabled = false;
       toast(friendlyRpcError(error), 'error');
     });
   }

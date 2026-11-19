@@ -133,22 +133,70 @@ The rollback [`016_stale_walkin_completion_rollback.sql`](./supabase/016_stale_w
 
 ## Provision real users
 
-Do not add signup or service-role credentials to the browser. For each employee:
+Do not add public signup or service-role credentials to the browser. Provision the first Administrator manually because no Administrator exists yet to authorize an invitation:
 
-1. Create or invite the account in **Supabase Dashboard → Authentication → Users** and confirm the email.
+1. Create the first account in **Supabase Dashboard → Authentication → Users** and confirm its email.
 2. Copy the Auth user's UUID.
-3. In the SQL Editor, create its profile. Create the first Administrator this way:
+3. In the SQL Editor, create the initial Administrator profile:
 
 ```sql
 insert into public.profiles (id, email, full_name, role)
 values ('<AUTH_USER_UUID>'::uuid, '<EMAIL>', '<FULL_NAME>', 'Administrator');
 ```
 
-Use one of these exact roles for other profiles: `Manager`, `Inventory Clerk`, `Chef / Kitchen Staff`, or `Receptionist`. The profile role is authoritative; users cannot change their own role from the app. User creation remains an administrator-controlled Supabase operation.
+The profile role is authoritative; users cannot change their own role from the app. Once the invitation Edge Function below is deployed, use it for subsequent staff accounts.
 
 ## Auth redirect configuration
 
-Serve the files over HTTP(S), not `file://`. In **Authentication → URL Configuration**, set the production Site URL and add the dashboard URL (ending in `/index.html`) to the allowed Redirect URLs so password-reset links return to the app.
+Serve the files over HTTP(S), not `file://`. In **Authentication → URL Configuration**, set the production Site URL and add the app URL (ending in `/index.html`) to the allowed Redirect URLs so password-reset and invitation links return to the app.
+
+## Phase 3 administrator invitation Edge Function
+
+This phase adds the `invite-user` Edge Function; it does not add the Administrator's invitation form. It supports two authenticated actions:
+
+- `invite`: only an Administrator can create an invitation. The function validates the request, writes a `Pending` row to `public.user_invites`, creates the Supabase Auth invite (which sends the email using the project's Auth SMTP configuration), and inserts the matching profile.
+- `accept`: after the invitee sets a password through the existing password-update screen, the app calls the function with the invitee's session. The function verifies the confirmed email and matching profile, then changes the invitation to `Accepted`; the database trigger stamps `accepted_at`.
+
+An invitation remains `Pending` after the email is sent because it has not yet been accepted. Failed send/profile setup attempts cancel the pending row when cleanup succeeds. The database invitation expires after seven days. Supabase Auth's email-link expiry is configured separately; ensure it is not shorter than the database expiry, or a still-Pending invitation may have an unusable email link. The function uses a compensating delete if Auth created the invited user but profile insertion fails; if cleanup itself fails, use the returned `request_id` to locate the safe server log entry and reconcile the account.
+
+Deploy from the repository root after Phase 2 migration 029 is applied:
+
+```powershell
+supabase functions deploy invite-user
+supabase secrets set INVITE_REDIRECT_URL="https://your-site.example/index.html"
+```
+
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are Supabase Edge Function runtime secrets. The only function-specific secret is `INVITE_REDIRECT_URL`; set it to the real app URL (or a localhost URL for local testing) and add that exact URL to **Authentication → URL Configuration → Redirect URLs**. Do not put the service-role key in the repository, Vercel variables exposed to browser code, or any HTML/JavaScript. Configure an Auth SMTP provider in the Supabase Dashboard for reliable email delivery; the function calls Supabase Auth's `inviteUserByEmail` API.
+
+The invitation request shape is:
+
+```json
+{
+  "action": "invite",
+  "email": "staff@example.com",
+  "full_name": "Staff Member",
+  "role": "Receptionist"
+}
+```
+
+Call `POST {SUPABASE_URL}/functions/v1/invite-user` with the Administrator's `Authorization: Bearer <access-token>`, `apikey: <publishable-or-anon-key>`, and `Content-Type: application/json`. The access token is the signed-in Administrator's session token, not the service-role key. An accepted invitee's password-update screen invokes the same endpoint with `{"action":"accept"}`.
+
+Database integration:
+
+1. Phase 2's `user_invites` unique partial index prevents concurrent duplicate pending invitations. Its trigger independently validates the email, role, and Administrator inviter.
+2. The function verifies the JWT with Supabase Auth and reads the caller's role from `profiles` before creating a service-role client.
+3. The service-role client is used only server-side for Auth Admin operations and writes to `user_invites`/`profiles`; RLS is bypassed for these operations, so caller authorization is mandatory.
+4. Profile role and invitation status are authoritative in PostgreSQL, not user metadata.
+
+Acceptance tests:
+
+```powershell
+deno test supabase/functions/invite-user/validation_test.ts
+```
+
+In a development project, invoke the deployed function with an Administrator token and a unique test email. Confirm the new Auth user, profile, Pending invite, seven-day expiry, and delivered email; complete the email link and password update; then verify the row becomes Accepted with `accepted_at`. Repeat with a Manager token, no token, invalid role/email, an existing profile, and the same email twice. Expected results are respectively `403`, `401`, `400`, `409`, and `409`, with no extra Auth users or pending rows. Do not use a real employee address for failure-path tests.
+
+The app invokes `accept` after password setup, and the function requires a confirmed email plus a matching profile and pending invitation. Supabase Auth does not expose a server-verifiable flag proving that a password was set, so a caller with the confirmed invitee session could invoke this action directly; treat `Accepted` as the invitee's acceptance callback, not independent proof of password creation. The status lifecycle has no separate `Sent` value; do not mark a just-sent invitation Accepted. No automatic expiry job or Administrator invite UI is included in this phase.
 
 ## Reservation calendar
 

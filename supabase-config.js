@@ -1,6 +1,18 @@
 const SUPABASE_URL = 'https://niiodqunoflblfcgdods.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_IVE25Rqzu-lDLFayVYmhfQ_dvPIO6E5';
 const POS_BILL_SAVE_TIMEOUT_MS = 15000;
+const INVITABLE_USER_ROLES = Object.freeze([
+  'Manager',
+  'Receptionist',
+  'Inventory Clerk',
+  'Chef / Kitchen Staff'
+]);
+window.costTrackInviteRoles = INVITABLE_USER_ROLES;
+
+window.costTrackInviteLink = Boolean(
+  window.location
+  && new URLSearchParams(window.location.hash.slice(1)).get('type') === 'invite'
+);
 
 window.supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
@@ -434,6 +446,19 @@ function throwIfError(error) {
   if (error) throw new Error(error.message || 'The database operation failed.');
 }
 
+async function throwInvitationError(error) {
+  let message = error.message || 'The invitation could not be sent.';
+  if (error.context && typeof error.context.clone === 'function') {
+    try {
+      const responseBody = await error.context.clone().json();
+      if (typeof responseBody?.error === 'string') message = responseBody.error;
+    } catch {
+      message = error.message || 'The invitation could not be sent.';
+    }
+  }
+  throw new Error(message);
+}
+
 async function withSaveTimeout(requestFactory, label) {
   const controller = new AbortController();
   let timeoutId;
@@ -456,6 +481,64 @@ function abortableRequest(request, signal) {
 }
 
 window.supabaseRecord = {
+  async inviteUser({ email, fullName, role }) {
+    if (typeof fullName !== 'string' || !fullName.trim() || fullName.trim().length > 160) {
+      throw new TypeError('Full name must be between 1 and 160 characters.');
+    }
+    if (typeof email !== 'string' || !email.trim()) {
+      throw new TypeError('A valid email address is required.');
+    }
+    if (!INVITABLE_USER_ROLES.includes(role)) {
+      throw new TypeError('A valid staff role is required.');
+    }
+    const { data, error } = await window.supabaseClient.functions.invoke('invite-user', {
+      body: {
+        action: 'invite',
+        email: email.trim().toLowerCase(),
+        full_name: fullName.trim(),
+        role
+      }
+    });
+    if (error) await throwInvitationError(error);
+    if (!data || typeof data.invitation_id !== 'string' || data.status !== 'Pending') {
+      throw new Error('The invitation service returned an invalid response.');
+    }
+    return data;
+  },
+  async loadUserInvites() {
+    const { data, error } = await window.supabaseClient
+      .from('user_invites')
+      .select('id,email,full_name,role,status,invited_at,accepted_at,expires_at')
+      .order('invited_at', { ascending: false });
+    throwIfError(error);
+    if (!Array.isArray(data) || data.some(invite =>
+      !invite
+      || typeof invite.id !== 'string'
+      || typeof invite.email !== 'string'
+      || typeof invite.full_name !== 'string'
+      || typeof invite.role !== 'string'
+      || !['Pending', 'Accepted', 'Expired', 'Cancelled'].includes(invite.status)
+      || typeof invite.invited_at !== 'string'
+      || typeof invite.expires_at !== 'string'
+      || Number.isNaN(new Date(invite.expires_at).getTime())
+      || (invite.accepted_at !== null && typeof invite.accepted_at !== 'string')
+    )) {
+      throw new Error('The database returned invalid invitation history.');
+    }
+    return data;
+  },
+  async updateUserRole(userId, role, reason = '') {
+    const { data, error } = await window.supabaseClient.rpc('costtrack_update_profile_role', {
+      p_user_id: userId,
+      p_new_role: role,
+      p_reason: reason
+    });
+    throwIfError(error);
+    if (typeof data !== 'boolean') {
+      throw new Error('The database returned an invalid role update result.');
+    }
+    return data;
+  },
   async wasteServerTime() {
     const { data, error } = await withSaveTimeout(
       signal => abortableRequest(window.supabaseClient.rpc('costtrack_waste_server_time'), signal),

@@ -7,6 +7,7 @@
 --   insert into public.profiles (id, email, full_name, role)
 --   values ('<AUTH_USER_UUID>'::uuid, '<EMAIL>', '<FULL_NAME>', 'Administrator');
 -- Repeat with an allowed role for each real user; never insert demo credentials.
+-- Change roles through public.costtrack_update_profile_role; profile deletion is disabled.
 
 -- Lock the old JSON endpoint before making any schema changes. The rows remain
 -- available to this migration as the database owner, but not through the API.
@@ -406,6 +407,68 @@ create table if not exists public.audit_logs (
   new_data jsonb,
   occurred_at timestamptz not null default clock_timestamp()
 );
+
+create table if not exists public.profile_admin_guard (
+  singleton boolean primary key default true check (singleton),
+  administrator_count integer not null check (administrator_count >= 0)
+);
+insert into public.profile_admin_guard (singleton, administrator_count)
+select true, count(*)::integer
+from public.profiles
+where role = 'Administrator'
+on conflict (singleton) do nothing;
+
+create table if not exists public.profile_role_audit (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  old_role text not null,
+  new_role text not null,
+  changed_by uuid references auth.users (id) on delete set null,
+  changed_at timestamptz not null default clock_timestamp(),
+  reason text not null default '' check (char_length(reason) <= 500)
+);
+
+create table if not exists public.user_invites (
+  id uuid primary key default gen_random_uuid(),
+  email text not null,
+  full_name text not null,
+  role text not null check (role in (
+    'Administrator',
+    'Manager',
+    'Receptionist',
+    'Inventory Clerk',
+    'Chef / Kitchen Staff'
+  )),
+  status text not null default 'Pending'
+    check (status in ('Pending', 'Accepted', 'Expired', 'Cancelled')),
+  invited_by uuid not null
+    references public.profiles (id) on delete restrict,
+  invited_at timestamptz not null default clock_timestamp(),
+  accepted_at timestamptz,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default clock_timestamp(),
+  updated_at timestamptz not null default clock_timestamp(),
+  constraint user_invites_email_valid check (
+    char_length(email) between 3 and 254
+    and char_length(split_part(email, '@', 1)) between 1 and 64
+    and email = lower(btrim(email))
+    and email ~ $invite_email$^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$invite_email$
+  ),
+  constraint user_invites_full_name_valid check (
+    char_length(btrim(full_name)) between 1 and 160
+  ),
+  constraint user_invites_expiry_after_invite check (expires_at > invited_at),
+  constraint user_invites_accepted_at_matches_status check (
+    (status = 'Accepted' and accepted_at is not null)
+    or (status <> 'Accepted' and accepted_at is null)
+  )
+);
+
+create unique index if not exists user_invites_one_pending_per_email_uidx
+  on public.user_invites (email)
+  where status = 'Pending';
+create index if not exists user_invites_status_invited_at_idx
+  on public.user_invites (status, invited_at desc);
 
 create table if not exists public.app_records_migrations (
   migration_key text primary key,
@@ -880,6 +943,123 @@ begin
   return new;
 end;
 $$;
+
+create or replace function public.guard_user_invite()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  inviter_role text;
+begin
+  if tg_op = 'INSERT' then
+    new.email := lower(btrim(new.email));
+    new.full_name := btrim(new.full_name);
+    new.invited_at := clock_timestamp();
+    new.created_at := new.invited_at;
+    new.updated_at := new.invited_at;
+
+    if new.status <> 'Pending' then
+      raise exception 'New invitations must start as Pending'
+        using errcode = '23514';
+    end if;
+
+    select profile.role
+    into inviter_role
+    from public.profiles as profile
+    where profile.id = new.invited_by
+    for share;
+
+    if inviter_role is distinct from 'Administrator' then
+      raise exception 'The inviter must be an existing Administrator'
+        using errcode = '42501';
+    end if;
+
+    if exists (
+      select 1
+      from public.profiles as profile
+      where lower(profile.email) = new.email
+    ) then
+      raise exception 'A profile already exists for this email address'
+        using errcode = '23505';
+    end if;
+
+    return new;
+  elsif tg_op = 'UPDATE' then
+    if new.id is distinct from old.id
+      or new.email is distinct from old.email
+      or new.full_name is distinct from old.full_name
+      or new.role is distinct from old.role
+      or new.invited_by is distinct from old.invited_by
+      or new.invited_at is distinct from old.invited_at
+      or new.created_at is distinct from old.created_at then
+      raise exception 'Invitation identity fields cannot be changed'
+        using errcode = '55000';
+    end if;
+
+    if old.status <> 'Pending'
+      and new.expires_at is distinct from old.expires_at then
+      raise exception 'A completed invitation expiry cannot be changed'
+        using errcode = '55000';
+    end if;
+
+    if new.status is distinct from old.status then
+      if old.status <> 'Pending' then
+        raise exception 'A completed invitation cannot change status'
+          using errcode = '55000';
+      end if;
+
+      if new.status = 'Accepted' then
+        if old.expires_at <= clock_timestamp() then
+          raise exception 'An expired invitation cannot be accepted'
+            using errcode = '23514';
+        end if;
+        new.accepted_at := clock_timestamp();
+        if new.accepted_at < old.invited_at
+          or new.accepted_at > clock_timestamp() then
+          raise exception 'The acceptance timestamp is invalid'
+            using errcode = '23514';
+        end if;
+      elsif new.status = 'Expired' then
+        if old.expires_at > clock_timestamp() then
+          raise exception 'An invitation cannot expire before its expiry time'
+            using errcode = '23514';
+        end if;
+        new.accepted_at := null;
+      elsif new.status = 'Cancelled' then
+        new.accepted_at := null;
+      else
+        raise exception 'Unsupported invitation status transition'
+          using errcode = '23514';
+      end if;
+    elsif new.accepted_at is distinct from old.accepted_at then
+      raise exception 'Acceptance timestamps can only change with invitation status'
+        using errcode = '55000';
+    end if;
+
+    return new;
+  elsif tg_op = 'DELETE' then
+    raise exception 'Invitation records cannot be deleted; change their status instead'
+      using errcode = '55000';
+  end if;
+
+  raise exception 'Unsupported user_invites operation: %', tg_op
+    using errcode = '55000';
+end;
+$$;
+
+revoke all on function public.guard_user_invite() from public, anon, authenticated;
+
+drop trigger if exists user_invites_guard on public.user_invites;
+create trigger user_invites_guard
+  before insert or update or delete on public.user_invites
+  for each row execute function public.guard_user_invite();
+
+drop trigger if exists user_invites_touch_updated_at on public.user_invites;
+create trigger user_invites_touch_updated_at
+  before update on public.user_invites
+  for each row execute function public.touch_updated_at();
 
 -- The trigger is installed on every mutable typed table (not the append-only audit log).
 do $$
@@ -1639,20 +1819,204 @@ $$;
 create or replace function public.prevent_self_role_change()
 returns trigger
 language plpgsql
+security definer
 set search_path = pg_catalog
 as $$
 begin
-  if auth.uid() = old.id and new.role is distinct from old.role then
-    raise exception 'Users cannot change their own role';
+  if tg_op = 'UPDATE' then
+    if auth.uid() = old.id and new.role is distinct from old.role then
+      raise exception 'Users cannot change their own role'
+        using errcode = '42501';
+    end if;
+
+    if old.role = 'Administrator' and new.role is distinct from old.role then
+      update public.profile_admin_guard
+      set administrator_count = administrator_count - 1
+      where singleton and administrator_count > 1;
+
+      if not found then
+        if exists (
+          select 1 from public.profile_admin_guard where singleton
+        ) then
+          raise exception 'Cannot remove or demote the last Administrator'
+            using errcode = '23514';
+        end if;
+        raise exception 'Administrator protection state is unavailable'
+          using errcode = '55000';
+      end if;
+    end if;
+
+    if old.role is distinct from new.role then
+      if auth.uid() is null
+        or not coalesce(public.has_app_role(array['Administrator']), false) then
+        raise exception 'Only Administrators may change user roles'
+          using errcode = '42501';
+      end if;
+    end if;
+
+    if old.role is distinct from new.role
+      and old.role <> 'Administrator'
+      and new.role = 'Administrator' then
+      update public.profile_admin_guard
+      set administrator_count = administrator_count + 1
+      where singleton;
+      if not found then
+        raise exception 'Administrator protection state is unavailable'
+          using errcode = '55000';
+      end if;
+    end if;
+
+    return new;
+  elsif tg_op = 'INSERT' then
+    if new.role = 'Administrator' then
+      update public.profile_admin_guard
+      set administrator_count = administrator_count + 1
+      where singleton;
+      if not found then
+        raise exception 'Administrator protection state is unavailable'
+          using errcode = '55000';
+      end if;
+    end if;
+    return new;
+  elsif tg_op = 'DELETE' then
+    if old.role = 'Administrator'
+      and exists (
+        select 1
+        from public.profile_admin_guard
+        where singleton and administrator_count <= 1
+      ) then
+      raise exception 'Cannot delete the last Administrator; profile deletion is not supported'
+        using errcode = '55000';
+    end if;
+    raise exception 'Profile deletion is not supported'
+      using errcode = '55000';
   end if;
-  return new;
+
+  raise exception 'Unsupported profiles operation: %', tg_op
+    using errcode = '55000';
 end;
 $$;
 
 drop trigger if exists prevent_self_role_change on public.profiles;
 create trigger prevent_self_role_change
-  before update on public.profiles
+  before insert or update or delete on public.profiles
   for each row execute function public.prevent_self_role_change();
+
+create or replace function public.audit_profile_role_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  if old.role is distinct from new.role then
+    insert into public.profile_role_audit (
+      user_id, old_role, new_role, changed_by, reason
+    ) values (
+      old.id,
+      old.role,
+      new.role,
+      auth.uid(),
+      coalesce(nullif(btrim(current_setting('costtrack.role_change_reason', true)), ''), '')
+    );
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists audit_profile_role_change on public.profiles;
+create trigger audit_profile_role_change
+  after update on public.profiles
+  for each row
+  when (old.role is distinct from new.role)
+  execute function public.audit_profile_role_change();
+
+create or replace function public.costtrack_update_profile_role(
+  p_user_id uuid,
+  p_new_role text,
+  p_reason text default ''
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  existing_role text;
+  previous_reason text;
+begin
+  if auth.uid() is null
+    or not coalesce(public.has_app_role(array['Administrator']), false) then
+    raise exception 'Only Administrators may change user roles'
+      using errcode = '42501';
+  end if;
+
+  if p_user_id is null then
+    raise exception 'A user profile is required'
+      using errcode = '22023';
+  end if;
+
+  if p_new_role is null or p_new_role not in (
+    'Administrator',
+    'Manager',
+    'Receptionist',
+    'Inventory Clerk',
+    'Chef / Kitchen Staff'
+  ) then
+    raise exception 'The requested role is not a valid staff role'
+      using errcode = '22023';
+  end if;
+
+  if char_length(btrim(coalesce(p_reason, ''))) > 500 then
+    raise exception 'The role-change reason must be 500 characters or fewer'
+      using errcode = '22023';
+  end if;
+
+  select profile.role
+  into existing_role
+  from public.profiles as profile
+  where profile.id = p_user_id
+  for update;
+
+  if not found then
+    raise exception 'User profile not found'
+      using errcode = 'P0002';
+  end if;
+
+  if existing_role = p_new_role then
+    return false;
+  end if;
+
+  if p_user_id = auth.uid() then
+    raise exception 'Users cannot change their own role'
+      using errcode = '42501';
+  end if;
+
+  previous_reason := current_setting('costtrack.role_change_reason', true);
+  perform set_config(
+    'costtrack.role_change_reason',
+    btrim(coalesce(p_reason, '')),
+    true
+  );
+
+  update public.profiles
+  set role = p_new_role
+  where id = p_user_id;
+
+  if not found then
+    raise exception 'User profile was not updated'
+      using errcode = 'P0002';
+  end if;
+
+  perform set_config(
+    'costtrack.role_change_reason',
+    coalesce(previous_reason, ''),
+    true
+  );
+
+  return true;
+end;
+$$;
 
 drop trigger if exists prevent_direct_stock_change on public.ingredients;
 create trigger prevent_direct_stock_change
@@ -1827,6 +2191,9 @@ alter table public.reservations enable row level security;
 alter table public.buffet_rates enable row level security;
 alter table public.restaurant_tables enable row level security;
 alter table public.audit_logs enable row level security;
+alter table public.profile_admin_guard enable row level security;
+alter table public.profile_role_audit enable row level security;
+alter table public.user_invites enable row level security;
 
 -- PHASE 2: remove old policies before defining the final restrictive role set.
 do $$
@@ -1850,7 +2217,9 @@ begin
         'reservations',
         'buffet_rates',
         'restaurant_tables',
-        'audit_logs'
+        'audit_logs',
+        'profile_role_audit',
+        'user_invites'
       ])
   loop
     execute format(
@@ -1872,13 +2241,19 @@ create policy profiles_admin_read
 create policy profiles_admin_insert
   on public.profiles for insert to authenticated
   with check (public.has_app_role(array['Administrator']));
-create policy profiles_admin_update
-  on public.profiles for update to authenticated
+create policy profile_role_audit_admin_read
+  on public.profile_role_audit for select to authenticated
+  using (public.has_app_role(array['Administrator']));
+create policy user_invites_admin_select
+  on public.user_invites for select to authenticated
+  using (public.has_app_role(array['Administrator']));
+create policy user_invites_admin_insert
+  on public.user_invites for insert to authenticated
+  with check (public.has_app_role(array['Administrator']));
+create policy user_invites_admin_update
+  on public.user_invites for update to authenticated
   using (public.has_app_role(array['Administrator']))
   with check (public.has_app_role(array['Administrator']));
-create policy profiles_admin_delete
-  on public.profiles for delete to authenticated
-  using (public.has_app_role(array['Administrator']));
 
 create policy ingredients_read
   on public.ingredients for select to authenticated
@@ -2493,12 +2868,15 @@ revoke all on table
   public.restaurant_tables,
   public.public_reservation_attempts,
   public.audit_logs,
+  public.profile_admin_guard,
+  public.profile_role_audit,
+  public.user_invites,
   public.app_records_migrations,
   public.app_records_migration_errors
 from public, anon, authenticated;
 
+grant select, insert on table public.profiles to authenticated;
 grant select, insert, update, delete on table
-  public.profiles,
   public.ingredients,
   public.recipes,
   public.recipe_ingredients,
@@ -2520,12 +2898,15 @@ from public, anon, authenticated;
 revoke insert, update on table public.recipes from public, anon, authenticated;
 revoke insert, update, delete on table public.recipe_ingredients from public, anon, authenticated;
 grant select on table public.audit_logs to authenticated;
+grant select on table public.profile_role_audit to authenticated;
+grant select, insert, update on table public.user_invites to authenticated;
 
 revoke all on function public.current_app_role() from public, anon;
 revoke all on function public.has_app_role(text[]) from public, anon;
 grant execute on function public.current_app_role() to authenticated;
 grant execute on function public.has_app_role(text[]) to authenticated;
 revoke all on function public.touch_updated_at() from public, anon, authenticated;
+revoke all on function public.guard_user_invite() from public, anon, authenticated;
 revoke all on function public.apply_inventory_transaction_stock() from public, anon, authenticated;
 revoke all on function public.apply_production_stock() from public, anon, authenticated;
 revoke all on function public.apply_waste_stock() from public, anon, authenticated;
@@ -2594,6 +2975,11 @@ comment on table public.buffet_rates is
 comment on table public.ingredients is
   'PHASE 2; ingredient costs are visible to Administrator, Manager, Chef / Kitchen Staff, and Inventory Clerk. Receptionist has no access.';
 revoke all on function public.prevent_self_role_change() from public, anon, authenticated;
+revoke all on function public.audit_profile_role_change() from public, anon, authenticated;
+revoke all on function public.costtrack_update_profile_role(uuid, text, text)
+  from public, anon, authenticated;
+grant execute on function public.costtrack_update_profile_role(uuid, text, text)
+  to authenticated;
 revoke all on function public.write_audit_log() from public, anon, authenticated;
 
 revoke all on function public.save_recipe(jsonb, timestamptz) from public, anon;
