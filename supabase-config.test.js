@@ -315,6 +315,27 @@ test('public reservation RPC preserves large categorized guest totals without ca
   }
 });
 
+test('reservation reference email invokes the server function with only its lookup fields', async () => {
+  let call;
+  const { record } = loadSupabaseRecord(
+    () => ({}),
+    {
+      functions: {
+        async invoke(name, options) {
+          call = { name, options };
+          return { data: { sent: true }, error: null };
+        }
+      }
+    }
+  );
+
+  assert.equal(await record.sendPublicReservationReference('RSV-1', 'guest@example.com'), true);
+  assert.equal(call.name, 'send-reservation-email');
+  assert.equal(call.options.body.reference, 'RSV-1');
+  assert.equal(call.options.body.email, 'guest@example.com');
+  assert.deepEqual(Object.keys(call.options.body).sort(), ['email', 'reference']);
+});
+
 test('posSaveBill returns a successful RPC response without waiting for its timeout', async () => {
   const expected = { bill: { id: 'bill-1' } };
   const { record, timers } = loadSupabaseRecord(() => ({

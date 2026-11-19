@@ -784,6 +784,17 @@ window.supabaseRecord = {
     throwIfError(error);
     return data;
   },
+  async sendPublicReservationReference(reference, email) {
+    const { data, error } = await window.supabaseClient.functions.invoke(
+      'send-reservation-email',
+      { body: { reference, email } }
+    );
+    throwIfError(error);
+    if (!data || data.sent !== true) {
+      throw new Error('The reservation email service returned an invalid response.');
+    }
+    return true;
+  },
   async getPublicReservationStatus(reference, contact) {
     const { data, error } = await window.supabaseClient.rpc('public_get_reservation_status', {
       reference,

@@ -164,7 +164,18 @@ function bind() {
       });
       const reference = typeof reservation === 'string' ? reservation : reservation.id || reservation.reference;
       if (!reference) throw new Error('The reservation was submitted but no reference was returned.');
-      formElement.innerHTML = `<div class="success"><span aria-hidden="true">✦</span><small>Reservation submitted successfully</small><h2>Thank you, ${escapeHTML(String(form.get('name')).trim().split(' ')[0])}.</h2><p>Your table request is with our team.</p><b>${escapeHTML(reference)}</b><button class="link" data-page="status">Check reservation status →</button></div>`;
+      const email = String(form.get('email')).trim();
+      let referenceEmailSent = false;
+      try {
+        await window.supabaseRecord.sendPublicReservationReference(reference, email);
+        referenceEmailSent = true;
+      } catch (error) {
+        console.error('Reservation was saved, but its reference email could not be sent.', error);
+      }
+      const emailNotice = referenceEmailSent
+        ? `We sent the reference to ${escapeHTML(email)}.`
+        : 'We could not email the reference. Please save it so you can check your reservation status.';
+      formElement.innerHTML = `<div class="success"><span aria-hidden="true">✦</span><small>Reservation request received</small><h2>Thank you, ${escapeHTML(String(form.get('name')).trim().split(' ')[0])}.</h2><p>Your table request is with our team. It is not confirmed until the restaurant approves it.</p><b>${escapeHTML(reference)}</b><p>${emailNotice}</p><button class="link" data-page="status">Check reservation status →</button></div>`;
       sessionStorage.setItem(publicReservationCooldownKey, String(Date.now() + publicReservationCooldownMs));
       bind();
     } catch (error) {

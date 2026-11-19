@@ -10,6 +10,22 @@
 
 The schema deliberately does not import the old `users` collection as real accounts. It removes the former anonymous `app_records` policies and grants public access only to the reservation RPCs.
 
+## Reservation reference email
+
+The Landing Page sends a reservation reference email only after `public_create_reservation` succeeds. The `send-reservation-email` Edge Function verifies the reference and email against a Website reservation and reports its current status (normally **Pending**); it does not change the reservation workflow. If email delivery fails, the customer still sees the saved reference and the reservation remains saved.
+
+The function uses Nodemailer with Gmail SMTP and a Gmail App Password; Google Cloud OAuth credentials are not used. Enable 2-Step Verification on the sender's Google account, then create an App Password in the account's Security settings. Set `GMAIL_USER` to that account and `GMAIL_APP_PASSWORD` to its 16-character App Password in Supabase Edge Function secrets. Do not put either value in browser code or commit them. Supabase supplies `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to deployed Edge Functions.
+
+Deploy with:
+
+```text
+supabase functions deploy send-reservation-email --no-verify-jwt
+```
+
+JWT verification is disabled for this public customer flow. The function accepts only a reservation reference and email, checks both against the database using the server-side service key, and builds the email from the matched row. Keep the service key and Gmail App Password server-side. Test delivery with a real Website reservation in a non-production project before using the function for customer bookings.
+
+SMTP availability depends on the Edge Function runtime and network policy. A successful deployment does not guarantee Gmail SMTP can be reached. After setting the secrets, send a test reservation and check the `send-reservation-email` function logs. If the runtime blocks Gmail SMTP, use an email service with an HTTPS API instead.
+
 ## Phase 1 inventory foundation
 
 The Phase 1 migration is additive and depends on the base schema above. Before applying it, make and verify a database backup, then run [`phase8_inventory_architecture_migration.sql`](./supabase/phase8_inventory_architecture_migration.sql) as the database owner in a non-production project first. Do not apply it to a live project until the non-production checks pass.
