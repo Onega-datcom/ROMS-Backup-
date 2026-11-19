@@ -577,6 +577,13 @@
     };
   }
 
+  function isRecentWebsiteReservation(reservation, now = Date.now()) {
+    if (!reservation || reservation.source !== 'Website' || reservation.status !== 'Pending') return false;
+    const createdAt = Date.parse(reservation.createdAt || '');
+    const recentWindowMs = 24 * 60 * 60 * 1000;
+    return Number.isFinite(createdAt) && createdAt <= now && now - createdAt <= recentWindowMs;
+  }
+
   function activeBuffetRate(rates, mealPeriod, date, dayType) {
     const targetMealPeriod = String(mealPeriod || 'All Day').trim().toLowerCase();
     const targetDayType = String(dayType || '').trim().toLowerCase();
@@ -904,6 +911,7 @@
     productionProgress,
     reservationRevenue,
     normalizeReservationGuestCounts,
+    isRecentWebsiteReservation,
     reservationEndTime,
     reservationStayLimitReached,
     recipeFoodCostPercent,

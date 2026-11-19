@@ -78,6 +78,16 @@
 .reservation-filters button.active,.reservation-date-shortcuts button.active{border-color:var(--orange);background:var(--mint);color:var(--teal-dark);font-weight:600}
 .reservation-date-field.is-filter-active input,.reservation-meal-filter.is-filter-active select{border-color:var(--orange);background:var(--mint)}
 .reservation-meal-filter{display:grid;align-content:start;gap:5px}
+
+.reservation-source-filter{display:grid;align-content:start;gap:5px;color:var(--muted);font-size:10px;font-weight:700}
+.reservation-source-filter select{min-height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-size:11px}
+.reservation-source-filter.is-filter-active select{border-color:var(--orange);background:var(--mint)}
+.reservation-source-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid #dfe7e3;border-radius:999px;background:#f2f6f4;color:#42524b;font-size:10px;font-weight:700}
+.reservation-source-badge--website{border-color:#cfe2f3;background:#e8f4ff;color:#275e89}
+.reservation-new-badge{padding:2px 6px;border-radius:999px;background:#fff0d9;color:#835011;font-size:9px;font-weight:800;text-transform:uppercase}
+.reservation-card--new-website{border-color:#e4b46e;background:#fffaf1;box-shadow:0 0 0 1px rgba(180,120,40,.12)}
+.website-new-reservations-button{min-height:44px;border-color:#e4b46e;background:#fff4e5;color:#835011;font-weight:700}
+.website-new-reservations-button[aria-pressed="true"]{border-color:#bd8230;background:#ffe8c7;color:#70400d}
 .reservation-meal-filter select{box-sizing:border-box;min-height:44px}
 
 .selected-ingredient{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,1.2fr) auto;align-items:center;gap:12px;background:var(--white);border-color:var(--line)}

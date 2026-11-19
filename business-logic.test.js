@@ -63,6 +63,10 @@ test('missing buffet rate is represented without throwing', () => {
 });
 
 test('reservation estimates and validated counts include Senior/PWD guests', () => {
+  assert.deepEqual(
+    logic.normalizeReservationGuestCounts('2', '1', '2'),
+    { adults: 2, seniorPwdCount: 1, children: 2, total: 5 }
+  );
   const counts = logic.normalizeReservationGuestCounts('4', '1', '2');
   assert.deepEqual(counts, { adults: 4, seniorPwdCount: 1, children: 2, total: 7 });
   assert.equal(
@@ -75,6 +79,49 @@ test('reservation estimates and validated counts include Senior/PWD guests', () 
   assert.throws(() => logic.normalizeReservationGuestCounts(0, 0, 0), /between 1 and 1,000/);
   assert.throws(() => logic.normalizeReservationGuestCounts(1, -1, 1), /non-negative whole numbers/);
   assert.throws(() => logic.normalizeReservationGuestCounts(1, 0.5, 1), /non-negative whole numbers/);
+});
+
+test('reservation guest totals preserve large party counts above six', () => {
+  const examples = [
+    { adults: 7, seniorPwdCount: 0, children: 0, total: 7 },
+    { adults: 5, seniorPwdCount: 1, children: 2, total: 8 },
+    { adults: 5, seniorPwdCount: 2, children: 3, total: 10 },
+    { adults: 6, seniorPwdCount: 2, children: 4, total: 12 }
+  ];
+
+  examples.forEach(({ adults, seniorPwdCount, children, total }) => {
+    assert.deepEqual(
+      logic.normalizeReservationGuestCounts(adults, seniorPwdCount, children),
+      { adults, seniorPwdCount, children, total }
+    );
+  });
+});
+
+test('recent website reservation awareness requires a pending booking created within 24 hours', () => {
+  const now = Date.parse('2026-11-19T06:00:00.000Z');
+  const reservation = {
+    source: 'Website',
+    status: 'Pending',
+    createdAt: new Date(now - 60 * 60 * 1000).toISOString()
+  };
+
+  assert.equal(logic.isRecentWebsiteReservation(reservation, now), true);
+  assert.equal(logic.isRecentWebsiteReservation({
+    ...reservation,
+    createdAt: new Date(now - 25 * 60 * 60 * 1000).toISOString()
+  }, now), false);
+  assert.equal(logic.isRecentWebsiteReservation({
+    ...reservation,
+    status: 'Confirmed'
+  }, now), false);
+  assert.equal(logic.isRecentWebsiteReservation({
+    ...reservation,
+    source: 'Phone'
+  }, now), false);
+  assert.equal(logic.isRecentWebsiteReservation({
+    ...reservation,
+    createdAt: new Date(now + 60 * 1000).toISOString()
+  }, now), false);
 });
 
 test('buffet rate lookup matches weekday, weekend, and holiday day types case-insensitively', () => {

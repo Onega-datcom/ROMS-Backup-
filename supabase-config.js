@@ -150,6 +150,7 @@ function mapDatabaseRecord(collection, row) {
       adults: row.adults, seniorPwdCount: Number(row.senior_pwd_count || 0),
       children: row.children, source: row.source || '', occasion: row.occasion,
       status: row.status, preference: row.preference, request: row.request,
+      createdAt: row.created_at || null,
       table: row.table_id, type: row.type, seatedAt: row.seated_at, completedAt: row.completed_at,
       actualCovers: row.actual_covers, correctionReason: row.last_correction_reason || '',
       packageChargeItemId: row.package_charge_item_id || '',
@@ -776,6 +777,7 @@ window.supabaseRecord = {
         reservation_date: payload.date,
         reservation_time: payload.time,
         adults: payload.adults ?? payload.guests,
+        senior_pwd_count: payload.seniorPwdCount ?? payload.senior_pwd_count ?? 0,
         children: payload.children ?? 0
       }
     });

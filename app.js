@@ -53,6 +53,8 @@ state.receivingDraft = [];
 state.receivingForm = {};
 state.reservationFilter = 'All';
 state.reservationTypeFilter = 'All';
+state.reservationSourceFilter = 'All';
+const reservationSourceFilterValues = ['All', 'Website', 'Phone', 'Facebook', 'Walk-in', 'Other', 'Unspecified'];
 state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
 state.unresolvedFocusId = '';
 state.calendarDate = '';
@@ -103,11 +105,13 @@ try {
   console.warn('Reservation filter preferences could not be restored.', error);
 }
 if (!['Lunch', 'Dinner'].includes(state.reservationMealPeriodFilter)) state.reservationMealPeriodFilter = 'All';
-if (!['status', 'type', 'meal', 'date'].includes(state.reservationFilterHighlightGroup)) state.reservationFilterHighlightGroup = 'status';
+if (!reservationSourceFilterValues.includes(state.reservationSourceFilter)) state.reservationSourceFilter = 'All';
+if (!['status', 'type', 'meal', 'date', 'source'].includes(state.reservationFilterHighlightGroup)) state.reservationFilterHighlightGroup = 'status';
 function persistReservationFilters() {
   sessionStorage.setItem('costtrack_reservation_filters', JSON.stringify({
     reservationFilter: state.reservationFilter,
     reservationTypeFilter: state.reservationTypeFilter,
+    reservationSourceFilter: state.reservationSourceFilter,
     reservationMealPeriodFilter: state.reservationMealPeriodFilter,
     reservationDateFilter: state.reservationDateFilter,
     reservationFilterHighlightGroup: state.reservationFilterHighlightGroup
@@ -1016,17 +1020,25 @@ function activeNotifications() {
     all('reservations')
       .filter(item => item.status === 'Pending' && (!item.date || item.date >= manilaBusinessToday()))
       .sort((left, right) => `${left.date || ''} ${left.time || ''}`.localeCompare(`${right.date || ''} ${right.time || ''}`))
-      .forEach(item => alerts.push({
-        key: `reservation:${item.id}`,
-        dedupeKey: `reservation:${item.id}`,
-        category: 'reservation',
-        title: 'Pending reservation',
-        detail: `${item.name || 'Guest'} · ${Number(item.guests || 0)} guests · ${notificationDateLabel(item.date)}${item.time ? ` · ${item.time}` : ''}`,
-        severity: 'info',
-        icon: 'calendar',
-        createdAt: item.createdAt || null,
-        action: { view: 'reservations', label: 'Review reservation', filter: 'Pending', query: item.name || '' }
-      }));
+      .forEach(item => {
+        const isNewWebsiteReservation = window.CostTrackLogic.isRecentWebsiteReservation(item);
+        alerts.push({
+          key: `reservation:${item.id}`,
+          dedupeKey: `reservation:${item.id}`,
+          category: 'reservation',
+          title: isNewWebsiteReservation ? 'New website reservation' : item.source === 'Website' ? 'Pending website reservation' : 'Pending reservation',
+          detail: `${item.source ? `${item.source} · ` : ''}${item.name || 'Guest'} · ${Number(item.guests || 0)} guests · ${notificationDateLabel(item.date)}${item.time ? ` · ${item.time}` : ''}`,
+          severity: 'info',
+          icon: 'calendar',
+          createdAt: item.createdAt || null,
+          action: {
+            view: 'reservations',
+            label: 'Review reservation',
+            filter: isNewWebsiteReservation ? 'New website' : 'Pending',
+            query: isNewWebsiteReservation ? '' : item.name || ''
+          }
+        });
+      });
     (state.unresolvedBookings.rows || []).forEach(item => alerts.push({
       key: `unresolved:${item.reservation_id}`,
       dedupeKey: `unresolved:${item.reservation_id}`,
@@ -1216,9 +1228,11 @@ async function openNotification(key) {
   state.query = action.query || '';
   if (action.filter) {
     state.reservationFilter = action.filter;
-    state.reservationDateFilter = 'All';
+    state.reservationDateFilter = action.filter === 'Pending' ? 'Upcoming' : 'All';
     state.reservationTypeFilter = 'All';
+    state.reservationSourceFilter = 'All';
     state.reservationMealPeriodFilter = 'All';
+    state.reservationFilterHighlightGroup = 'status';
   }
   if (action.recordId) state.unresolvedFocusId = action.recordId;
   state.notificationViewAll = false;
@@ -2768,7 +2782,14 @@ function reservationDisplayName(item) {
 }
 function reservationCard(item, showRevenue = false) {
   const isPastReservation = item.date < today();
+  const isNewWebsiteReservation = window.CostTrackLogic.isRecentWebsiteReservation(item);
+  const sourceLabel = item.source ? `Source: ${item.source}` : 'Source not specified';
+  const sourceBadge = `<span class="reservation-source-badge${item.source === 'Website' ? ' reservation-source-badge--website' : ''}">${esc(sourceLabel)}${isNewWebsiteReservation ? '<span class="reservation-new-badge">New</span>' : ''}</span>`;
   const guestCount = reservationGuestCount(item);
+  const adultCount = Number(item.adults ?? item.guests ?? 0);
+  const seniorPwdCount = Number(item.seniorPwdCount || 0);
+  const children = Number(item.children || 0);
+  const totalGuests = Number(item.guests ?? adultCount + seniorPwdCount + children);
   const rate = activeBuffetRate(item);
   const revenueEstimate = rate ? reservationRevenue(item, rate) : null;
   const hasRevenue = all('revenueRecords').some(record => record.reservation_id === item.id);
@@ -2799,7 +2820,7 @@ function reservationCard(item, showRevenue = false) {
   const rateLabel = rate && revenueEstimate !== null
     ? `${money(revenueEstimate)} estimated buffet revenue`
     : 'No rate set';
-  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>${guestCount} covers · ${esc(item.table || 'Unassigned')}</small>${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}`;
+  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>Adults ${adultCount} · Senior/PWD ${seniorPwdCount} · Kids ${children} · Total guests ${totalGuests}${item.actualCovers == null ? '' : ` · Actual covers ${guestCount}`} · ${esc(item.table || 'Unassigned')}</small>${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}`;
   const lifecycleActions = isPastReservation
     ? item.status === 'Seated'
       ? `${openBill
@@ -2824,7 +2845,7 @@ function reservationCard(item, showRevenue = false) {
   const actionLabel = isPastReservation
     ? (['Administrator', 'Manager'].includes(state.role) ? 'Correct past reservation' : 'View past reservation')
     : 'View reservation';
-  return `<article class="reservation-card${isPastReservation ? ' reservation-card--historical' : ''}"><button type="button" class="reservation-card-main" data-action="edit-reservation" data-id="${esc(item.id)}" aria-label="${actionLabel} for ${esc(item.name)}">${details}</button><div class="reservation-actions">${actions}</div></article>`;
+  return `<article class="reservation-card${isPastReservation ? ' reservation-card--historical' : ''}${isNewWebsiteReservation ? ' reservation-card--new-website' : ''}"><button type="button" class="reservation-card-main" data-action="edit-reservation" data-id="${esc(item.id)}" aria-label="${actionLabel} for ${esc(item.name)}">${sourceBadge}${details}</button><div class="reservation-actions">${actions}</div></article>`;
 }
 function unresolvedBookingCard(row) {
   const reservationId = row.reservation_id;
@@ -3147,17 +3168,24 @@ function reservationsPage() {
   const reservations = all('reservations');
   const selectedDate = state.calendarDate || today();
   const unresolvedMode = state.reservationFilter === 'Unresolved';
+  const newWebsiteMode = state.reservationFilter === 'New website';
   const unresolvedRows = state.unresolvedBookings.rows || [];
   const query = String(state.query || '').trim().toLowerCase();
   const filteredUnresolvedRows = unresolvedRows.filter(row =>
     (state.reservationTypeFilter === 'All' || row.type === state.reservationTypeFilter)
     && (!query || `${row.name || ''} ${row.table_id || ''} ${row.type || ''} ${row.reservation_id || ''}`.toLowerCase().includes(query))
   );
-  const dateMatches = item => state.reservationDateFilter === 'Today' ? item.date === today() : state.reservationDateFilter === 'Upcoming' ? item.date >= today() : item.date === selectedDate;
-  const baseItems = unresolvedMode ? [] : reservations.filter(dateMatches).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter) && (!state.query || `${item.name} ${item.email} ${item.phone}`.toLowerCase().includes(state.query.toLowerCase())));
+  const dateMatches = item => newWebsiteMode || (state.reservationDateFilter === 'Today' ? item.date === today() : state.reservationDateFilter === 'Upcoming' ? item.date >= today() : item.date === selectedDate);
+  const sourceMatches = item => newWebsiteMode
+    ? window.CostTrackLogic.isRecentWebsiteReservation(item)
+    : state.reservationSourceFilter === 'All'
+      || (state.reservationSourceFilter === 'Unspecified' ? !item.source : item.source === state.reservationSourceFilter);
+  const baseItems = unresolvedMode ? [] : reservations.filter(dateMatches).filter(sourceMatches).filter(item => (state.reservationTypeFilter === 'All' || (item.type || 'Reservation') === state.reservationTypeFilter) && (!query || `${item.name || ''} ${item.email || ''} ${item.phone || ''}`.toLowerCase().includes(query)));
   const items = baseItems
-    .filter(item => (state.reservationFilter === 'All' || item.status === state.reservationFilter) && (state.reservationMealPeriodFilter === 'All' || reservationMealPeriod(item) === state.reservationMealPeriodFilter))
-    .sort((a, b) => a.date.localeCompare(b.date) || (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
+    .filter(item => (newWebsiteMode || state.reservationFilter === 'All' || item.status === state.reservationFilter) && (state.reservationMealPeriodFilter === 'All' || reservationMealPeriod(item) === state.reservationMealPeriodFilter))
+    .sort(newWebsiteMode
+      ? (a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))
+      : (a, b) => a.date.localeCompare(b.date) || (parseTime12h(a.time) ?? Number.MAX_SAFE_INTEGER) - (parseTime12h(b.time) ?? Number.MAX_SAFE_INTEGER));
   const counts = status => status === 'Unresolved'
     ? unresolvedRows.length
     : status === 'All' ? baseItems.length : baseItems.filter(item => item.status === status).length;
@@ -3167,18 +3195,31 @@ function reservationsPage() {
   const typeFilters = ['All', 'Reservation', 'Walk-in']
     .map(type => `<button type="button" class="${state.reservationFilterHighlightGroup === 'type' && state.reservationTypeFilter === type ? 'active' : ''}" data-reservation-type-filter="${type}">${type}</button>`)
     .join('');
+  const sourceFilterOptions = [
+    ['All', 'All sources'],
+    ['Website', 'Website'],
+    ['Phone', 'Phone'],
+    ['Facebook', 'Facebook'],
+    ['Walk-in', 'Walk-in'],
+    ['Other', 'Other'],
+    ['Unspecified', 'Not specified']
+  ].map(([value, label]) => `<option value="${value}" ${state.reservationSourceFilter === value ? 'selected' : ''}>${label}</option>`).join('');
+  const sourceFilter = unresolvedMode || newWebsiteMode ? '' : `<label class="reservation-source-filter ${state.reservationFilterHighlightGroup === 'source' ? 'is-filter-active' : ''}"><span>Source</span><select data-reservation-source-filter aria-label="Filter by reservation source">${sourceFilterOptions}</select></label>`;
   const hasActiveFilters = unresolvedMode
     ? state.reservationTypeFilter !== 'All' || Boolean(String(state.query || '').trim())
-    : state.reservationFilter !== 'All'
-      || state.reservationTypeFilter !== 'All'
-      || state.reservationMealPeriodFilter !== 'All'
-      || state.reservationDateFilter !== 'All'
-      || Boolean(String(state.query || '').trim())
-      || selectedDate !== today();
+    : newWebsiteMode
+      ? true
+      : state.reservationFilter !== 'All'
+        || state.reservationTypeFilter !== 'All'
+        || state.reservationSourceFilter !== 'All'
+        || state.reservationMealPeriodFilter !== 'All'
+        || state.reservationDateFilter !== 'All'
+        || Boolean(String(state.query || '').trim())
+        || selectedDate !== today();
   const clearFiltersButton = hasActiveFilters
     ? '<button type="button" class="text-btn reservation-clear-filters" data-reservation-clear-filters>Clear filters</button>'
     : '';
-  const dateControls = unresolvedMode ? '' : `<label class="reservation-date-field ${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'All' ? 'is-filter-active' : ''}">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div>`;
+  const dateControls = unresolvedMode || newWebsiteMode ? '' : `<label class="reservation-date-field ${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'All' ? 'is-filter-active' : ''}">Specific date<input type="date" value="${esc(selectedDate)}" data-reservation-list-date aria-label="Choose a specific reservation date"></label><div class="reservation-date-shortcuts" role="group" aria-label="Reservation date range"><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Today' ? 'active' : ''}" data-reservation-date-filter="Today">Today</button><button type="button" class="${state.reservationFilterHighlightGroup === 'date' && state.reservationDateFilter === 'Upcoming' ? 'active' : ''}" data-reservation-date-filter="Upcoming">Upcoming</button></div>`;
   const mealPeriodFilter = unresolvedMode ? '' : `<label class="reservation-meal-filter ${state.reservationFilterHighlightGroup === 'meal' ? 'is-filter-active' : ''}">Meal period<select data-reservation-meal><option value="All" ${state.reservationMealPeriodFilter === 'All' ? 'selected' : ''}>All</option><option value="Lunch" ${state.reservationMealPeriodFilter === 'Lunch' ? 'selected' : ''}>Lunch</option><option value="Dinner" ${state.reservationMealPeriodFilter === 'Dinner' ? 'selected' : ''}>Dinner</option><option value="Other" ${state.reservationMealPeriodFilter === 'Other' ? 'selected' : ''}>Other</option></select></label>`;
   const unresolvedList = state.unresolvedBookings.loading
     ? '<div class="empty-table" role="status" aria-live="polite">Loading unresolved bookings…</div>'
@@ -3210,15 +3251,21 @@ function reservationsPage() {
       : '';
     return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}${unresolvedLink}</div>`;
   }).join('');
-  const listLabel = unresolvedMode ? 'Unresolved bookings' : state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
+  const listLabel = unresolvedMode ? 'Unresolved bookings' : newWebsiteMode ? 'New website reservations · last 24 hours' : state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
   const unresolvedBadge = state.unresolvedBookings.loading
     ? '<span class="nav-badge" aria-live="polite">Unresolved · loading</span>'
     : `<span class="nav-badge" aria-live="polite">${unresolvedRows.length} unresolved</span>`;
+  const newWebsiteReservations = reservations.filter(item => window.CostTrackLogic.isRecentWebsiteReservation(item));
+  const newWebsiteFilter = `<button type="button" class="ghost-btn website-new-reservations-button" data-reservation-new-website-filter aria-pressed="${newWebsiteMode}" title="Pending website reservations submitted within the last 24 hours">New website <b>${newWebsiteReservations.length}</b></button>`;
   const timelineContent = unresolvedMode
     ? timeline
-    : selectedCount ? timeline : '<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>';
-  const headerActions = `<span>${unresolvedBadge} <button type="button" class="ghost-btn" data-action="refresh-unresolved-bookings" ${state.unresolvedBookings.loading ? 'disabled' : ''}>Refresh unresolved</button> <button type="button" class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button type="button" class="primary-btn" data-action="open-reservation">+ New reservation</button></span>`;
-  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', headerActions)}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><section class="panel reservation-table-panel reservation-list-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${state.unresolvedBookings.error && unresolvedMode ? 'List unavailable until refreshed.' : `${selectedCount} ${unresolvedMode ? 'booking' : 'reservation'}${selectedCount === 1 ? '' : 's'}${unresolvedMode ? ' require attention' : ' scheduled'}`}</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-list-controls">${dateControls}<label class="reservation-search-field">Search<input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Guest, email, phone, table, or ID" aria-label="Search guests"></label>${clearFiltersButton}</div><div class="reservation-filter-bar"><div class="reservation-filter-group"><span class="reservation-filter-group-label">Status</span><div class="reservation-filters" role="group" aria-label="Filter by reservation status">${statusFilters}</div></div><div class="reservation-filter-group"><span class="reservation-filter-group-label">Type</span><div class="reservation-filters" role="group" aria-label="Filter by booking type">${typeFilters}</div></div>${mealPeriodFilter}</div><div class="reservation-timeline">${timelineContent}</div></section>`;
+    : selectedCount
+      ? timeline
+      : newWebsiteMode
+        ? '<div class="empty-table"><strong>No new website reservations</strong><small>Pending website requests submitted within the last 24 hours will appear here.</small></div>'
+        : '<div class="empty-table"><strong>No reservations match these filters</strong><small>Choose another date or create a new reservation.</small></div>';
+  const headerActions = `<span>${unresolvedBadge} ${newWebsiteFilter} <button type="button" class="ghost-btn" data-action="refresh-unresolved-bookings" ${state.unresolvedBookings.loading ? 'disabled' : ''}>Refresh unresolved</button> <button type="button" class="ghost-btn" data-action="open-walk-in">Record walk-in</button> <button type="button" class="primary-btn" data-action="open-reservation">+ New reservation</button></span>`;
+  return `${pageHeader('Front of house', 'Reservations', 'Manage guest bookings, confirmations, arrivals, and table assignments.', headerActions)}<div class="panel table-status-panel"><div class="panel-header"><div><div class="panel-title">Live table status</div><div class="panel-subtitle">Derived from today’s reservation and walk-in records; updates after changes and every minute.</div></div></div><div class="table-status-grid">${tableCards}</div></div><section class="panel reservation-table-panel reservation-list-panel"><div class="reservation-table-heading"><div><div class="panel-title">${listLabel}</div><div class="panel-subtitle">${state.unresolvedBookings.error && unresolvedMode ? 'List unavailable until refreshed.' : `${selectedCount} ${unresolvedMode ? 'booking' : 'reservation'}${selectedCount === 1 ? '' : 's'}${unresolvedMode ? ' require attention' : ' scheduled'}`}</div></div><span class="date-selection-badge">${selectedCount}</span></div><div class="reservation-list-controls">${dateControls}<label class="reservation-search-field">Search<input id="tableSearch" type="search" value="${esc(state.query)}" placeholder="Guest, email, phone, table, or ID" aria-label="Search guests"></label>${clearFiltersButton}</div><div class="reservation-filter-bar"><div class="reservation-filter-group"><span class="reservation-filter-group-label">Status</span><div class="reservation-filters" role="group" aria-label="Filter by reservation status">${statusFilters}</div></div><div class="reservation-filter-group"><span class="reservation-filter-group-label">Type</span><div class="reservation-filters" role="group" aria-label="Filter by booking type">${typeFilters}</div></div>${sourceFilter}${mealPeriodFilter}</div><div class="reservation-timeline">${timelineContent}</div></section>`;
 }
 function tableManagementPage() {
   const date = state.tableManagementDate || today();
@@ -5355,6 +5402,12 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-report-waste]')) { state.reportIncludeWaste = event.target.checked; state.reportPage = 1; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-custom-date]')) { state[`customDate${event.target.dataset.customDate === 'from' ? 'From' : 'To'}`] = event.target.value; state.reportPage = 1; reportRequestKey = ''; render(); }
   if (event.target.matches('[data-reservation-meal]')) { state.reservationMealPeriodFilter = event.target.value === 'All' ? 'All' : event.target.value; state.reservationFilterHighlightGroup = 'meal'; persistReservationFilters(); render(); }
+  if (event.target.matches('[data-reservation-source-filter]')) {
+    state.reservationSourceFilter = event.target.value;
+    state.reservationFilterHighlightGroup = 'source';
+    persistReservationFilters();
+    render();
+  }
   if (event.target.matches('[data-reservation-list-date]')) {
     state.calendarDate = event.target.value || today();
     state.reservationFilter = 'All';
@@ -6465,6 +6518,7 @@ document.addEventListener('click', event => {
     const unresolvedMode = state.reservationFilter === 'Unresolved';
     state.reservationFilter = unresolvedMode ? 'Unresolved' : 'All';
     state.reservationTypeFilter = 'All';
+    state.reservationSourceFilter = 'All';
     state.reservationFilterHighlightGroup = 'status';
     state.reservationMealPeriodFilter = 'All';
     state.reservationDateFilter = 'All';
@@ -6480,10 +6534,25 @@ document.addEventListener('click', event => {
     state.reservationFilterHighlightGroup = 'status';
     state.query = '';
     if (state.reservationFilter === 'Unresolved') {
+      state.reservationSourceFilter = 'All';
       state.reservationDateFilter = 'All';
       state.reservationMealPeriodFilter = 'All';
       state.calendarDate = today();
     }
+    persistReservationFilters();
+    render();
+    return;
+  }
+  const newWebsiteFilter = event.target.closest('[data-reservation-new-website-filter]');
+  if (newWebsiteFilter) {
+    state.reservationFilter = state.reservationFilter === 'New website' ? 'All' : 'New website';
+    state.reservationTypeFilter = 'All';
+    state.reservationSourceFilter = 'All';
+    state.reservationDateFilter = 'All';
+    state.reservationMealPeriodFilter = 'All';
+    state.reservationFilterHighlightGroup = 'status';
+    state.calendarDate = today();
+    state.query = '';
     persistReservationFilters();
     render();
     return;

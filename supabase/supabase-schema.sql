@@ -2530,7 +2530,10 @@ declare
   reservation_day date;
   reservation_time_value text;
   guest_count integer;
+  provided_guest_count integer;
+  computed_guest_count bigint;
   adult_count integer;
+  senior_pwd_count integer;
   child_count integer;
   occasion_value text;
   preference_value text;
@@ -2588,14 +2591,21 @@ begin
       using errcode = '23514';
   end if;
 
-  guest_count := (payload ->> 'guests')::integer;
-  adult_count := coalesce(nullif(payload ->> 'adults', '')::integer, guest_count);
+  provided_guest_count := nullif(payload ->> 'guests', '')::integer;
+  adult_count := coalesce(nullif(payload ->> 'adults', '')::integer, provided_guest_count);
+  senior_pwd_count := coalesce(nullif(payload ->> 'senior_pwd_count', '')::integer, 0);
   child_count := coalesce(nullif(payload ->> 'children', '')::integer, 0);
-  if guest_count < 1 or guest_count > 1000
-     or adult_count < 0 or child_count < 0
-     or adult_count + child_count <> guest_count then
+  if adult_count is null then
     raise exception 'Guest counts are invalid';
   end if;
+  computed_guest_count := adult_count::bigint + senior_pwd_count + child_count;
+  if computed_guest_count < 1 or computed_guest_count > 1000
+     or adult_count < 0 or senior_pwd_count < 0 or child_count < 0
+     or (provided_guest_count is not null
+       and provided_guest_count::bigint <> computed_guest_count) then
+    raise exception 'Guest counts are invalid';
+  end if;
+  guest_count := computed_guest_count::integer;
 
   occasion_value := coalesce(nullif(btrim(payload ->> 'occasion'), ''), '');
   preference_value := coalesce(nullif(btrim(payload ->> 'preference'), ''), '');
@@ -2642,11 +2652,12 @@ begin
   begin
     insert into public.reservations (
       id, name, email, phone, reservation_date, reservation_time,
-      guests, type, adults, children, occasion, status, preference, request, created_by
+      guests, type, adults, senior_pwd_count, children,
+      occasion, status, preference, request, created_by
     ) values (
       new_reference, reservation_name, reservation_email, reservation_phone,
       reservation_day, reservation_time_value, guest_count, 'Reservation',
-      adult_count, child_count,
+      adult_count, senior_pwd_count, child_count,
       occasion_value, 'Pending', preference_value, request_value, auth.uid()
     );
   exception when unique_violation then

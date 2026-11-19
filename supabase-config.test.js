@@ -165,7 +165,7 @@ test('posSaveBill aborts and rejects a pending RPC after 15 seconds', async () =
   assert.equal(timers.size, 0);
 });
 
-test('reservation mapping preserves Senior/PWD count and source in both directions', async () => {
+test('reservation mapping preserves details and guest counts in both directions', async () => {
   let inserted;
   const client = {
     from(table) {
@@ -189,7 +189,9 @@ test('reservation mapping preserves Senior/PWD count and source in both directio
   const { record } = loadSupabaseRecord(() => ({}), client);
   const mapped = record.mapRecord('reservations', {
     id: 'RS-1',
-    name: 'Guest',
+    name: 'Juan Dela Cruz',
+    email: 'test@example.com',
+    phone: '09123456789',
     reservation_date: '2026-11-11',
     reservation_time: '11:00 AM',
     guests: 7,
@@ -199,14 +201,33 @@ test('reservation mapping preserves Senior/PWD count and source in both directio
     source: 'Phone',
     status: 'Pending',
     type: 'Reservation',
+    occasion: 'Birthday',
+    request: 'Window seat near the garden',
+    created_at: '2026-11-11T00:00:00.000Z',
     package_override_reason: 'Approved event exception'
   });
 
+  assert.equal(mapped.name, 'Juan Dela Cruz');
+  assert.equal(mapped.email, 'test@example.com');
+  assert.equal(mapped.phone, '09123456789');
+  assert.equal(mapped.date, '2026-11-11');
+  assert.equal(mapped.time, '11:00 AM');
+  assert.equal(mapped.adults, 4);
   assert.equal(mapped.seniorPwdCount, 1);
+  assert.equal(mapped.children, 2);
+  assert.equal(mapped.guests, 7);
   assert.equal(mapped.source, 'Phone');
+  assert.equal(mapped.status, 'Pending');
+  assert.equal(mapped.type, 'Reservation');
+  assert.equal(mapped.occasion, 'Birthday');
+  assert.equal(mapped.request, 'Window seat near the garden');
+  assert.equal(mapped.createdAt, '2026-11-11T00:00:00.000Z');
   assert.equal(mapped.packageOverrideReason, 'Approved event exception');
   await record.upsert('reservations', {
     id: 'RS-1',
+    name: 'Juan Dela Cruz',
+    email: 'test@example.com',
+    phone: '09123456789',
     date: '2026-11-11',
     time: '11:00 AM',
     guests: 7,
@@ -216,11 +237,82 @@ test('reservation mapping preserves Senior/PWD count and source in both directio
     source: 'Phone',
     status: 'Pending',
     type: 'Reservation',
+    occasion: 'Birthday',
+    request: 'Window seat near the garden',
     packageOverrideReason: 'Approved event exception'
   });
+  assert.equal(inserted.name, 'Juan Dela Cruz');
+  assert.equal(inserted.email, 'test@example.com');
+  assert.equal(inserted.phone, '09123456789');
+  assert.equal(inserted.reservation_date, '2026-11-11');
+  assert.equal(inserted.reservation_time, '11:00 AM');
   assert.equal(inserted.senior_pwd_count, 1);
   assert.equal(inserted.source, 'Phone');
+  assert.equal(inserted.status, 'Pending');
+  assert.equal(inserted.type, 'Reservation');
+  assert.equal(inserted.occasion, 'Birthday');
+  assert.equal(inserted.request, 'Window seat near the garden');
   assert.equal(inserted.package_override_reason, 'Approved event exception');
+});
+
+test('public reservation RPC receives categorized counts and the calculated guest total', async () => {
+  let call;
+  const { record } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return Promise.resolve({ data: 'RSV-1', error: null });
+  });
+
+  assert.equal(await record.submitPublicReservation({
+    name: 'Juan Dela Cruz',
+    email: 'test@example.com',
+    phone: '09123456789',
+    date: '2026-11-25',
+    time: '11:00 AM',
+    adults: 2,
+    seniorPwdCount: 1,
+    children: 2,
+    guests: 5,
+    occasion: 'Birthday',
+    request: 'Window seat near the garden'
+  }), 'RSV-1');
+  assert.equal(call.name, 'public_create_reservation');
+  assert.equal(call.args.payload.name, 'Juan Dela Cruz');
+  assert.equal(call.args.payload.email, 'test@example.com');
+  assert.equal(call.args.payload.phone, '09123456789');
+  assert.equal(call.args.payload.occasion, 'Birthday');
+  assert.equal(call.args.payload.request, 'Window seat near the garden');
+  assert.equal(call.args.payload.adults, 2);
+  assert.equal(call.args.payload.senior_pwd_count, 1);
+  assert.equal(call.args.payload.children, 2);
+  assert.equal(call.args.payload.guests, 5);
+  assert.equal(call.args.payload.reservation_date, '2026-11-25');
+  assert.equal(call.args.payload.reservation_time, '11:00 AM');
+});
+
+test('public reservation RPC preserves large categorized guest totals without capping them at six', async () => {
+  const calls = [];
+  const { record } = loadSupabaseRecord((name, args) => {
+    calls.push({ name, payload: args.payload });
+    return Promise.resolve({ data: `RSV-${calls.length}`, error: null });
+  });
+  const examples = [
+    { adults: 7, seniorPwdCount: 0, children: 0, guests: 7 },
+    { adults: 5, seniorPwdCount: 1, children: 2, guests: 8 },
+    { adults: 5, seniorPwdCount: 2, children: 3, guests: 10 },
+    { adults: 6, seniorPwdCount: 2, children: 4, guests: 12 }
+  ];
+
+  for (const [index, counts] of examples.entries()) {
+    await record.submitPublicReservation({
+      name: `Large party ${counts.guests}`,
+      date: '2026-11-25',
+      time: '11:00 AM',
+      ...counts
+    });
+    assert.equal(calls[index].name, 'public_create_reservation');
+    assert.equal(calls[index].payload.guests, counts.guests);
+    assert.equal(calls[index].payload.senior_pwd_count, counts.seniorPwdCount);
+  }
 });
 
 test('posSaveBill returns a successful RPC response without waiting for its timeout', async () => {
