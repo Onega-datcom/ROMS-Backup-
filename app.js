@@ -82,8 +82,16 @@ state.reportTab = state.reportTab || 'food_cost';
 state.reportGrouping = state.reportGrouping || 'day';
 state.reportIncludeWaste = state.reportIncludeWaste !== false;
 state.reportPage = 1;
-state.inviteFormOpen = false;
 state.userInviteHistory = { rows: [], loading: false, loaded: false, error: '' };
+state.userManagementPane = 'home';
+state.userManagementTab = 'staff';
+state.userManagementStatus = 'All';
+state.userManagementRole = 'All';
+state.userManagementSearch = '';
+state.userManagementBusyId = '';
+state.userManagementRefreshLoading = false;
+state.userManagementRefreshError = '';
+state.userManagementRefreshSaved = false;
 let userInviteRequestId = 0;
 const reportServerData = {};
 let reportRequestKey = '';
@@ -365,7 +373,7 @@ function friendlyRpcError(error) {
   const message = String(error?.message || error || '');
   if (/users cannot change their own role/i.test(message)) return 'You cannot change your own role. Ask another Administrator.';
   if (/cannot remove or demote the last administrator/i.test(message)) return 'At least one Administrator must remain in the system.';
-  if (/profile deletion is not supported/i.test(message)) return 'User profiles cannot be deleted from User Management.';
+  if (/profile deletion is not supported/i.test(message)) return 'Active and deactivated staff profiles cannot be deleted. Cancel an unaccepted invitation to remove its pending account.';
   if (/role was not changed/i.test(message)) return 'No role change was saved. Reload the user list and try again.';
   if (/reservation start time has already passed|cannot be scheduled in the past/i.test(message)) return 'That reservation time has already passed. Choose a later time.';
   if (/reservation time must be within restaurant hours|two-hour reservation window/i.test(message)) return 'Choose a start time from 10:00 AM through 7:00 PM so the two-hour stay ends by closing at 9:00 PM.';
@@ -392,11 +400,13 @@ function friendlyRpcError(error) {
 function lowStock() { return all('ingredients').filter(item => item.isActive !== false && item.stock <= item.minimum); }
 function esc(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char])); }
 let toastTimeoutId;
-function toast(message, type = 'success', retryCollections = []) {
+function toast(message, type = 'success', retryCollections = [], retryUserManagement = false) {
   const root = document.querySelector('#toastRoot');
   const retryButton = retryCollections.length
     ? `<button type="button" class="toast-retry" data-retry-refresh="${esc(retryCollections.join(','))}">Retry</button>`
-    : '';
+    : retryUserManagement
+      ? '<button type="button" class="toast-retry" data-retry-user-management>Retry</button>'
+      : '';
   root.innerHTML = `<div class="toast ${type}"><span>${type === 'success' ? '✓' : '!'}</span><span>${esc(message)}</span>${retryButton}</div>`;
   window.clearTimeout(toastTimeoutId);
   toastTimeoutId = window.setTimeout(() => { root.innerHTML = ''; }, 5000);
@@ -484,7 +494,7 @@ function realtimeTablesForRole(tables) {
     'Inventory Clerk': ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'physical_counts', 'waste_logs', 'notifications', 'notification_read_states']
   };
   const permitted = new Set(allowed[state.role] || []);
-  return tables.filter(table => permitted.has(table));
+  return [...new Set(['profiles', ...tables.filter(table => permitted.has(table))])];
 }
 function realtimeCollectionName(table) {
   return {
@@ -571,6 +581,11 @@ document.addEventListener('click', async event => {
   } catch (error) {
     showSaveRefreshWarning(collections, error);
   }
+});
+document.addEventListener('click', event => {
+  const retry = event.target.closest('[data-retry-user-management]');
+  if (!retry) return;
+  void retryUserManagementLists(retry);
 });
 async function loadUnresolvedBookings(force = false) {
   const viewCanRead = ['Administrator', 'Manager', 'Receptionist'].includes(state.role);
@@ -730,7 +745,22 @@ async function applyRealtimeSubscriptions(key, tables) {
   realtimeSubscriptionKey = key;
   realtimeConnected = false;
   realtimeChannel = window.supabaseClient.channel(`costtrack:${state.user.id}:${state.view}`);
-  tables.forEach(table => realtimeChannel.on('postgres_changes', { event: '*', schema: 'public', table }, payload => scheduleRealtimeRefresh(table, payload)));
+  tables.forEach(table => {
+    if (table === 'profiles') {
+      realtimeChannel.on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table, filter: `id=eq.${state.user.id}` },
+        payload => {
+          if (payload?.new?.account_status === 'Active') return;
+          void signOutCurrentUser({ force: true }).then(() => {
+            toast('Your CostTrack account is no longer active. Contact an Administrator.', 'error');
+          });
+        }
+      );
+      return;
+    }
+    realtimeChannel.on('postgres_changes', { event: '*', schema: 'public', table }, payload => scheduleRealtimeRefresh(table, payload));
+  });
   realtimeChannel.subscribe(async status => {
     if (status === 'SUBSCRIBED') {
       realtimeConnected = true;
@@ -2000,166 +2030,715 @@ function approvalsPage() {
     emptyMessage: 'No approval requests.'
   });
 }
-function usersPage() {
-  const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
-  const inviteRoles = window.costTrackInviteRoles || [];
-  const inviteHistory = state.userInviteHistory;
-  if (state.role !== 'Administrator') {
-    return '<section class="user-management-page"><div class="panel error-state" role="alert">Only Administrators can access User Management.</div></section>';
-  }
-  state.userRoleFilter = state.userRoleFilter || 'All';
-  const search = String(state.query || '').toLowerCase();
-  const users = all('users').filter(item => state.userRoleFilter === 'All' || item.role === state.userRoleFilter);
-  const filtered = users.filter(item => `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase().includes(search));
-  const invitationRows = inviteHistory.rows.map(invite => {
-    const status = invite.status === 'Pending' && new Date(invite.expires_at).getTime() <= Date.now()
-      ? 'Expired'
-      : invite.status;
-    const statusClass = status === 'Accepted' ? 'status-good'
-      : status === 'Pending' ? 'status-low' : 'status-out';
-    return `<tr>
-      <td data-label="Email">${esc(invite.email)}</td>
-      <td data-label="Full Name">${esc(invite.full_name)}</td>
-      <td data-label="Role">${esc(invite.role)}</td>
-      <td data-label="Status"><span class="${statusClass}">${esc(status)}</span></td>
-      <td data-label="Invited Date">${esc(formatInviteDate(invite.invited_at))}</td>
-      <td data-label="Accepted Date">${esc(formatInviteDate(invite.accepted_at))}</td>
-    </tr>`;
-  });
-  const inviteHistoryContent = inviteHistory.error
-    ? `<div class="user-invite-error" role="alert"><span>${esc(inviteHistory.error)}</span><button type="button" class="ghost-btn compact-btn" data-action="retry-user-invites">Retry</button></div>`
-    : inviteHistory.loading || !inviteHistory.loaded
-      ? '<div class="user-invite-loading" role="status">Loading invitation history…</div>'
-      : `<div class="table-scroll"><table class="user-invites-table">
-          <thead><tr><th>Email</th><th>Full Name</th><th>Role</th><th>Status</th><th>Invited Date</th><th>Accepted Date</th></tr></thead>
-          <tbody>${invitationRows.length ? invitationRows.join('') : '<tr><td class="user-invites-empty" colspan="6">No invitations have been sent yet.</td></tr>'}</tbody>
-        </table></div>`;
-  const inviteForm = state.inviteFormOpen
-    ? `<form id="inviteUserForm" class="user-invite-form">
-        <div class="user-invite-form-heading"><h2>Invite a staff member</h2><p>They’ll receive an email with a link to set their password.</p></div>
-        <div class="user-invite-fields">
-          <label>Full Name<input name="fullName" type="text" required maxlength="160" autocomplete="name" placeholder="Staff member’s full name"></label>
-          <label>Email Address<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="name@example.com"></label>
-          <label>Role<select name="role" required><option value="">Select a staff role</option>${inviteRoles.map(role => `<option value="${esc(role)}">${esc(role)}</option>`).join('')}</select></label>
-        </div>
-        <div class="user-invite-actions">
-          <button type="button" class="ghost-btn" data-action="close-invite-user">Cancel</button>
-          <button type="submit" class="primary-btn">${state.inviteSending ? 'Sending…' : 'Send Invitation'}</button>
-        </div>
-      </form>`
-    : '';
-  const inviteAction = `<button type="button" class="primary-btn" data-action="toggle-user-invite" aria-controls="inviteUserForm" aria-expanded="${state.inviteFormOpen}">${state.inviteFormOpen ? 'Hide Invite Form' : 'Invite User'}</button>`;
-  if (!document.documentElement.dataset.userDetailsRowsBound) {
-    document.documentElement.dataset.userDetailsRowsBound = 'true';
-    document.addEventListener('click', event => {
-      const row = event.target.closest('.user-management-page .user-row');
-      if (!row || state.role !== 'Administrator') return;
-      const user = all('users').find(item => String(item.id) === row.dataset.userId);
-      if (user) openForm('user', user);
-    });
-    document.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      const row = event.target.closest('.user-management-page .user-row');
-      if (!row || event.target !== row || state.role !== 'Administrator') return;
-      event.preventDefault();
-      const user = all('users').find(item => String(item.id) === row.dataset.userId);
-      if (user) openForm('user', user);
-    });
-  }
-  const rows = users.map(item => {
-    const searchText = `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase();
-    return `<tr class="user-row" data-user-id="${esc(item.id)}" data-user-search="${esc(searchText)}" ${searchText.includes(search) ? '' : 'hidden'} tabindex="0" aria-label="View details for ${esc(item.name || item.email || 'user')}">
-      <td data-label="User"><div class="cell-title"><span class="avatar user-avatar">${esc((item.name || item.email || '?').split(' ').map(part => part[0]).join('').slice(0, 2))}</span><strong>${esc(item.name || 'Team member')}</strong></div></td>
-      <td data-label="Email">${esc(item.email || '')}</td>
-      <td data-label="Role"><span class="user-role-label">${esc(item.role || 'Unassigned')}</span></td>
-    </tr>`;
-  });
-  const emptyState = `<tr class="user-empty-row" ${filtered.length ? 'hidden' : ''}><td colspan="3"><div class="user-empty-state"><strong>No users found.</strong><p>Try a different search or role filter.</p></div></td></tr>`;
-  return `<section class="user-management-page">
-    ${pageHeader('Administration', 'User Management', 'Manage user profiles, roles, and access permissions.', inviteAction)}
-    ${inviteForm}
-    <div class="panel user-invites-panel">
-      <div class="user-invites-heading"><div><h2>Invitation History</h2><p>Track staff invitations and their current status. Pending invitations expire after seven days.</p></div></div>
-      ${inviteHistoryContent}
-    </div>
-    <div class="toolbar user-management-toolbar">
-      <div class="search-box">⌕<input id="tableSearch" dir="ltr" placeholder="Search users..." value="${esc(state.query)}" aria-label="Search users"></div>
-      <label class="user-filter">Role<select data-user-filter="role" aria-label="Filter by role"><option value="All">All Roles</option>${roles.map(role => `<option value="${esc(role)}" ${state.userRoleFilter === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
-      <span class="record-count" id="userManagementCount">${filtered.length} users</span>
-    </div>
-    <div class="panel table-panel"><div class="table-scroll"><table class="users-table">
-      <thead><tr><th>User</th><th>Email</th><th>Role</th></tr></thead>
-      <tbody>${rows.length ? rows.join('') : emptyState}</tbody>
-    </table></div></div>
-  </section>
-  <style>
-    .user-management-page .user-management-toolbar { align-items: end; }
-    .user-management-page .user-filter { display: grid; gap: 4px; min-width: 150px; color: var(--muted); font-size: 11px; }
-    .user-management-page .user-filter select { min-width: 0; min-height: 40px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; color: var(--ink); }
-    .user-management-page #tableSearch { direction: ltr; text-align: left; unicode-bidi: normal; }
-    .user-management-page .users-table { min-width: 760px; }
-    .user-management-page .users-table tr[hidden] { display: none !important; }
-    .user-management-page .user-row { cursor: pointer; }
-    .user-management-page .user-row:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
-    .user-management-page .user-row:hover { background: #f7fbf9; }
-    .user-management-page .user-role-label { font-weight: 600; }
-    .user-management-page .user-empty-state { display: grid; justify-items: center; gap: 8px; padding: 28px 12px; text-align: center; white-space: normal; }
-    .user-management-page .user-empty-state p { margin: 0 0 8px; color: var(--muted); }
-    .user-management-page .user-empty-row td::before { content: none; }
-    .user-management-page .user-invite-form { margin-bottom: 16px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; box-shadow: var(--shadow); }
-    .user-management-page .user-invite-form-heading { margin-bottom: 16px; }
-    .user-management-page .user-invite-form-heading h2 { margin: 0; font: 700 16px 'Plus Jakarta Sans', sans-serif; }
-    .user-management-page .user-invite-form-heading p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
-    .user-management-page .user-invite-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-    .user-management-page .user-invite-fields label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
-    .user-management-page .user-invite-fields input, .user-management-page .user-invite-fields select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; color: var(--ink); font: inherit; font-size: 12px; font-weight: 400; }
-    .user-management-page .user-invite-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-    .user-management-page .user-invites-panel { margin-bottom: 18px; }
-    .user-management-page .user-invites-heading { margin-bottom: 14px; }
-    .user-management-page .user-invites-heading h2 { margin: 0; font: 700 16px 'Plus Jakarta Sans', sans-serif; }
-    .user-management-page .user-invites-heading p { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
-    .user-management-page .user-invites-table { min-width: 760px; }
-    .user-management-page .user-invites-table .user-invites-empty { padding: 24px; text-align: center; color: var(--muted); }
-    .user-management-page .user-invite-loading { padding: 16px 0; color: var(--muted); font-size: 12px; }
-    .user-management-page .user-invite-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #e4a4a0; border-radius: 9px; background: var(--red-bg); color: #a44c48; font-size: 12px; }
-    @media (max-width: 720px) {
-      .user-management-page .user-management-toolbar { align-items: stretch; }
-      .user-management-page .user-filter { min-width: 100%; }
-      .user-management-page .users-table { display: block; min-width: 0; }
-      .user-management-page .users-table thead { display: none; }
-      .user-management-page .users-table tbody { display: grid; gap: 12px; }
-      .user-management-page .users-table tr:not(.user-empty-row) { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
-      .user-management-page .users-table td { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; white-space: normal; }
-      .user-management-page .users-table td::before { flex: 0 0 72px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
-      .user-management-page .users-table td[data-label="User"] .cell-title { min-width: 0; }
-      .user-management-page .user-empty-row td { display: block; }
-      .user-management-page .user-invite-fields { grid-template-columns: 1fr; }
-      .user-management-page .user-invite-actions { display: grid; grid-template-columns: 1fr 1fr; }
-      .user-management-page .user-invites-table { display: block; min-width: 0; }
-      .user-management-page .user-invites-table thead { display: none; }
-      .user-management-page .user-invites-table tbody { display: grid; gap: 10px; }
-      .user-management-page .user-invites-table tr { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
-      .user-management-page .user-invites-table td { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; white-space: normal; overflow-wrap: anywhere; }
-      .user-management-page .user-invites-table td::before { flex: 0 0 95px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
-      .user-management-page .user-invites-table .user-invites-empty { display: block; }
-      .user-management-page .user-invite-error { align-items: flex-start; flex-direction: column; }
+const USER_MANAGEMENT_ROLES = ['Administrator', 'Manager', 'Receptionist', 'Inventory Clerk', 'Chef / Kitchen Staff'];
+const USER_ROLE_ACCESS_NOTES = {
+  Administrator: 'Can manage users, system settings, and all operational modules.',
+  Manager: 'Can oversee restaurant operations, inventory, and management reports.',
+  Receptionist: 'Can manage reservations, guest seating, and cashier workflows.',
+  'Inventory Clerk': 'Can manage inventory, receiving, and stock counts.',
+  'Chef / Kitchen Staff': 'Can manage kitchen production and record waste.'
+};
+
+function effectiveInvitationStatus(invitation) {
+  return invitation.status === 'Pending' && new Date(invitation.expires_at).getTime() <= Date.now()
+    ? 'Expired'
+    : invitation.status;
+}
+
+function formatUserManagementDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Unavailable';
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Manila'
+  }).format(date);
+}
+
+function userManagementHeader(description, action = '') {
+  return `<header class="user-management-header">
+    <div><div class="eyebrow">Administration</div><h1 id="userManagementHeading" tabindex="-1">User Management</h1><p>${esc(description)}</p></div>
+    ${action}
+  </header>`;
+}
+
+function userManagementRefreshNotice() {
+  if (!state.userManagementRefreshError) return '';
+  return `<div class="user-refresh-error" role="alert">
+    <span>${state.userManagementRefreshSaved ? 'Saved, but the list could not refresh.' : 'The list could not refresh.'} ${esc(state.userManagementRefreshError)}</span>
+    <button type="button" class="ghost-btn" data-action="retry-user-management-refresh" ${state.userManagementRefreshLoading ? 'disabled' : ''}>${state.userManagementRefreshLoading ? 'Retrying…' : 'Retry'}</button>
+  </div>`;
+}
+
+function userManagementStyles() {
+  return `<style>
+    .user-management-page { display: grid; gap: 20px; }
+    .user-management-page, .user-management-form-modal { --muted: #59665f; }
+    .user-management-page .status-good, .user-management-page .status-healthy { color: #176442; }
+    .user-management-page .status-out { color: #9e3b37; }
+    .user-management-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 4px; }
+    .user-management-header h1 { margin: 3px 0 7px; font: 800 30px/1.18 'Plus Jakarta Sans', sans-serif; letter-spacing: -1px; }
+    .user-management-header p { margin: 0; color: var(--muted); line-height: 1.55; }
+    .user-management-header .eyebrow { color: var(--teal); font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; }
+    .user-management-page button, .user-management-page input, .user-management-page select,
+    .user-management-form-modal button, .user-management-form-modal input, .user-management-form-modal select,
+    .user-management-form-modal textarea { min-height: 44px; }
+    .user-management-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .user-management-card { display: flex; min-height: 190px; flex-direction: column; align-items: flex-start; justify-content: space-between; gap: 20px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: #fff; padding: 24px; color: var(--ink); text-align: left; box-shadow: var(--shadow); cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    .user-management-card:hover { border-color: #b7ddd0; box-shadow: 0 12px 30px rgba(35,62,53,.09); transform: translateY(-2px); }
+    .user-management-card:focus-visible, .user-management-tabs button:focus-visible, .user-management-page button:focus-visible, .user-management-page summary:focus-visible { outline: 3px solid var(--teal); outline-offset: 2px; }
+    .user-management-card .card-topline { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; }
+    .user-management-card .user-card-title { display: block; font: 800 20px 'Plus Jakarta Sans', sans-serif; }
+    .user-management-card .user-card-description { display: block; margin-top: 7px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .user-management-card .card-count { color: var(--teal-dark); font-size: 13px; font-weight: 700; }
+    .user-management-card .card-icon { display: grid; width: 44px; height: 44px; place-items: center; border-radius: 14px; background: var(--mint); color: var(--teal-dark); font-size: 22px; }
+    .user-management-refresh { display: flex; align-items: center; gap: 8px; }
+    .user-refresh-error, .user-invite-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #e4a4a0; border-radius: var(--radius-md); background: var(--red-bg); padding: 13px 15px; color: #873e3a; }
+    .user-management-nav { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .user-back-link { display: inline-flex; min-height: 44px; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0 6px; color: var(--teal-dark); font-weight: 700; cursor: pointer; }
+    .user-management-tabs { display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--line); scrollbar-width: thin; }
+    .user-management-tabs button { flex: 0 0 auto; border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 10px 18px; color: var(--muted); font-size: 14px; font-weight: 700; cursor: pointer; }
+    .user-management-tabs button[aria-selected="true"] { border-bottom-color: var(--teal); color: var(--teal-dark); }
+    .user-management-panel { display: grid; gap: 16px; }
+    .user-management-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    .user-management-toolbar .search-box { flex: 1 1 260px; }
+    .user-management-filter { display: grid; min-width: 165px; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .user-management-filter select, .user-management-filter input { width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: 8px 11px; color: var(--ink); }
+    .user-management-count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .user-management-table { min-width: 980px; }
+    .user-invitations-table { min-width: 1120px; }
+    .user-management-table td, .user-invitations-table td { vertical-align: middle; }
+    .user-staff-cell { display: flex; min-width: 190px; align-items: center; gap: 11px; }
+    .user-staff-cell > span:last-child { min-width: 0; }
+    .user-staff-cell strong, .user-staff-cell small { display: block; overflow-wrap: anywhere; }
+    .user-staff-cell small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .user-management-role-badge { display: inline-flex; align-items: center; border: 1px solid #d5e7df; border-radius: 999px; background: #f2faf6; padding: 6px 10px; color: #215e4e; font-size: 11px; font-weight: 700; }
+    .user-protected { display: inline-grid; gap: 4px; }
+    .user-protected strong { width: max-content; border: 1px solid #d8e0dc; border-radius: 999px; background: #f4f6f5; padding: 5px 9px; color: #495751; font-size: 11px; }
+    .user-protected small { max-width: 240px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .user-action-menu { position: relative; }
+    .user-action-menu summary { display: inline-flex; min-width: 112px; min-height: 44px; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: 8px 12px; color: var(--ink); font-size: 12px; font-weight: 700; cursor: pointer; list-style: none; }
+    .user-action-menu summary::-webkit-details-marker { display: none; }
+    .user-action-menu[open] summary { border-color: #a9d1c3; background: var(--mint); color: var(--teal-dark); }
+    .user-action-list { position: absolute; z-index: 3; top: calc(100% + 5px); right: 0; display: grid; min-width: 185px; gap: 3px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; padding: 6px; box-shadow: 0 12px 28px rgba(35,62,53,.14); }
+    .user-action-list button { width: 100%; border: 0; border-radius: 7px; background: #fff; padding: 9px 10px; color: var(--ink); text-align: left; cursor: pointer; }
+    .user-action-list button:hover { background: var(--mint); color: var(--teal-dark); }
+    .user-invitation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+    .user-management-empty { display: grid; justify-items: center; gap: 8px; padding: 36px 16px; text-align: center; }
+    .user-management-empty p { max-width: 430px; margin: 0 0 8px; color: var(--muted); }
+    .user-management-skeleton { display: grid; gap: 10px; padding: 20px; }
+    .user-management-skeleton span { display: block; height: 18px; border-radius: 8px; background: linear-gradient(90deg, #edf2ef 25%, #f7f9f8 50%, #edf2ef 75%); background-size: 200% 100%; animation: user-management-shimmer 1.3s linear infinite; }
+    .user-management-skeleton span:nth-child(3n + 1) { width: 88%; }
+    .user-management-skeleton span:nth-child(3n + 2) { width: 72%; }
+    .user-management-skeleton span:nth-child(3n) { width: 95%; }
+    .user-management-form-modal .user-form-fields { display: grid; gap: 14px; }
+    .user-management-form-modal label { display: grid; gap: 6px; color: var(--ink); font-size: 12px; font-weight: 700; }
+    .user-management-form-modal input, .user-management-form-modal select, .user-management-form-modal textarea { width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; color: var(--ink); font: inherit; font-weight: 400; }
+    .user-management-form-modal textarea { min-height: 96px; resize: vertical; }
+    .user-management-form-modal .field-help, .user-management-form-modal .role-access-note { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
+    .user-management-form-modal .role-access-note { margin: -4px 0 0; }
+    .user-management-form-modal .duplicate-invite-notice { display: grid; gap: 8px; border: 1px solid #e8ca91; border-radius: var(--radius-sm); background: #fff8e9; padding: 12px; color: #75521d; font-size: 12px; line-height: 1.45; }
+    .user-management-form-modal .duplicate-invite-notice[hidden] { display: none; }
+    .user-management-form-modal .modal-actions > button { min-height: 44px; }
+    @keyframes user-management-shimmer { to { background-position: -200% 0; } }
+    @media (max-width: 760px) {
+      .user-management-header { align-items: flex-start; flex-direction: column; }
+      .user-management-header h1 { font-size: 25px; }
+      .user-management-cards { grid-template-columns: 1fr; gap: 12px; }
+      .user-management-card { min-height: 160px; padding: 20px; }
+      .user-management-nav { align-items: flex-start; flex-direction: column; }
+      .user-management-toolbar { align-items: stretch; }
+      .user-management-filter { min-width: 100%; }
+      .user-management-count { margin-left: 0; }
+      .user-management-table, .user-invitations-table { display: block; min-width: 0; }
+      .user-management-table thead, .user-invitations-table thead { display: none; }
+      .user-management-table tbody, .user-invitations-table tbody { display: grid; gap: 11px; }
+      .user-management-table tbody tr:not(.user-management-empty-row),
+      .user-invitations-table tbody tr:not(.user-management-empty-row) { display: block; overflow: visible; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+      .user-management-table td, .user-invitations-table td { display: flex; min-height: 44px; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; white-space: normal; overflow-wrap: anywhere; }
+      .user-management-table td::before, .user-invitations-table td::before { flex: 0 0 92px; color: var(--muted); content: attr(data-label); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+      .user-management-table .user-management-empty-row td, .user-invitations-table .user-management-empty-row td { display: block; }
+      .user-management-page .table-scroll { overflow: visible; }
+      .user-action-list { position: static; margin-top: 5px; }
+      .user-invitation-actions { justify-content: flex-start; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .user-management-skeleton span { animation: none; }
+      .user-management-card { transition: none; }
     }
   </style>`;
 }
 
-function formatInviteDate(value) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? 'Unavailable'
-    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+function usersPage() {
+  if (state.role !== 'Administrator') {
+    return '<section class="user-management-page"><div class="panel error-state" role="alert">Only Administrators can access User Management.</div></section>';
+  }
+  const users = all('users').filter(item => ['Active', 'Deactivated'].includes(item.accountStatus));
+  const invitations = state.userInviteHistory.rows;
+  const activeCount = users.filter(item => item.accountStatus === 'Active').length;
+  const pendingCount = invitations.filter(item => effectiveInvitationStatus(item) === 'Pending').length;
+  const pendingLabel = state.userInviteHistory.loading && !state.userInviteHistory.loaded
+    ? 'Loading invitations…'
+    : state.userInviteHistory.error
+      ? 'Invitation count unavailable'
+      : `${pendingCount} pending invitation${pendingCount === 1 ? '' : 's'}`;
+  const refreshNotice = userManagementRefreshNotice();
+  const header = userManagementHeader('Invite staff and manage access to the CostTrack workspace.');
+  if (state.userManagementPane !== 'workspace') {
+    return `<section class="user-management-page">
+      ${header}
+      ${refreshNotice}
+      <div class="user-management-cards" aria-label="User management actions">
+        <button type="button" class="user-management-card" data-action="user-invite-open">
+          <span class="card-topline"><span class="card-icon" aria-hidden="true">＋</span><span class="card-count">${esc(pendingLabel)}</span></span>
+          <span><span class="user-card-title">Add new user</span><span class="user-card-description">Send a secure invitation so a new staff member can set up their account.</span></span>
+        </button>
+        <button type="button" class="user-management-card" data-action="user-management-open">
+          <span class="card-topline"><span class="card-icon" aria-hidden="true">♧</span><span class="card-count">${activeCount} active staff</span></span>
+          <span><span class="user-card-title">View users</span><span class="user-card-description">Review staff access, account status, and invitation history.</span></span>
+        </button>
+      </div>
+      <div class="user-management-refresh">
+        <span class="field-help">Counts update from the latest staff and invitation records.</span>
+        <button type="button" class="ghost-btn" data-action="refresh-user-management" ${state.userManagementRefreshLoading ? 'disabled' : ''}>${state.userManagementRefreshLoading ? 'Refreshing…' : 'Refresh counts'}</button>
+      </div>
+      ${userManagementStyles()}
+    </section>`;
+  }
+
+  const activeAdminCount = users.filter(item => item.role === 'Administrator' && item.accountStatus === 'Active').length;
+  const roleOptions = USER_MANAGEMENT_ROLES.map(role =>
+    `<option value="${esc(role)}" ${state.userManagementRole === role ? 'selected' : ''}>${esc(role)}</option>`
+  ).join('');
+  const filteredUsers = users.filter(item => {
+    const matchesRole = state.userManagementRole === 'All' || item.role === state.userManagementRole;
+    const matchesStatus = state.userManagementStatus === 'All' || item.accountStatus === state.userManagementStatus;
+    const searchText = `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase();
+    return matchesRole && matchesStatus && searchText.includes(state.userManagementSearch.toLowerCase());
+  });
+  const staffRows = filteredUsers.map(item => {
+    const active = item.accountStatus === 'Active';
+    const isCurrent = String(item.id) === String(state.user?.id);
+    const isLastAdmin = active && item.role === 'Administrator' && activeAdminCount <= 1;
+    const protection = [
+      isCurrent ? 'Your current account is protected.' : '',
+      isLastAdmin ? 'The last active Administrator cannot be demoted or deactivated.' : ''
+    ].filter(Boolean).join(' ');
+    const initials = (item.name || item.email || '?').trim().split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    const actions = protection
+      ? `<span class="user-protected"><strong>Protected</strong><small>${esc(protection)}</small></span>`
+      : `<details class="user-action-menu">
+          <summary aria-label="Actions for ${esc(item.name || item.email || 'staff member')}">Actions</summary>
+          <div class="user-action-list">
+            <button type="button" data-action="open-user-role" data-id="${esc(item.id)}">Change role</button>
+            <button type="button" data-action="open-user-status" data-id="${esc(item.id)}" data-status="${active ? 'Deactivated' : 'Active'}">${active ? 'Deactivate' : 'Reactivate'}</button>
+          </div>
+        </details>`;
+    const searchText = `${item.name || ''} ${item.email || ''} ${item.role || ''}`.toLowerCase();
+    return `<tr class="user-row" data-user-search="${esc(searchText)}">
+      <td data-label="Staff member"><div class="user-staff-cell"><span class="avatar user-avatar" aria-hidden="true">${esc(initials)}</span><span><strong>${esc(item.name || 'Staff member')}</strong><small>${esc(item.email || '')}</small></span></div></td>
+      <td data-label="Role"><span class="user-management-role-badge">${esc(item.role || 'Unassigned')}</span></td>
+      <td data-label="Status"><span class="status ${active ? 'status-good' : 'status-out'}">${active ? 'Active' : 'Inactive'}</span></td>
+      <td data-label="Last updated">${esc(formatUserManagementDate(item.updatedAt))}</td>
+      <td data-label="Actions">${actions}</td>
+    </tr>`;
+  });
+  const staffContent = state.userManagementRefreshLoading && !users.length
+    ? '<div class="user-management-skeleton" role="status" aria-label="Loading staff"><span></span><span></span><span></span><span></span></div>'
+    : `<div class="toolbar user-management-toolbar">
+        <label class="user-management-filter">Search staff<input id="userManagementSearch" type="search" value="${esc(state.userManagementSearch)}" placeholder="Name, email, or role"></label>
+        <label class="user-management-filter">Role<select id="userManagementRoleFilter"><option value="All">All roles</option>${roleOptions}</select></label>
+        <label class="user-management-filter">Status<select id="userManagementStatusFilter">
+          <option value="All" ${state.userManagementStatus === 'All' ? 'selected' : ''}>All statuses</option>
+          <option value="Active" ${state.userManagementStatus === 'Active' ? 'selected' : ''}>Active</option>
+          <option value="Deactivated" ${state.userManagementStatus === 'Deactivated' ? 'selected' : ''}>Inactive</option>
+        </select></label>
+        <span class="user-management-count" id="userManagementCount">${filteredUsers.length} staff member${filteredUsers.length === 1 ? '' : 's'}</span>
+      </div>
+      <div class="panel table-panel"><div class="table-scroll"><table class="user-management-table">
+        <thead><tr><th>Staff member</th><th>Role</th><th>Status</th><th>Last updated</th><th>Actions</th></tr></thead>
+        <tbody>${staffRows.join('')}<tr class="user-management-empty-row" ${staffRows.length ? 'hidden' : ''}><td colspan="5"><div class="user-management-empty"><strong>${users.length ? 'No staff match these filters.' : 'No staff accounts yet.'}</strong><p>${users.length ? 'Try another search or clear a filter.' : 'Send an invitation to add the first staff member.'}</p>${users.length ? '' : '<button type="button" class="primary-btn" data-action="user-invite-open">Add new user</button>'}</div></td></tr></tbody>
+      </table></div></div>`;
+
+  const inviterNames = new Map(users.map(item => [String(item.id), item.name || item.email || 'Staff member']));
+  const inviteRows = invitations.map(invite => {
+    const status = effectiveInvitationStatus(invite);
+    const statusClass = status === 'Accepted' ? 'status-good' : status === 'Pending' ? 'status-low' : 'status-out';
+    const canResend = ['Pending', 'Expired'].includes(status);
+    const canCancel = status === 'Pending';
+    const busy = state.userManagementBusyId === invite.id;
+    const inviter = inviterNames.get(String(invite.invited_by))
+      || (String(invite.invited_by) === String(state.user?.id) ? state.user.email : 'Staff account');
+    return `<tr>
+      <td data-label="Email">${esc(invite.email)}</td>
+      <td data-label="Full name">${esc(invite.full_name)}</td>
+      <td data-label="Role"><span class="user-management-role-badge">${esc(invite.role)}</span></td>
+      <td data-label="Status"><span class="status ${statusClass}">${esc(status)}</span></td>
+      <td data-label="Invited">${esc(formatUserManagementDate(invite.invited_at))}</td>
+      <td data-label="Expires">${esc(formatUserManagementDate(invite.expires_at))}</td>
+      <td data-label="Accepted">${esc(formatUserManagementDate(invite.accepted_at))}</td>
+      <td data-label="Invited by">${esc(inviter)}</td>
+      <td data-label="Actions"><div class="user-invitation-actions">
+        ${canResend ? `<button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Resend'}</button>` : ''}
+        ${canCancel ? `<button type="button" class="ghost-btn" data-action="cancel-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>Cancel</button>` : '—'}
+      </div></td>
+    </tr>`;
+  });
+  const invitationContent = state.userInviteHistory.error
+    ? `<div class="user-invite-error" role="alert"><span>${esc(state.userInviteHistory.error)}</span><button type="button" class="ghost-btn" data-action="retry-user-invites">Retry</button></div>`
+    : state.userInviteHistory.loading && !state.userInviteHistory.loaded
+      ? '<div class="user-management-skeleton" role="status" aria-label="Loading invitations"><span></span><span></span><span></span><span></span></div>'
+      : `<div class="table-scroll"><table class="user-invitations-table">
+          <thead><tr><th>Email</th><th>Full name</th><th>Role</th><th>Status</th><th>Invited</th><th>Expires</th><th>Accepted</th><th>Invited by</th><th>Actions</th></tr></thead>
+          <tbody>${inviteRows.length
+            ? inviteRows.join('')
+            : '<tr class="user-management-empty-row"><td colspan="9"><div class="user-management-empty"><strong>No pending invitations</strong><p>New staff invitations will appear here with their delivery and acceptance details.</p><button type="button" class="primary-btn" data-action="user-invite-open">Add new user</button></div></td></tr>'
+          }</tbody>
+        </table></div>`;
+  const selectedTab = state.userManagementTab === 'invitations' ? 'invitations' : 'staff';
+  const workspaceContent = selectedTab === 'staff' ? staffContent : invitationContent;
+  const action = `<button type="button" class="ghost-btn user-back-link" data-action="user-management-back">← Back to User Management</button>`;
+  return `<section class="user-management-page">
+    ${header}
+    ${refreshNotice}
+    <div class="user-management-nav">${action}<span class="field-help">Manage access and invitation status without leaving this page.</span></div>
+    <div class="user-management-tabs" role="tablist" aria-label="User management sections">
+      <button type="button" id="userStaffTab" role="tab" aria-selected="${selectedTab === 'staff'}" aria-controls="userManagementPanel" tabindex="${selectedTab === 'staff' ? '0' : '-1'}" data-action="user-management-tab" data-tab="staff">Staff</button>
+      <button type="button" id="userInvitationsTab" role="tab" aria-selected="${selectedTab === 'invitations'}" aria-controls="userManagementPanel" tabindex="${selectedTab === 'invitations' ? '0' : '-1'}" data-action="user-management-tab" data-tab="invitations">Invitations <span class="tab-count">${state.userInviteHistory.loaded ? pendingCount : '…'}</span></button>
+    </div>
+    <div id="userManagementPanel" class="user-management-panel" role="tabpanel" tabindex="0" aria-labelledby="${selectedTab === 'staff' ? 'userStaffTab' : 'userInvitationsTab'}">
+      ${workspaceContent}
+    </div>
+    ${userManagementStyles()}
+  </section>`;
 }
 
 function resetUserInviteHistory() {
   userInviteRequestId += 1;
-  state.inviteFormOpen = false;
-  state.inviteSending = false;
   state.userInviteHistory = { rows: [], loading: false, loaded: false, error: '' };
+  state.userManagementPane = 'home';
+  state.userManagementTab = 'staff';
+  state.userManagementStatus = 'All';
+  state.userManagementRole = 'All';
+  state.userManagementSearch = '';
+  state.userManagementBusyId = '';
+  state.userManagementRefreshLoading = false;
+  state.userManagementRefreshError = '';
+  state.userManagementRefreshSaved = false;
+}
+
+function findUserManagementTarget(userId) {
+  return all('users').find(item => String(item.id) === String(userId));
+}
+
+function userManagementProtectionReason(user) {
+  if (String(user.id) === String(state.user?.id)) return 'You cannot change your own account here.';
+  if (user.role === 'Administrator' && user.accountStatus === 'Active'
+    && all('users').filter(item => item.role === 'Administrator' && item.accountStatus === 'Active').length <= 1) {
+    return 'The last active Administrator is protected.';
+  }
+  return '';
+}
+
+function focusUserManagementAction(action, idValue) {
+  requestAnimationFrame(() => {
+    const target = [...document.querySelectorAll('.user-management-page [data-action]')]
+      .find(element => element.dataset.action === action
+        && (idValue == null || element.dataset.id === String(idValue)));
+    (target || document.querySelector('#userInvitationsTab'))?.focus();
+  });
+}
+
+function openUserManagementInviteModal() {
+  if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
+  const inviteRoles = window.costTrackInviteRoles || [];
+  const roleOptions = inviteRoles.map(role =>
+    `<option value="${esc(role)}">${esc(role)}</option>`
+  ).join('');
+  const backdrop = modal('Add new user', `<div class="user-form-fields">
+    <p class="field-help">Send a secure invitation. The staff member will set their own password using the email link.</p>
+    <label>Full name<input name="fullName" type="text" required maxlength="160" autocomplete="name" placeholder="Staff member’s full name"></label>
+    <label>Email address<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="name@example.com" aria-describedby="userInviteEmailHelp duplicateInviteNotice"><small id="userInviteEmailHelp" class="field-help">Use the address where this person can receive the invitation.</small></label>
+    <div class="duplicate-invite-notice" id="duplicateInviteNotice" role="status" aria-live="polite" hidden></div>
+    <label>Role<select name="role" required><option value="">Select a staff role</option>${roleOptions}</select></label>
+    <p class="role-access-note" data-role-access-note>Select a role to see what the person can access.</p>
+  </div>`, 'Send invitation', 'user-management-form-modal');
+  const form = backdrop.querySelector('#modalForm');
+  form.dataset.type = 'user-invite';
+  form.addEventListener('input', () => { state.modalDirty = true; });
+  form.addEventListener('change', () => { state.modalDirty = true; });
+  form.elements.role.addEventListener('change', () => {
+    const note = form.querySelector('[data-role-access-note]');
+    note.textContent = USER_ROLE_ACCESS_NOTES[form.elements.role.value] || 'Select a role to see what the person can access.';
+  });
+  form.elements.email.addEventListener('input', () => updateInviteDuplicateNotice(form));
+  if (!state.userInviteHistory.loaded && !state.userInviteHistory.loading) void loadUserInvitations(true);
+}
+
+function findInviteDuplicate(email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+  const existingUser = all('users').find(user => String(user.email || '').trim().toLowerCase() === normalizedEmail);
+  if (existingUser) return { type: 'account', user: existingUser };
+  const invitation = state.userInviteHistory.rows.find(row =>
+    String(row.email || '').trim().toLowerCase() === normalizedEmail
+    && ['Pending', 'Expired'].includes(effectiveInvitationStatus(row))
+  );
+  return invitation ? { type: 'invitation', invitation, status: effectiveInvitationStatus(invitation) } : null;
+}
+
+function updateInviteDuplicateNotice(form) {
+  const notice = form.querySelector('#duplicateInviteNotice');
+  const email = form.elements.email.value;
+  const duplicate = findInviteDuplicate(email);
+  if (!notice) return;
+  if (!duplicate) {
+    notice.hidden = true;
+    notice.replaceChildren();
+    return;
+  }
+  notice.hidden = false;
+  if (duplicate.type === 'account') {
+    notice.textContent = `An account already exists for ${duplicate.user.email}. Change the user's role in Staff instead of sending another invitation.`;
+    return;
+  }
+  notice.innerHTML = `<span>A ${duplicate.status.toLowerCase()} invitation already exists for ${esc(duplicate.invitation.email)}.</span><button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(duplicate.invitation.id)}" ${state.userManagementBusyId === duplicate.invitation.id ? 'disabled' : ''}>${state.userManagementBusyId === duplicate.invitation.id ? 'Sending…' : 'Resend invitation'}</button>`;
+}
+
+function openUserRoleModal(userId) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can change staff roles.', 'error');
+  const user = findUserManagementTarget(userId);
+  if (!user) return toast('This staff account is no longer available. Refresh the list and try again.', 'error');
+  const protectedReason = userManagementProtectionReason(user);
+  if (protectedReason) return toast(protectedReason, 'error');
+  const roleOptions = USER_MANAGEMENT_ROLES.map(role =>
+    `<option value="${esc(role)}" ${user.role === role ? 'selected' : ''}>${esc(role)}</option>`
+  ).join('');
+  const backdrop = modal('Change staff role', `<div class="user-form-fields">
+    <p class="field-help">Changing this role updates the menus and data this staff member can access.</p>
+    <label>Staff member<input value="${esc(user.name || user.email)}" readonly></label>
+    <label>New role<select name="role" required>${roleOptions}</select></label>
+    <label>Reason for role change<textarea name="reason" maxlength="500" required placeholder="Explain why this staff member's role is changing"></textarea><small class="field-help">Required for the audit record. Maximum 500 characters.</small></label>
+  </div>`, 'Review change', 'user-management-form-modal');
+  const form = backdrop.querySelector('#modalForm');
+  form.dataset.type = 'user-role-change';
+  form.dataset.userId = user.id;
+  form.addEventListener('input', () => { state.modalDirty = true; });
+  form.addEventListener('change', () => { state.modalDirty = true; });
+}
+
+function openUserStatusModal(userId, accountStatus) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can manage staff access.', 'error');
+  const user = findUserManagementTarget(userId);
+  if (!user || !['Active', 'Deactivated'].includes(user.accountStatus)) {
+    return toast('This staff account is no longer available. Refresh the list and try again.', 'error');
+  }
+  const protectedReason = userManagementProtectionReason(user);
+  if (protectedReason) return toast(protectedReason, 'error');
+  if (!['Active', 'Deactivated'].includes(accountStatus) || accountStatus === user.accountStatus) {
+    return toast('Choose a valid account status change.', 'error');
+  }
+  const deactivate = accountStatus === 'Deactivated';
+  const effect = deactivate
+    ? 'This immediately blocks sign-in and CostTrack API access. Operational history is retained.'
+    : 'This restores sign-in and CostTrack access for the staff member.';
+  const backdrop = modal(deactivate ? 'Deactivate staff account' : 'Reactivate staff account', `<div class="user-form-fields">
+    <p class="field-help">${esc(effect)}</p>
+    <label>Staff member<input value="${esc(user.name || user.email)}" readonly></label>
+    <label>Reason for ${deactivate ? 'deactivation' : 'reactivation'}<textarea name="reason" maxlength="500" required placeholder="Explain this account status change"></textarea><small class="field-help">Required for the audit record. Maximum 500 characters.</small></label>
+  </div>`, deactivate ? 'Review deactivation' : 'Review reactivation', 'user-management-form-modal');
+  const form = backdrop.querySelector('#modalForm');
+  form.dataset.type = 'user-account-status';
+  form.dataset.userId = user.id;
+  form.dataset.status = accountStatus;
+  form.addEventListener('input', () => { state.modalDirty = true; });
+}
+
+function setUserManagementFormBusy(form, busy, label = 'Saving…') {
+  if (!form) return;
+  form.dataset.saving = busy ? 'true' : 'false';
+  form.setAttribute('aria-busy', String(busy));
+  form.querySelectorAll('input, select, textarea, button').forEach(control => {
+    if (control.classList.contains('modal-submit')) return;
+    control.disabled = busy;
+  });
+  const submit = form.querySelector('.modal-submit');
+  if (submit) {
+    if (!form.dataset.submitLabel) form.dataset.submitLabel = submit.textContent;
+    submit.disabled = busy;
+    submit.textContent = busy ? label : form.dataset.submitLabel;
+  }
+}
+
+async function refreshUserManagementLists() {
+  if (state.role !== 'Administrator' || !state.user) throw new Error('Only Administrators can refresh User Management.');
+  const requestId = ++userInviteRequestId;
+  const userId = state.user.id;
+  state.userManagementRefreshLoading = true;
+  state.userManagementRefreshError = '';
+  state.userInviteHistory.loading = false;
+  try {
+    const [users, invitations] = await Promise.all([
+      window.supabaseRecord.load('users'),
+      window.supabaseRecord.loadUserInvites()
+    ]);
+    if (requestId !== userInviteRequestId || state.user?.id !== userId || state.role !== 'Administrator') return false;
+    persistCollection('users', users);
+    state.userInviteHistory = { rows: invitations, loading: false, loaded: true, error: '' };
+    state.userManagementRefreshError = '';
+    state.userManagementRefreshSaved = false;
+    return true;
+  } catch (error) {
+    state.userManagementRefreshError = error.message || 'The user lists could not be refreshed.';
+    throw error;
+  } finally {
+    if (requestId === userInviteRequestId && state.user?.id === userId && state.role === 'Administrator') {
+      state.userManagementRefreshLoading = false;
+      render();
+    }
+  }
+}
+
+async function refreshUserManagementManually() {
+  if (state.role !== 'Administrator') return toast('Only Administrators can refresh User Management.', 'error');
+  if (state.userManagementRefreshLoading) return;
+  state.userManagementRefreshSaved = false;
+  state.userManagementRefreshLoading = true;
+  render();
+  try {
+    const refreshed = await refreshUserManagementLists();
+    if (refreshed) toast('User Management lists refreshed.');
+  } catch (error) {
+    console.error('User Management lists could not be refreshed.', error);
+    toast('The list could not refresh. Try again.', 'error', [], true);
+  } finally {
+    state.userManagementRefreshLoading = false;
+    if (state.view === 'users') render();
+  }
+}
+
+async function retryUserManagementLists(button = null) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can refresh User Management.', 'error');
+  if (state.userManagementRefreshLoading) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Retrying…';
+  }
+  state.userManagementRefreshLoading = true;
+  try {
+    const refreshed = await refreshUserManagementLists();
+    if (refreshed) toast('User Management lists refreshed.');
+  } catch (error) {
+    console.error('User Management lists could not be refreshed.', error);
+    state.userManagementRefreshError = error.message || 'The user lists could not be refreshed.';
+    render();
+    toast('The list could not refresh. Try again.', 'error', [], true);
+  } finally {
+    state.userManagementRefreshLoading = false;
+    if (state.view === 'users') render();
+  }
+}
+
+async function finishUserManagementSave(successMessage, focusAction, focusId, warningMessage = '') {
+  try {
+    const refreshed = await refreshUserManagementLists();
+    if (refreshed) toast(warningMessage || successMessage, warningMessage ? 'error' : 'success');
+    if (focusAction) focusUserManagementAction(focusAction, focusId);
+  } catch (error) {
+    console.error('A User Management action was saved, but its lists could not be refreshed.', error);
+    state.userManagementRefreshSaved = true;
+    render();
+    toast('Saved, but the list could not refresh.', 'error', [], true);
+  }
+}
+
+async function submitUserInvitation(form) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
+  if (form.dataset.saving === 'true') return;
+  if (!form.reportValidity()) return;
+  const fullName = form.elements.fullName.value.trim();
+  const email = form.elements.email.value.trim().toLowerCase();
+  const role = form.elements.role.value;
+  const allowedRoles = window.costTrackInviteRoles || [];
+  if (!fullName || fullName.length > 160) return toast('Enter a full name of no more than 160 characters.', 'error');
+  if (!form.elements.email.validity.valid) return toast('Enter a valid email address.', 'error');
+  if (!allowedRoles.includes(role)) return toast('Select a valid staff role.', 'error');
+  const duplicate = findInviteDuplicate(email);
+  if (duplicate?.type === 'account') {
+    updateInviteDuplicateNotice(form);
+    return toast(`An account already exists for ${email}. Change the user's role in Staff.`, 'error');
+  }
+  if (duplicate?.type === 'invitation') {
+    updateInviteDuplicateNotice(form);
+    return toast(`A ${duplicate.status.toLowerCase()} invitation already exists. Resend it instead.`, 'error');
+  }
+
+  setUserManagementFormBusy(form, true, 'Sending…');
+  try {
+    await window.supabaseRecord.inviteUser({ fullName, email, role });
+    state.modalDirty = false;
+    closeModal(true);
+    await finishUserManagementSave(`Invitation sent to ${email}.`, 'user-invite-open');
+  } catch (error) {
+    console.error('Staff invitation failed.', error);
+    if (error?.code === 'pending_invitation_exists') {
+      state.userInviteHistory.loaded = false;
+      try {
+        await loadUserInvitations(true);
+      } catch (loadError) {
+        console.error('The duplicate invitation could not be loaded.', loadError);
+      }
+      updateInviteDuplicateNotice(form);
+    }
+    toast(error.message || 'The invitation could not be sent. Please try again.', 'error');
+  } finally {
+    if (form.isConnected) setUserManagementFormBusy(form, false);
+  }
+}
+
+async function submitUserRoleChange(form) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can change staff roles.', 'error');
+  if (form.dataset.saving === 'true') return;
+  if (!form.reportValidity()) return;
+  const userId = form.dataset.userId;
+  const user = findUserManagementTarget(userId);
+  if (!user) return toast('This staff account is no longer available. Refresh the list and try again.', 'error');
+  const protectedReason = userManagementProtectionReason(user);
+  if (protectedReason) return toast(protectedReason, 'error');
+  const newRole = form.elements.role.value;
+  const reason = form.elements.reason.value.trim();
+  if (!USER_MANAGEMENT_ROLES.includes(newRole) || newRole === user.role) {
+    return toast('Select a different valid staff role.', 'error');
+  }
+  if (!reason || reason.length > 500) return toast('Enter a role-change reason of no more than 500 characters.', 'error');
+  const confirmed = await confirmInApp(
+    `Change ${user.name || user.email} from ${user.role} to ${newRole}? Their access changes on their next load. Reason: ${reason}`,
+    { title: 'Confirm role change', confirmLabel: 'Change role' }
+  );
+  if (!confirmed) return;
+  setUserManagementFormBusy(form, true, 'Updating…');
+  try {
+    const changed = await window.supabaseRecord.updateUserRole(user.id, newRole, reason);
+    if (!changed) throw new Error('The role was not changed. Refresh the staff list and try again.');
+    state.modalDirty = false;
+    closeModal(true);
+    await finishUserManagementSave(`Role updated to ${newRole}.`, 'open-user-role', user.id);
+  } catch (error) {
+    console.error('Staff role could not be changed.', error);
+    toast(error.message || 'The role could not be changed.', 'error');
+  } finally {
+    if (form.isConnected) setUserManagementFormBusy(form, false);
+  }
+}
+
+async function submitUserAccountStatus(form) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can manage staff access.', 'error');
+  if (form.dataset.saving === 'true') return;
+  if (!form.reportValidity()) return;
+  const userId = form.dataset.userId;
+  const accountStatus = form.dataset.status;
+  const user = findUserManagementTarget(userId);
+  if (!user) return toast('This staff account is no longer available. Refresh the list and try again.', 'error');
+  const protectedReason = userManagementProtectionReason(user);
+  if (protectedReason) return toast(protectedReason, 'error');
+  const reason = form.elements.reason.value.trim();
+  if (!reason || reason.length > 500) return toast('Enter a reason of no more than 500 characters.', 'error');
+  const deactivate = accountStatus === 'Deactivated';
+  const effect = deactivate
+    ? `${user.name || user.email} will immediately lose sign-in and CostTrack API access. Their operational history remains.`
+    : `${user.name || user.email} will regain sign-in and CostTrack API access.`;
+  const confirmed = await confirmInApp(`${effect}\n\nReason: ${reason}`, {
+    title: deactivate ? 'Confirm deactivation' : 'Confirm reactivation',
+    confirmLabel: deactivate ? 'Deactivate' : 'Reactivate'
+  });
+  if (!confirmed) return;
+  setUserManagementFormBusy(form, true, deactivate ? 'Deactivating…' : 'Reactivating…');
+  try {
+    await window.supabaseRecord.setUserAccountStatus(user.id, accountStatus, reason);
+    state.modalDirty = false;
+    closeModal(true);
+    await finishUserManagementSave(
+      deactivate ? 'User deactivated.' : 'User reactivated.',
+      'open-user-status',
+      user.id
+    );
+  } catch (error) {
+    console.error('Staff account status could not be changed.', error);
+    toast(error.message || 'The account status could not be changed.', 'error');
+  } finally {
+    if (form.isConnected) setUserManagementFormBusy(form, false);
+  }
+}
+
+async function runUserInvitationAction(invitationId, action) {
+  if (state.role !== 'Administrator') return toast('Only Administrators can manage invitations.', 'error');
+  if (state.userManagementBusyId) return;
+  const invitation = state.userInviteHistory.rows.find(row => row.id === invitationId);
+  if (!invitation) return toast('This invitation is no longer available. Refresh the list and try again.', 'error');
+  const status = effectiveInvitationStatus(invitation);
+  if (action === 'resend' && !['Pending', 'Expired'].includes(status)) {
+    return toast('Only pending or expired invitations can be resent.', 'error');
+  }
+  if (action === 'cancel' && status !== 'Pending') {
+    return toast('Only pending invitations can be cancelled.', 'error');
+  }
+  if (action === 'cancel') {
+    const confirmed = await confirmInApp(
+      `Cancel the invitation to ${invitation.email}? Its link will stop working and any unconfirmed account will be removed.`,
+      { title: 'Cancel invitation', confirmLabel: 'Cancel invitation' }
+    );
+    if (!confirmed) return;
+  }
+  state.userManagementBusyId = invitationId;
+  render();
+  const inviteForm = document.querySelector('#modalForm[data-type="user-invite"]');
+  if (inviteForm) updateInviteDuplicateNotice(inviteForm);
+  try {
+    if (action === 'resend') {
+      await window.supabaseRecord.resendUserInvitation(invitationId);
+      if (inviteForm) {
+        state.modalDirty = false;
+        closeModal(true);
+      }
+      await finishUserManagementSave('Invitation resent.');
+    } else {
+      const result = await window.supabaseRecord.cancelUserInvitation(invitationId);
+      const cleanupWarning = result.account_removed === false
+        ? result.account_blocked
+          ? 'Invitation cancelled. The verified Auth account was blocked and retained for review.'
+          : 'Invitation cancelled, but no linked account was removed. Verify Auth cleanup in Supabase.'
+        : '';
+      await finishUserManagementSave(
+        'Invitation cancelled.',
+        'cancel-user-invite',
+        invitationId,
+        cleanupWarning
+      );
+    }
+  } catch (error) {
+    console.error(`Invitation ${action} failed.`, error);
+    toast(error.message || `The invitation could not be ${action === 'resend' ? 'resent' : 'cancelled'}.`, 'error');
+  } finally {
+    state.userManagementBusyId = '';
+    if (state.view === 'users' && state.role === 'Administrator') {
+      render();
+      if (inviteForm?.isConnected) {
+        updateInviteDuplicateNotice(inviteForm);
+        inviteForm.querySelector('[data-action="resend-user-invite"]')?.focus();
+      } else if (inviteForm) {
+        focusUserManagementAction('user-invite-open');
+      } else if (action === 'resend') {
+        focusUserManagementAction('resend-user-invite', invitationId);
+      } else {
+        focusUserManagementAction('cancel-user-invite', invitationId);
+      }
+    }
+  }
 }
 
 async function loadUserInvitations(force = false) {
@@ -2175,11 +2754,16 @@ async function loadUserInvitations(force = false) {
     if (requestId !== userInviteRequestId || state.user?.id !== userId || state.role !== 'Administrator') return;
     history.rows = rows;
     history.loaded = true;
+    const inviteForm = document.querySelector('#modalForm[data-type="user-invite"]');
+    if (inviteForm) updateInviteDuplicateNotice(inviteForm);
   } catch (error) {
     if (requestId !== userInviteRequestId || state.user?.id !== userId || state.role !== 'Administrator') return;
     history.error = error.message || 'Invitation history could not be loaded.';
     history.loaded = true;
     console.error('Invitation history could not be loaded.', error);
+    toast(history.error, 'error');
+    const inviteForm = document.querySelector('#modalForm[data-type="user-invite"]');
+    if (inviteForm) updateInviteDuplicateNotice(inviteForm);
   } finally {
     if (requestId === userInviteRequestId && state.user?.id === userId && state.role === 'Administrator') {
       history.loading = false;
@@ -2188,41 +2772,12 @@ async function loadUserInvitations(force = false) {
   }
 }
 
-async function submitUserInvitation(form) {
-  if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
-  if (!form.reportValidity()) return;
-  const fullName = form.elements.fullName.value.trim();
-  const email = form.elements.email.value.trim().toLowerCase();
-  const role = form.elements.role.value;
-  const allowedRoles = window.costTrackInviteRoles || [];
-  if (!fullName || fullName.length > 160) return toast('Enter a full name of no more than 160 characters.', 'error');
-  if (!form.elements.email.validity.valid) return toast('Enter a valid email address.', 'error');
-  if (!allowedRoles.includes(role)) return toast('Select a valid staff role.', 'error');
-
-  const submitButton = form.querySelector('button[type="submit"]');
-  const originalLabel = submitButton.textContent;
-  state.inviteSending = true;
-  form.setAttribute('aria-busy', 'true');
-  form.querySelectorAll('input, select, button').forEach(control => { control.disabled = true; });
-  submitButton.textContent = 'Sending…';
-  try {
-    await window.supabaseRecord.inviteUser({ fullName, email, role });
-    state.inviteFormOpen = false;
-    state.inviteSending = false;
-    state.userInviteHistory.loaded = false;
-    toast(`Invitation sent to ${email}.`);
-    render();
-  } catch (error) {
-    console.error('Staff invitation failed.', error);
-    toast(error.message || 'The invitation could not be sent. Please try again.', 'error');
-  } finally {
-    state.inviteSending = false;
-    form.removeAttribute('aria-busy');
-    if (form.isConnected) {
-      form.querySelectorAll('input, select, button').forEach(control => { control.disabled = false; });
-      submitButton.textContent = originalLabel;
-    }
-  }
+async function retryUserInvitationLoad() {
+  if (state.role !== 'Administrator') return toast('Only Administrators can view invitation history.', 'error');
+  state.userInviteHistory.loaded = false;
+  state.userInviteHistory.error = '';
+  await loadUserInvitations(true);
+  if (!state.userInviteHistory.error) toast('Invitation history refreshed.');
 }
 function options(items, valueKey = 'id', labelKey = 'name') { return items.map(x => `<option value="${x[valueKey]}">${esc(x[labelKey])}</option>`).join(''); }
 function updateWasteFormPreview(form) {
@@ -2369,32 +2924,10 @@ async function openForm(type, item) {
   else if (type === 'count') modal('Record physical count', `<div class="form-grid"><label>Ingredient<select name="ingredientId" required>${options(all('ingredients').filter(item => item.isActive !== false))}</select></label><label>Expected quantity<input name="expected" type="number" min="0" step=".01" required></label><label>Actual count<input name="actual" type="number" min="0" step=".01" required></label><label>Count date<input name="date" type="date" value="${today()}" required></label></div>`, 'Save record', 'physical-count-modal');
   else if (type === 'user') {
     if (!item) return toast('Select a user to view their details.', 'error');
-    const roles = ['Administrator', 'Manager', 'Inventory Clerk', 'Chef / Kitchen Staff', 'Receptionist'];
     modal('User Details', `<section class="user-details-section">
-      <h3 class="panel-title">User Information</h3>
-      <div class="form-grid"><label>Full Name<input type="text" value="${esc(item.name || '')}" readonly></label><label>Email<input type="email" value="${esc(item.email || '')}" readonly></label><label class="full">Current Role<input type="text" value="${esc(item.role || 'Unassigned')}" readonly></label></div>
-    </section>
-    <section class="user-details-section" style="margin-top: 20px">
-      <h3 class="panel-title">Role Management</h3>
-      <label>Role<select name="role" data-role-save-id="${esc(item.id)}" aria-label="Role for ${esc(item.name || item.email || 'user')}" required>${roles.map(role => `<option value="${esc(role)}" ${item.role === role ? 'selected' : ''}>${esc(role)}</option>`).join('')}</select></label>
-      <label>Reason for role change <small class="field-help">Optional · 500 characters maximum</small><input type="text" name="roleChangeReason" maxlength="500" placeholder="Why is this role changing?"></label>
-    </section>`, 'Save Role', 'user-details-modal');
-    const form = document.querySelector('#modalForm');
-    form.id = 'userDetailsRoleForm';
-    form.dataset.userId = item.id;
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      const control = form.querySelector('[data-role-save-id]');
-      const currentUser = all('users').find(user => String(user.id) === form.dataset.userId);
-      if (!currentUser || !control) return toast('This user is no longer available. Reload the page and try again.', 'error');
-      if (control.value === currentUser.role) {
-        closeModal(true);
-        return;
-      }
-      control.dataset.userRole = control.dataset.roleSaveId;
-      control.dispatchEvent(new Event('change', { bubbles: true }));
-      delete control.dataset.userRole;
-    });
+      <h3 class="panel-title">Staff information</h3>
+      <div class="form-grid"><label>Full name<input type="text" value="${esc(item.name || '')}" readonly></label><label>Email<input type="email" value="${esc(item.email || '')}" readonly></label><label>Role<input type="text" value="${esc(item.role || 'Unassigned')}" readonly></label><label>Account status<input type="text" value="${esc(item.accountStatus || 'Unavailable')}" readonly></label><label>Last updated<input type="text" value="${esc(formatUserManagementDate(item.updatedAt))}" readonly></label></div>
+    </section>`, '', 'user-details-modal', 'read-only');
     return;
   }
   document.querySelector('#modalForm').dataset.type = type; if (item) document.querySelector('#modalForm').dataset.id = item.id;
@@ -5161,7 +5694,33 @@ document.addEventListener('click', event => {
   const action = event.target.closest('[data-action]');
   if (!action) return;
   const name = action.dataset.action;
-  if (name === 'close-modal') closeModal();
+  if (name === 'user-invite-open') openUserManagementInviteModal();
+  else if (name === 'user-management-open') {
+    if (state.role !== 'Administrator') return toast('Only Administrators can access User Management.', 'error');
+    state.userManagementPane = 'workspace';
+    state.userManagementTab = 'staff';
+    render();
+    requestAnimationFrame(() => document.querySelector('#userStaffTab')?.focus());
+  } else if (name === 'user-management-back') {
+    state.userManagementPane = 'home';
+    render();
+    requestAnimationFrame(() => document.querySelector('[data-action="user-management-open"]')?.focus());
+  } else if (name === 'user-management-tab') {
+    state.userManagementTab = action.dataset.tab === 'invitations' ? 'invitations' : 'staff';
+    render();
+    requestAnimationFrame(() => document.querySelector(`#user${state.userManagementTab === 'staff' ? 'Staff' : 'Invitations'}Tab`)?.focus());
+  } else if (name === 'open-user-role') {
+    action.closest('details')?.removeAttribute('open');
+    openUserRoleModal(action.dataset.id);
+  } else if (name === 'open-user-status') {
+    action.closest('details')?.removeAttribute('open');
+    openUserStatusModal(action.dataset.id, action.dataset.status);
+  } else if (name === 'resend-user-invite') void runUserInvitationAction(action.dataset.id, 'resend');
+  else if (name === 'cancel-user-invite') void runUserInvitationAction(action.dataset.id, 'cancel');
+  else if (name === 'retry-user-invites') void retryUserInvitationLoad();
+  else if (name === 'refresh-user-management') void refreshUserManagementManually();
+  else if (name === 'retry-user-management-refresh') void retryUserManagementLists();
+  else if (name === 'close-modal') closeModal();
   else if (name === 'confirm-modal') finishConfirmation(document.querySelector('#modalRoot').lastElementChild, true);
   else if (name === 'open-recipe') openRecipeForm();
   else if (name === 'open-reservation') reservationForm();
@@ -5214,11 +5773,6 @@ document.addEventListener('click', event => {
 });
 document.addEventListener('submit', async event => {
   const formId = event.target.getAttribute('id');
-  if (formId === 'inviteUserForm') {
-    event.preventDefault();
-    await submitUserInvitation(event.target);
-    return;
-  }
   if (formId === 'loginForm') {
     event.preventDefault();
     const form = event.target;
@@ -5276,32 +5830,26 @@ document.addEventListener('submit', async event => {
       await submitProductLifecycle(event.target, Object.fromEntries(new FormData(event.target)));
       return;
     }
+    if (event.target.dataset.type === 'user-invite') {
+      await submitUserInvitation(event.target);
+      return;
+    }
+    if (event.target.dataset.type === 'user-role-change') {
+      await submitUserRoleChange(event.target);
+      return;
+    }
+    if (event.target.dataset.type === 'user-account-status') {
+      await submitUserAccountStatus(event.target);
+      return;
+    }
     handleSubmit(event.target);
-  }
-});
-document.addEventListener('click', event => {
-  const action = event.target.closest('[data-action]')?.dataset.action;
-  if (action === 'toggle-user-invite') {
-    if (state.role !== 'Administrator') return toast('Only Administrators can invite staff users.', 'error');
-    if (state.inviteSending) return;
-    state.inviteFormOpen = !state.inviteFormOpen;
-    render();
-    if (state.inviteFormOpen) requestAnimationFrame(() => document.querySelector('#inviteUserForm [name="fullName"]')?.focus());
-  } else if (action === 'close-invite-user') {
-    if (state.inviteSending) return;
-    state.inviteFormOpen = false;
-    render();
-  } else if (action === 'retry-user-invites') {
-    if (state.role !== 'Administrator') return toast('Only Administrators can view invitation history.', 'error');
-    loadUserInvitations(true);
   }
 });
 document.addEventListener('input', event => {
   const searchInput = event.target;
-  if (searchInput.id !== 'tableSearch') return;
-  state.query = searchInput.value;
-  if (state.view === 'users') {
-    const query = state.query.toLowerCase();
+  if (searchInput.id === 'userManagementSearch') {
+    state.userManagementSearch = searchInput.value;
+    const query = state.userManagementSearch.toLowerCase();
     const rows = document.querySelectorAll('.user-management-page .user-row');
     let visibleRows = 0;
     rows.forEach(row => {
@@ -5309,17 +5857,30 @@ document.addEventListener('input', event => {
       if (!row.hidden) visibleRows++;
     });
     const count = document.querySelector('#userManagementCount');
-    const emptyState = document.querySelector('.user-management-page .user-empty-row');
-    if (count) count.textContent = `${visibleRows} users`;
+    const emptyState = document.querySelector('.user-management-page .user-management-empty-row');
+    if (count) count.textContent = `${visibleRows} staff member${visibleRows === 1 ? '' : 's'}`;
     if (emptyState) emptyState.hidden = visibleRows > 0;
     return;
   }
+  if (searchInput.id !== 'tableSearch') return;
+  state.query = searchInput.value;
   const selectionStart = searchInput.selectionStart ?? searchInput.value.length;
   const selectionEnd = searchInput.selectionEnd ?? selectionStart;
   render();
   const replacement = document.querySelector('#tableSearch');
   replacement?.focus();
   replacement?.setSelectionRange(selectionStart, selectionEnd);
+});
+document.addEventListener('keydown', event => {
+  const tab = event.target.closest('.user-management-tabs [role="tab"]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const targetTab = event.key === 'Home' || event.key === 'ArrowLeft'
+    ? 'staff'
+    : 'invitations';
+  state.userManagementTab = event.key === 'End' ? 'invitations' : targetTab;
+  render();
+  requestAnimationFrame(() => document.querySelector(`#user${state.userManagementTab === 'staff' ? 'Staff' : 'Invitations'}Tab`)?.focus());
 });
 document.addEventListener('input', event => {
   if (event.target.id !== 'tableManagementSearch') return;
@@ -5507,9 +6068,17 @@ async function openAuthenticatedSession(session) {
   if (!session?.user) throw new Error('No authenticated Supabase session was returned.');
   const { data: profile, error } = await window.supabaseClient
     .from('profiles')
-    .select('id,email,full_name,role')
+    .select('id,email,full_name,role,account_status')
     .eq('id', session.user.id)
     .single();
+  if (!error && profile && profile.account_status !== 'Active') {
+    await window.supabaseClient.auth.signOut();
+    throw new Error(
+      profile.account_status === 'Pending'
+        ? 'Your invitation has not been accepted yet.'
+        : 'Your CostTrack account is not active. Contact an Administrator.'
+    );
+  }
   if (error || !profile || !roleAccess[profile.role]) {
     await window.supabaseClient.auth.signOut();
     throw new Error('Your account has no valid ROMS role profile. Ask an administrator to provision your profile.');
@@ -5520,7 +6089,9 @@ async function openAuthenticatedSession(session) {
   state.unresolvedBookings = { rows: [], loading: false, loaded: false, error: '' };
   window.supabaseRecord.clearVersions();
   const requestedView = window.location.hash.slice(1) || 'dashboard';
-  state.view = canAccess(requestedView) ? requestedView : (roleAccess[state.role][0] || 'dashboard');
+  state.view = requestedView === 'users'
+    ? 'users'
+    : canAccess(requestedView) ? requestedView : (roleAccess[state.role][0] || 'dashboard');
   if (state.view === 'reservations') state.reservationMealPeriodFilter = 'All';
   if (state.view !== requestedView) window.history.replaceState(null, '', `#${state.view}`);
   document.querySelector('#loginScreen').classList.add('is-hidden');
@@ -5539,14 +6110,15 @@ async function openAuthenticatedSession(session) {
   }
   render();
 }
-async function signOutCurrentUser() {
+async function signOutCurrentUser({ force = false } = {}) {
   await stopRealtimeSubscriptions();
   const { error } = await window.supabaseClient.auth.signOut();
-  if (error) {
+  if (error && !force) {
     toast('Sign out failed. Please try again.', 'error');
     console.error('Sign out failed.', error);
     return;
   }
+  if (error) console.error('Inactive account session could not be revoked.', error);
   closeMobileDrawer(false);
   closeShellPopovers(false);
   state.user = null;
@@ -6022,7 +6594,8 @@ function normaliseRenderedStatuses() {
     const kind = tableAvailability === 'Available' ? 'good'
       : tableAvailability === 'Reserved' ? 'low'
         : tableAvailability === 'Occupied' ? 'out'
-          : value.includes('cancel') ? 'out' : value.includes('pending') ? 'low' : value.includes('out') ? 'out' : value.includes('low') || value.includes('short') ? 'low' : value.includes('over') ? 'over' : 'healthy';
+            : value.includes('cancel') || value.includes('expired') || value.includes('deactivated') || value.includes('inactive')
+              ? 'out' : value.includes('pending') ? 'low' : value.includes('out') ? 'out' : value.includes('low') || value.includes('short') ? 'low' : value.includes('over') ? 'over' : 'healthy';
     element.classList.remove('status-good', 'status-low', 'status-out', 'status-over', 'healthy', 'low', 'out', 'over');
     element.classList.add(`status-${kind}`);
     element.insertAdjacentHTML('afterbegin', `<span class="status-dot" aria-hidden="true"></span>`);
@@ -6035,6 +6608,13 @@ function render() {
   reportCharts = [];
   reportChartSpecs = [];
   if (!state.user || !state.role) return;
+  if (state.view === 'users' && state.role !== 'Administrator') {
+    document.querySelector('#sidebar').innerHTML = nav();
+    renderShellChrome();
+    document.querySelector('#pageCrumb').textContent = 'Access denied';
+    app.innerHTML = '<section class="user-management-page"><div class="panel error-state" role="alert"><strong>Access denied.</strong><p>User Management is available to Administrators only.</p></div></section>';
+    return;
+  }
   if (state.view === 'revenue' && !canAccessRevenue()) {
     document.querySelector('#sidebar').innerHTML = nav();
     renderShellChrome();
@@ -6573,40 +7153,17 @@ document.addEventListener('change', event => {
     state.query = event.target.value;
     if (state.view !== 'users') render();
   }
-  if (event.target.matches('[data-user-filter="role"]')) {
-    state.userRoleFilter = event.target.value;
+  if (event.target.id === 'userManagementRoleFilter') {
+    state.userManagementRole = event.target.value;
     render();
+    requestAnimationFrame(() => document.querySelector('#userManagementRoleFilter')?.focus());
     return;
   }
-  if (event.target.matches('[data-user-role]')) {
-    const control = event.target;
-    const userId = control.dataset.userRole;
-    const previous = all('users').find(item => item.id === userId)?.role;
-    if (state.role !== 'Administrator' || !previous) {
-      control.value = previous || control.value;
-      return toast('Only Administrators can change user roles.', 'error');
-    }
-    if (control.value === previous) return;
-    control.disabled = true;
-    let roleUpdated = false;
-    const reason = control.closest('#userDetailsRoleForm')?.querySelector('[name="roleChangeReason"]')?.value || '';
-    window.supabaseRecord.updateUserRole(userId, control.value, reason).then(async changed => {
-      if (!changed) throw new Error('The role was not changed. Reload the user list and try again.');
-      roleUpdated = true;
-      await syncWithSupabase();
-      if (control.closest('#userDetailsRoleForm')) closeModal(true);
-      toast('Role updated successfully.');
-    }).catch(error => {
-      control.disabled = false;
-      if (roleUpdated) {
-        console.error('The role was updated, but the user list could not be refreshed.', error);
-        if (control.closest('#userDetailsRoleForm')) closeModal(true);
-        toast('Role updated, but the user list could not be refreshed. Reload the page to see the saved role.', 'error');
-        return;
-      }
-      control.value = previous || control.value;
-      toast(friendlyRpcError(error), 'error');
-    });
+  if (event.target.id === 'userManagementStatusFilter') {
+    state.userManagementStatus = event.target.value;
+    render();
+    requestAnimationFrame(() => document.querySelector('#userManagementStatusFilter')?.focus());
+    return;
   }
 });
 document.addEventListener('input', event => {
@@ -6637,7 +7194,9 @@ window.addEventListener('beforeunload', event => {
 window.addEventListener('hashchange', () => {
   const view = window.location.hash.slice(1);
   if (!view) return;
-  state.view = canAccess(view) ? view : (roleAccess[state.role]?.[0] || 'dashboard');
+  state.view = view === 'users'
+    ? 'users'
+    : canAccess(view) ? view : (roleAccess[state.role]?.[0] || 'dashboard');
   state.focusPageAfterNavigation = true;
   if (state.view === 'reservations') state.reservationMealPeriodFilter = 'All';
   if (state.view !== view) window.history.replaceState(null, '', `#${state.view}`);

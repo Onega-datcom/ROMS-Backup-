@@ -38,9 +38,8 @@ Deno.test("normalizes valid email and invitation fields", () => {
   assertEquals(invite.role, "Receptionist", "staff role should be retained");
 });
 
-Deno.test("accepts each supported staff role", () => {
+Deno.test("accepts each non-Administrator invitation role", () => {
   const roles = [
-    "Administrator",
     "Manager",
     "Receptionist",
     "Inventory Clerk",
@@ -86,6 +85,10 @@ Deno.test("rejects invalid roles, blank names, and caller-supplied fields", () =
   assertValidationError(
     () => parseInvitePayload({ ...valid, role: "Customer" }),
     "Customer should not be an invitation role",
+  );
+  assertValidationError(
+    () => parseInvitePayload({ ...valid, role: "Administrator" }),
+    "Administrator invitations should be reserved for a role-change action",
   );
   assertValidationError(
     () => parseInvitePayload({ ...valid, full_name: "  " }),

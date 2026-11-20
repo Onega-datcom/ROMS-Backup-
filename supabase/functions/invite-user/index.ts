@@ -15,11 +15,27 @@ const CORS_HEADERS = {
 };
 const MAX_BODY_BYTES = 16_384;
 const INVITE_VALIDITY_DAYS = 7;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type JsonRecord = Record<string, unknown>;
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code = status >= 500
+      ? "server_error"
+      : status === 401
+      ? "not_authenticated"
+      : status === 403
+      ? "not_authorized"
+      : status === 409
+      ? "conflict"
+      : status === 429
+      ? "rate_limited"
+      : "invalid_request",
+  ) {
     super(message);
   }
 }
@@ -78,6 +94,21 @@ function getObject(value: unknown): JsonRecord {
   return value as JsonRecord;
 }
 
+function requireUuid(value: unknown, label: string): string {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new HttpError(400, `${label} must be a valid identifier.`);
+  }
+  return value;
+}
+
+function requireReason(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || value.length > 500) {
+    throw new HttpError(400, "The reason must be 500 characters or fewer.");
+  }
+  return value.trim();
+}
+
 function createServiceClient(url: string, serviceRoleKey: string) {
   return createClient(url, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -87,21 +118,13 @@ function createServiceClient(url: string, serviceRoleKey: string) {
 async function cancelPendingInvitation(
   serviceClient: ReturnType<typeof createServiceClient>,
   invitationId: string,
+  actorId: string,
 ): Promise<{ succeeded: boolean; error?: unknown }> {
-  const { data, error } = await serviceClient
-    .from("user_invites")
-    .update({ status: "Cancelled" })
-    .eq("id", invitationId)
-    .eq("status", "Pending")
-    .select("id")
-    .maybeSingle();
+  const { error } = await serviceClient.rpc("costtrack_cancel_user_invitation", {
+    p_invitation_id: invitationId,
+    p_actor_id: actorId,
+  });
   if (error) return { succeeded: false, error };
-  if (!data) {
-    return {
-      succeeded: false,
-      error: new Error("Pending invitation was not found during cancellation."),
-    };
-  }
   return { succeeded: true };
 }
 
@@ -143,16 +166,41 @@ async function createInvitation(
     });
   } catch (error) {
     if (error instanceof InviteValidationError) {
-      throw new HttpError(400, error.message);
+      throw new HttpError(
+        400,
+        error.message,
+        error.message.includes("email") ? "invalid_email" : "invalid_invitation",
+      );
     }
     throw error;
+  }
+
+  const { data: existingInvitation, error: invitationLookupError } =
+    await serviceClient
+      .from("user_invites")
+      .select("id,status")
+      .eq("email", invite.email)
+      .in("status", ["Pending", "Expired"])
+      .order("invited_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+  if (invitationLookupError) {
+    logFailure(requestId, "invitation_lookup", invitationLookupError);
+    throw new HttpError(500, "Could not verify existing invitations.");
+  }
+  if (existingInvitation) {
+    throw new HttpError(
+      409,
+      "A pending or expired invitation already exists. Resend it from Invitations.",
+      "pending_invitation_exists",
+    );
   }
 
   const escapedEmail = invite.email.replace(/[%_\\]/g, "\\$&");
   const { data: existingProfile, error: profileLookupError } =
     await serviceClient
       .from("profiles")
-      .select("id")
+      .select("id,account_status")
       .ilike("email", escapedEmail)
       .limit(1)
       .maybeSingle();
@@ -167,24 +215,7 @@ async function createInvitation(
     throw new HttpError(
       409,
       "An account already exists for this email address.",
-    );
-  }
-
-  const { data: existingInvitation, error: invitationLookupError } =
-    await serviceClient
-      .from("user_invites")
-      .select("id")
-      .eq("email", invite.email)
-      .eq("status", "Pending")
-      .maybeSingle();
-  if (invitationLookupError) {
-    logFailure(requestId, "invitation_lookup", invitationLookupError);
-    throw new HttpError(500, "Could not verify existing invitations.");
-  }
-  if (existingInvitation) {
-    throw new HttpError(
-      409,
-      "A pending invitation already exists for this email address.",
+      "already_registered",
     );
   }
 
@@ -206,7 +237,8 @@ async function createInvitation(
     if (invitationInsertError?.code === "23505") {
       throw new HttpError(
         409,
-        "A pending invitation already exists for this email address.",
+        "A pending or expired invitation already exists. Resend it from Invitations.",
+        "pending_invitation_exists",
       );
     }
     logFailure(
@@ -227,6 +259,7 @@ async function createInvitation(
     const cleanup = await cancelPendingInvitation(
       serviceClient,
       invitation.id,
+      userId,
     );
     if (!cleanup.succeeded) {
       logFailure(
@@ -248,17 +281,48 @@ async function createInvitation(
       throw new HttpError(
         409,
         "An Auth account already exists for this email address.",
+        "already_registered",
       );
     }
     if (authInviteError?.status === 429) {
       throw new HttpError(
         429,
         "Supabase Auth email rate limit reached. Try again later.",
+        "rate_limited",
       );
     }
     throw new HttpError(
       502,
       "Supabase Auth could not send the invitation. Check email and redirect configuration.",
+    );
+  }
+
+  const { error: sentAuditError } = await serviceClient.rpc(
+    "costtrack_record_user_invitation_sent",
+    {
+      p_invitation_id: invitation.id,
+      p_actor_id: userId,
+    },
+  );
+  if (sentAuditError) {
+    logFailure(requestId, "invitation_sent_audit", sentAuditError);
+    const { error: deleteUserError } = await serviceClient.auth.admin
+      .deleteUser(authInvitation.user.id);
+    if (deleteUserError) {
+      logFailure(requestId, "sent_audit_auth_compensation", deleteUserError);
+    }
+    const cleanup = await cancelPendingInvitation(
+      serviceClient,
+      invitation.id,
+      userId,
+    );
+    if (!cleanup.succeeded) {
+      logFailure(requestId, "sent_audit_invitation_compensation", cleanup.error);
+    }
+    throw new HttpError(
+      500,
+      "The invitation email was sent, but its audit record could not be saved. Check the invitation and Auth account before retrying.",
+      "server_error",
     );
   }
 
@@ -269,6 +333,7 @@ async function createInvitation(
       email: invite.email,
       full_name: invite.full_name,
       role: invite.role,
+      account_status: "Pending",
     });
   if (profileInsertError) {
     logFailure(requestId, "profile_insert", profileInsertError);
@@ -285,6 +350,7 @@ async function createInvitation(
     const cleanup = await cancelPendingInvitation(
       serviceClient,
       invitation.id,
+      userId,
     );
     if (!cleanup.succeeded) {
       logFailure(requestId, "cancel_failed_profile_insert", cleanup.error);
@@ -306,6 +372,131 @@ async function createInvitation(
     email: invite.email,
     status: "Pending",
     expires_at: invitation.expires_at,
+    request_id: requestId,
+  });
+}
+
+async function resendInvitation(
+  requestId: string,
+  body: JsonRecord,
+  actorId: string,
+  serviceClient: ReturnType<typeof createServiceClient>,
+  redirectUrl: string,
+): Promise<Response> {
+  const allowedFields = new Set(["action", "invitation_id"]);
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+    throw new HttpError(400, "The resend request contains unsupported fields.");
+  }
+  const invitationId = requireUuid(body.invitation_id, "Invitation ID");
+  const { data: invitation, error: invitationError } = await serviceClient
+    .from("user_invites")
+    .select("id,email,full_name,role,status")
+    .eq("id", invitationId)
+    .maybeSingle();
+  if (invitationError) {
+    logFailure(requestId, "resend_invitation_lookup", invitationError);
+    throw new HttpError(500, "Could not load the invitation to resend.");
+  }
+  if (!invitation) throw new HttpError(404, "The invitation was not found.");
+  if (!["Pending", "Expired"].includes(invitation.status)) {
+    throw new HttpError(
+      409,
+      "Only pending or expired invitations can be resent.",
+      "invitation_not_resendable",
+    );
+  }
+
+  const { data: profile, error: profileError } = await serviceClient
+    .from("profiles")
+    .select("id,account_status")
+    .eq("email", invitation.email)
+    .maybeSingle();
+  if (profileError) {
+    logFailure(requestId, "resend_profile_lookup", profileError);
+    throw new HttpError(500, "Could not verify the invited account.");
+  }
+  if (!profile || profile.account_status !== "Pending") {
+    throw new HttpError(
+      409,
+      "The pending invitation account is missing or already registered. Verify the account before sending another invitation.",
+      profile ? "already_registered" : "invitation_account_missing",
+    );
+  }
+
+  const { data: authData, error: authLookupError } = await serviceClient.auth
+    .admin.getUserById(profile.id);
+  if (authLookupError) {
+    if (authLookupError.status === 404) {
+      throw new HttpError(
+        409,
+        "The pending Auth account is missing. Cancel this invitation and create a new one.",
+        "invitation_account_missing",
+      );
+    }
+    logFailure(requestId, "resend_auth_user_lookup", authLookupError);
+    throw new HttpError(500, "Could not verify the invited Auth account.");
+  }
+  if (!authData.user || authData.user.email_confirmed_at) {
+    throw new HttpError(
+      409,
+      "This email is already confirmed. Complete the existing invitation or manage the staff account.",
+      "already_registered",
+    );
+  }
+
+  const { error: authInviteError } = await serviceClient.auth.admin
+    .inviteUserByEmail(invitation.email, {
+      data: { full_name: invitation.full_name, role: invitation.role },
+      redirectTo: redirectUrl,
+    });
+  if (authInviteError) {
+    logFailure(requestId, "resend_auth_invite", authInviteError);
+    if (authInviteError.status === 422) {
+      throw new HttpError(
+        409,
+        "Supabase Auth reports that this email is already registered.",
+        "already_registered",
+      );
+    }
+    if (authInviteError.status === 429) {
+      throw new HttpError(
+        429,
+        "Supabase Auth email rate limit reached. Try again later.",
+        "rate_limited",
+      );
+    }
+    throw new HttpError(
+      502,
+      "Supabase Auth could not resend the invitation. Check email and redirect configuration.",
+      "email_delivery_failed",
+    );
+  }
+
+  const { data: expiresAt, error: resendError } = await serviceClient.rpc(
+    "costtrack_resend_user_invitation",
+    {
+      p_invitation_id: invitation.id,
+      p_actor_id: actorId,
+    },
+  );
+  if (resendError || typeof expiresAt !== "string") {
+    logFailure(
+      requestId,
+      "resend_invitation_record",
+      resendError ?? new Error("No expiry was returned."),
+    );
+    throw new HttpError(
+      500,
+      "The invitation email was resent, but its expiry and audit could not be refreshed. Contact an Administrator before retrying.",
+      "invitation_record_failed",
+    );
+  }
+
+  return jsonResponse(200, {
+    invitation_id: invitation.id,
+    email: invitation.email,
+    status: "Pending",
+    expires_at: expiresAt,
     request_id: requestId,
   });
 }
@@ -341,14 +532,18 @@ async function acceptInvitation(
 
   const { data: profile, error: profileError } = await serviceClient
     .from("profiles")
-    .select("email")
+    .select("email, account_status")
     .eq("id", user.id)
     .maybeSingle();
   if (profileError) {
     logFailure(requestId, "accept_profile_lookup", profileError);
     throw new HttpError(500, "Could not verify the invited account profile.");
   }
-  if (!profile || profile.email.trim().toLowerCase() !== email) {
+  if (
+    !profile ||
+    profile.email.trim().toLowerCase() !== email ||
+    !["Pending", "Active"].includes(profile.account_status)
+  ) {
     throw new HttpError(
       403,
       "The signed-in account does not match an invitation profile.",
@@ -401,29 +596,303 @@ async function acceptInvitation(
     );
   }
 
-  const { data: acceptedInvitation, error: acceptanceError } =
-    await serviceClient
-      .from("user_invites")
-      .update({ status: "Accepted" })
-      .eq("id", invitation.id)
-      .eq("status", "Pending")
-      .gt("expires_at", new Date().toISOString())
-      .select("id, status")
-      .maybeSingle();
+  const { data: acceptanceRecorded, error: acceptanceError } =
+    await serviceClient.rpc("costtrack_accept_user_invitation", {
+      p_invitation_id: invitation.id,
+      p_user_id: user.id,
+    });
   if (acceptanceError) {
     logFailure(requestId, "accept_invitation_update", acceptanceError);
-    throw new HttpError(500, "Invitation acceptance could not be recorded.");
-  }
-  if (!acceptedInvitation) {
     throw new HttpError(
-      409,
-      "The invitation is no longer pending or has expired.",
+      acceptanceError.code === "23514" ? 409 : 500,
+      acceptanceError.code === "23514"
+        ? "The invitation is no longer pending or has expired."
+        : "Invitation acceptance could not be recorded.",
     );
+  }
+  return jsonResponse(200, {
+    invitation_id: invitation.id,
+    status: "Accepted",
+    already_accepted: acceptanceRecorded !== true,
+    request_id: requestId,
+  });
+}
+
+async function setUserAccountStatus(
+  requestId: string,
+  body: JsonRecord,
+  action: "deactivate" | "reactivate",
+  actorId: string,
+  serviceClient: ReturnType<typeof createServiceClient>,
+): Promise<Response> {
+  const allowedFields = new Set(["action", "user_id", "reason"]);
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+    throw new HttpError(400, "The account status request contains unsupported fields.");
+  }
+  const userId = requireUuid(body.user_id, "User ID");
+  const reason = requireReason(body.reason);
+  if (action === "deactivate" && !reason) {
+    throw new HttpError(
+      400,
+      "A reason is required to deactivate a user.",
+      "reason_required",
+    );
+  }
+  if (userId === actorId) {
+    throw new HttpError(403, "Administrators cannot change their own account status.");
+  }
+
+  const { data: profile, error: profileError } = await serviceClient
+    .from("profiles")
+    .select("id,role,account_status")
+    .eq("id", userId)
+    .maybeSingle();
+  if (profileError) {
+    logFailure(requestId, "account_profile_lookup", profileError);
+    throw new HttpError(500, "Could not load the target staff account.");
+  }
+  if (!profile) throw new HttpError(404, "The staff account was not found.");
+  if (!["Active", "Deactivated"].includes(profile.account_status)) {
+    throw new HttpError(409, "Only active or deactivated staff accounts can be changed here.");
+  }
+
+  if (action === "deactivate") {
+    const { error } = await serviceClient.rpc(
+      "costtrack_set_profile_account_status",
+      {
+        p_user_id: userId,
+        p_new_status: "Deactivated",
+        p_actor_id: actorId,
+        p_reason: reason,
+      },
+    );
+    if (error) {
+      logFailure(requestId, "deactivate_profile", error);
+      throw new HttpError(
+        error.code === "23514" || error.code === "55000"
+          ? 409
+          : error.code === "42501"
+          ? 403
+          : error.code === "22023"
+          ? 400
+          : 500,
+        error.code === "23514" || error.code === "55000"
+          ? "The last active Administrator cannot be deactivated."
+          : error.code === "42501"
+          ? error.message
+          : error.code === "22023"
+          ? error.message
+          : "The account could not be deactivated.",
+        error.code === "42501"
+          ? "not_authorized"
+          : error.code === "22023"
+          ? "reason_required"
+          : error.code === "23514" || error.code === "55000"
+          ? "protected_account"
+          : "server_error",
+      );
+    }
+
+    const { error: banError } = await serviceClient.auth.admin.updateUserById(
+      userId,
+      { ban_duration: "876000h" },
+    );
+    if (banError) {
+      logFailure(requestId, "deactivate_auth_user", banError);
+      throw new HttpError(
+        502,
+        "The account is blocked by CostTrack, but Supabase Auth could not be disabled. Retry this action or review the Auth user.",
+      );
+    }
+    return jsonResponse(200, {
+      user_id: userId,
+      status: "Deactivated",
+      request_id: requestId,
+    });
+  }
+
+  const { error: unbanError } = await serviceClient.auth.admin.updateUserById(
+    userId,
+    { ban_duration: "none" },
+  );
+  if (unbanError) {
+    logFailure(requestId, "reactivate_auth_user", unbanError);
+    throw new HttpError(502, "Supabase Auth could not restore this account.");
+  }
+
+  const { error: statusError } = await serviceClient.rpc(
+    "costtrack_set_profile_account_status",
+    {
+      p_user_id: userId,
+      p_new_status: "Active",
+      p_actor_id: actorId,
+      p_reason: reason,
+    },
+  );
+  if (statusError) {
+    logFailure(requestId, "reactivate_profile", statusError);
+    const { error: rollbackError } = await serviceClient.auth.admin
+      .updateUserById(userId, { ban_duration: "876000h" });
+    if (rollbackError) {
+      logFailure(requestId, "reactivate_auth_compensation", rollbackError);
+      throw new HttpError(
+        500,
+        "Account reactivation failed and Supabase Auth could not be re-disabled. An Administrator must review this account immediately.",
+      );
+    }
+    throw new HttpError(500, "The account could not be reactivated.");
   }
 
   return jsonResponse(200, {
-    invitation_id: acceptedInvitation.id,
-    status: acceptedInvitation.status,
+    user_id: userId,
+    status: "Active",
+    request_id: requestId,
+  });
+}
+
+async function cancelInvitation(
+  requestId: string,
+  body: JsonRecord,
+  actorId: string,
+  serviceClient: ReturnType<typeof createServiceClient>,
+): Promise<Response> {
+  const allowedFields = new Set(["action", "invitation_id"]);
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+    throw new HttpError(400, "The cancellation request contains unsupported fields.");
+  }
+  const invitationId = requireUuid(body.invitation_id, "Invitation ID");
+  const { data: invitation, error: invitationError } = await serviceClient
+    .from("user_invites")
+    .select("id,email,status")
+    .eq("id", invitationId)
+    .maybeSingle();
+  if (invitationError) {
+    logFailure(requestId, "cancel_invitation_lookup", invitationError);
+    throw new HttpError(500, "Could not load the invitation to cancel.");
+  }
+  if (!invitation) throw new HttpError(404, "The invitation was not found.");
+  if (invitation.status === "Accepted") {
+    throw new HttpError(
+      409,
+      "This invitation was accepted. Deactivate the staff account instead.",
+    );
+  }
+
+  const { data: profile, error: profileError } = await serviceClient
+    .from("profiles")
+    .select("id,account_status")
+    .eq("email", invitation.email)
+    .maybeSingle();
+  if (profileError) {
+    logFailure(requestId, "cancel_profile_lookup", profileError);
+    throw new HttpError(500, "Could not verify the invited account.");
+  }
+  if (
+    profile &&
+    !["Pending", "Cancelled"].includes(profile.account_status)
+  ) {
+    throw new HttpError(
+      409,
+      "This invitation is linked to an active or deactivated account; manage the account separately.",
+    );
+  }
+
+  let authUserConfirmed = false;
+  let newlyBanned = false;
+  if (profile) {
+    const { data: authData, error: authLookupError } = await serviceClient.auth
+      .admin.getUserById(profile.id);
+    if (authLookupError && authLookupError.status !== 404) {
+      logFailure(requestId, "cancel_auth_user_lookup", authLookupError);
+      throw new HttpError(500, "Could not verify the invited Auth account.");
+    }
+    authUserConfirmed = Boolean(authData.user?.email_confirmed_at);
+    if (authData.user && !authUserConfirmed) {
+      const currentBanExpiry = authData.user.banned_until
+        ? new Date(authData.user.banned_until).getTime()
+        : 0;
+      if (currentBanExpiry <= Date.now()) {
+        const { data: banData, error: banError } = await serviceClient.auth.admin
+          .updateUserById(profile.id, { ban_duration: "876000h" });
+        if (banError) {
+          logFailure(requestId, "cancel_ban_unconfirmed_user", banError);
+          throw new HttpError(
+            502,
+            "Supabase Auth could not revoke the pending invite. No invitation data was changed.",
+          );
+        }
+        newlyBanned = true;
+        authUserConfirmed = Boolean(banData.user?.email_confirmed_at);
+      }
+    }
+  }
+
+  const { data: targetUserId, error: cancelError } = await serviceClient.rpc(
+    "costtrack_cancel_user_invitation",
+    {
+      p_invitation_id: invitationId,
+      p_actor_id: actorId,
+    },
+  );
+  if (cancelError) {
+    logFailure(requestId, "cancel_invitation", cancelError);
+    if (newlyBanned && profile) {
+      const { error: unbanError } = await serviceClient.auth.admin
+        .updateUserById(profile.id, { ban_duration: "none" });
+      if (unbanError) {
+        logFailure(requestId, "cancel_auth_compensation", unbanError);
+        throw new HttpError(
+          500,
+          "Cancellation was rejected and Supabase Auth could not restore the pending account. An Administrator must review it.",
+        );
+      }
+    }
+    throw new HttpError(
+      cancelError.code === "55000" ? 409 : 500,
+      cancelError.code === "55000"
+        ? cancelError.message
+        : "The invitation could not be cancelled.",
+    );
+  }
+
+  if (typeof targetUserId === "string") {
+    if (authUserConfirmed) {
+      const { error: banError } = await serviceClient.auth.admin.updateUserById(
+        targetUserId,
+        { ban_duration: "876000h" },
+      );
+      if (banError) {
+        logFailure(requestId, "cancel_confirmed_auth_user", banError);
+        throw new HttpError(
+          502,
+          "The invitation is cancelled, but the verified Auth account could not be blocked. Review it in Supabase Auth immediately.",
+        );
+      }
+      return jsonResponse(200, {
+        invitation_id: invitationId,
+        status: "Cancelled",
+        account_removed: false,
+        account_blocked: true,
+        request_id: requestId,
+      });
+    }
+
+    const { error: deleteError } = await serviceClient.auth.admin.deleteUser(
+      targetUserId,
+    );
+    if (deleteError && deleteError.status !== 404) {
+      logFailure(requestId, "cancel_delete_unconfirmed_user", deleteError);
+      throw new HttpError(
+        502,
+        "The invitation is cancelled and access is blocked, but the unconfirmed Auth account could not be removed. Retry cancellation.",
+      );
+    }
+  }
+
+  return jsonResponse(200, {
+    invitation_id: invitationId,
+    status: "Cancelled",
+    account_removed: typeof targetUserId === "string" && !authUserConfirmed,
     request_id: requestId,
   });
 }
@@ -436,6 +905,8 @@ async function handleRequest(request: Request): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse(405, {
       error: "Method not allowed.",
+      message: "Method not allowed.",
+      code: "method_not_allowed",
       request_id: requestId,
     });
   }
@@ -446,6 +917,8 @@ async function handleRequest(request: Request): Promise<Response> {
   ) {
     return jsonResponse(415, {
       error: "Content-Type must be application/json.",
+      message: "Content-Type must be application/json.",
+      code: "invalid_content_type",
       request_id: requestId,
     });
   }
@@ -478,7 +951,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
     const { data: callerProfile, error: callerProfileError } = await userClient
       .from("profiles")
-      .select("role")
+      .select("role,account_status")
       .eq("id", userData.user.id)
       .maybeSingle();
     if (callerProfileError) {
@@ -498,14 +971,37 @@ async function handleRequest(request: Request): Promise<Response> {
     }
     const body = getObject(parsedBody);
 
-    if (body.action === "invite" && callerProfile?.role !== "Administrator") {
+    const adminActions = new Set([
+      "invite",
+      "resend",
+      "cancel",
+      "deactivate",
+      "reactivate",
+    ]);
+    if (
+      adminActions.has(String(body.action)) &&
+      (
+        callerProfile?.role !== "Administrator" ||
+        callerProfile.account_status !== "Active"
+      )
+    ) {
       throw new HttpError(
         403,
-        "Only Administrators can send staff invitations.",
+        "Only active Administrators can manage staff accounts and invitations.",
+        "not_administrator",
       );
     }
-    if (body.action !== "invite" && body.action !== "accept") {
-      throw new HttpError(400, "Action must be invite or accept.");
+    if (
+      ![
+        "invite",
+        "resend",
+        "accept",
+        "cancel",
+        "deactivate",
+        "reactivate",
+      ].includes(String(body.action))
+    ) {
+      throw new HttpError(400, "A supported invitation or account action is required.");
     }
 
     const serviceClient = createServiceClient(
@@ -523,6 +1019,16 @@ async function handleRequest(request: Request): Promise<Response> {
       );
     }
 
+    if (body.action === "resend") {
+      return await resendInvitation(
+        requestId,
+        body,
+        userData.user.id,
+        serviceClient,
+        getRedirectUrl(),
+      );
+    }
+
     if (body.action === "accept") {
       return await acceptInvitation(
         requestId,
@@ -531,17 +1037,38 @@ async function handleRequest(request: Request): Promise<Response> {
         serviceClient,
       );
     }
-    throw new HttpError(400, "Action must be invite or accept.");
+    if (body.action === "cancel") {
+      return await cancelInvitation(
+        requestId,
+        body,
+        userData.user.id,
+        serviceClient,
+      );
+    }
+    if (body.action === "deactivate" || body.action === "reactivate") {
+      return await setUserAccountStatus(
+        requestId,
+        body,
+        body.action,
+        userData.user.id,
+        serviceClient,
+      );
+    }
+    throw new HttpError(400, "A supported invitation or account action is required.");
   } catch (error) {
     if (error instanceof HttpError) {
       return jsonResponse(error.status, {
         error: error.message,
+        message: error.message,
+        code: error.code,
         request_id: requestId,
       });
     }
     logFailure(requestId, "unhandled_request", error);
     return jsonResponse(500, {
       error: "The invitation request could not be completed.",
+      message: "The invitation request could not be completed.",
+      code: "server_error",
       request_id: requestId,
     });
   }

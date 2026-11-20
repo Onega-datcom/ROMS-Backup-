@@ -168,9 +168,9 @@ Serve the files over HTTP(S), not `file://`. In **Authentication → URL Configu
 
 ## Phase 3 administrator invitation Edge Function
 
-This phase adds the `invite-user` Edge Function; it does not add the Administrator's invitation form. It supports two authenticated actions:
+This phase adds the `invite-user` Edge Function; it does not add the Administrator's invitation form. The original invitation flow supports two authenticated actions:
 
-- `invite`: only an Administrator can create an invitation. The function validates the request, writes a `Pending` row to `public.user_invites`, creates the Supabase Auth invite (which sends the email using the project's Auth SMTP configuration), and inserts the matching profile.
+- `invite`: only an active Administrator can create an invitation. The function validates the request, writes a `Pending` row to `public.user_invites`, creates the Supabase Auth invite (which sends the email using the project's Auth SMTP configuration), and inserts the matching profile.
 - `accept`: after the invitee sets a password through the existing password-update screen, the app calls the function with the invitee's session. The function verifies the confirmed email and matching profile, then changes the invitation to `Accepted`; the database trigger stamps `accepted_at`.
 
 An invitation remains `Pending` after the email is sent because it has not yet been accepted. Failed send/profile setup attempts cancel the pending row when cleanup succeeds. The database invitation expires after seven days. Supabase Auth's email-link expiry is configured separately; ensure it is not shorter than the database expiry, or a still-Pending invitation may have an unusable email link. The function uses a compensating delete if Auth created the invited user but profile insertion fails; if cleanup itself fails, use the returned `request_id` to locate the safe server log entry and reconcile the account.
@@ -213,6 +213,41 @@ deno test supabase/functions/invite-user/validation_test.ts
 In a development project, invoke the deployed function with an Administrator token and a unique test email. Confirm the new Auth user, profile, Pending invite, seven-day expiry, and delivered email; complete the email link and password update; then verify the row becomes Accepted with `accepted_at`. Repeat with a Manager token, no token, invalid role/email, an existing profile, and the same email twice. Expected results are respectively `403`, `401`, `400`, `409`, and `409`, with no extra Auth users or pending rows. Do not use a real employee address for failure-path tests.
 
 The app invokes `accept` after password setup, and the function requires a confirmed email plus a matching profile and pending invitation. Supabase Auth does not expose a server-verifiable flag proving that a password was set, so a caller with the confirmed invitee session could invoke this action directly; treat `Accepted` as the invitee's acceptance callback, not independent proof of password creation. The status lifecycle has no separate `Sent` value; do not mark a just-sent invitation Accepted. No automatic expiry job or Administrator invite UI is included in this phase.
+
+## Staff account lifecycle
+
+Migration 031 separates invited accounts from active staff and adds audited deactivation/reactivation:
+
+1. Apply `supabase/031_user_account_lifecycle.sql` after migrations 029 and 030.
+2. Run `supabase/031_user_account_lifecycle_acceptance.sql`; it runs in a transaction and ends with `ROLLBACK`.
+3. Deploy the updated `invite-user` function with `supabase functions deploy invite-user`.
+
+New invitees receive a `Pending` profile that is excluded from the active staff list. The acceptance action atomically changes the invitation to `Accepted` and the profile to `Active`. User Management exposes cancellation for pending/expired invitations; cancellation blocks database access, removes an unconfirmed Auth user and its pending profile, and retains the cancelled invitation record. If the invited email has already been confirmed, cancellation blocks the Auth user but retains the profile for review.
+
+Administrators can deactivate or reactivate existing staff from User Management. Deactivation changes the profile status, blocks role-based RLS access immediately, and bans Auth sign-in while preserving the profile and operational history. An open CostTrack session subscribes to its own profile status and signs out when deactivation arrives. Reactivation restores Auth access and the profile's `Active` state. The last active Administrator and self-deactivation are protected. Account status changes are recorded in `profile_account_status_audit`; only active Administrators can read that audit.
+
+The updated `invite-user` Edge Function supports `invite`, `accept`, `cancel`, `deactivate`, and `reactivate` actions. Invitation creation, acceptance, cancellation, and account status transitions must go through the deployed Edge Function. The migration removes direct authenticated insert/update access to `user_invites`; do not expose the service-role key to the browser. The migration also permits Auth cleanup to remove only `Pending` or `Cancelled` profiles; active and deactivated staff profiles remain non-deletable.
+
+## User Management safety hardening (migration 032)
+
+Apply the server/database safeguards after 031:
+
+1. As the database owner, run `supabase/032_user_management_safety.sql`.
+2. Run `supabase/032_user_management_safety_acceptance.sql`. It ends with `ROLLBACK`; it requires one active Administrator and active Manager, Receptionist, Inventory Clerk, and Chef / Kitchen Staff profiles.
+3. Deploy the updated Edge Function: `supabase functions deploy invite-user`.
+4. Confirm the production app URL is in **Authentication → URL Configuration → Redirect URLs**.
+
+Migration 032 removes authenticated profile INSERT permission (including for Administrators), so invitations and profile creation are possible only through the Administrator-verified Edge Function. Authenticated profile and invitation table writes remain unavailable; role changes use the Administrator-only `costtrack_update_profile_role` RPC. Role changes and deactivation require a non-blank reason in PostgreSQL. The last active Administrator cannot be demoted, deactivated, or deleted, and an Administrator cannot demote or deactivate their own account.
+
+The migration adds append-only invitation audit history for Sent, Resent, and Cancelled events. Resend is available through the Edge Function for Pending or Expired invitations; it refreshes the database expiry to seven days and asks Supabase Auth to reissue the invitation email. A repeated new-invite request returns a structured `pending_invitation_exists` error so the UI can offer Resend. Supabase Auth's `429` email rate-limit response is returned as `rate_limited`; `422` for a registered address is returned as `already_registered`. Error JSON includes `error`, `message`, `code`, and `request_id`.
+
+The User Management UI provides an Administrator-only two-card landing view and a Staff / Invitations workspace. Staff can be searched and filtered by role and status. Role changes and deactivation/reactivation require a reason and a confirmation dialog; the current account and last active Administrator are marked Protected in the UI as well as enforced by PostgreSQL. The invitation history shows inviter and lifecycle dates, with Resend available for Pending or Expired invitations and Cancel available for Pending invitations. The invite form warns about existing accounts and invitations and offers Resend for the latter.
+
+All User Management actions show a success or server-error toast and end their loading state. Requests time out after 15 seconds. After a successful write, the app refreshes the affected lists without a full reload; if that refresh fails, it reports that the save succeeded and offers a retry. These UI protections complement, but do not replace, the migration 032 RLS, RPC, trigger, and Edge Function checks.
+
+No new secret is required for 032. Supabase Edge Functions provide `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` as server-managed runtime secrets. Keep `INVITE_REDIRECT_URL` configured as described above; never copy the service-role key into `supabase-config.js`, browser variables, or HTML. Configure a production SMTP provider in **Authentication → SMTP Settings** (host, port, username, password, sender name/address) and ensure its sending limits accommodate the invitation workflow. Supabase Auth remains responsible for sending mail and applying its email rate limits.
+
+The 032 rollback is deliberately data-preserving: run `supabase/032_user_management_safety_rollback.sql` only after redeploying the previous Edge Function. It removes the new resend/sent-event RPCs but retains stricter profile-write and reason checks, append-only protections, and invitation audit data; it does not delete rows or reopen direct profile insertion.
 
 ## Reservation calendar
 

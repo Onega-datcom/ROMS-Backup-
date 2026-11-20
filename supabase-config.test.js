@@ -45,6 +45,106 @@ test('captures an Auth invitation link before the Supabase client consumes its U
   assert.equal(loadSupabaseRecord(() => ({}), {}, '#type=recovery').inviteLink, false);
 });
 
+test('active user loading excludes pending and cancelled profiles while retaining deactivated accounts', async () => {
+  const query = {};
+  const { record } = loadSupabaseRecord(() => ({}), {
+    from(table) {
+      query.table = table;
+      return {
+        select(columns) {
+          query.columns = columns;
+          return this;
+        },
+        in(column, values) {
+          query.filter = { column, values };
+          return this;
+        },
+        order(column) {
+          query.order = column;
+          return Promise.resolve({
+            data: [{
+              id: 'user-1',
+              full_name: 'Staff User',
+              email: 'staff@example.com',
+              role: 'Manager',
+              account_status: 'Deactivated',
+              updated_at: '2026-11-18T12:00:00Z'
+            }],
+            error: null
+          });
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await record.load('users'))), [{
+    id: 'user-1',
+    name: 'Staff User',
+    email: 'staff@example.com',
+    role: 'Manager',
+    accountStatus: 'Deactivated',
+    updatedAt: '2026-11-18T12:00:00Z'
+  }]);
+  assert.equal(query.table, 'profiles');
+  assert.equal(query.columns, 'id,email,full_name,role,account_status,updated_at');
+  assert.deepEqual(JSON.parse(JSON.stringify(query.filter)), {
+    column: 'account_status',
+    values: ['Active', 'Deactivated']
+  });
+  assert.equal(query.order, 'full_name');
+});
+
+test('account lifecycle adapters invoke the protected Edge Function actions', async () => {
+  const calls = [];
+  const { record } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke(name, options) {
+        calls.push({ name, body: options.body });
+        if (options.body.action === 'cancel') {
+          return {
+            data: { invitation_id: 'invite-1', status: 'Cancelled', account_removed: true },
+            error: null
+          };
+        }
+        return { data: { user_id: 'user-1', status: 'Deactivated' }, error: null };
+      }
+    }
+  });
+
+  assert.equal((await record.setUserAccountStatus('user-1', 'Deactivated', 'Staff left')).status, 'Deactivated');
+  assert.equal((await record.cancelUserInvitation('invite-1')).account_removed, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    {
+      name: 'invite-user',
+      body: { action: 'deactivate', user_id: 'user-1', reason: 'Staff left' }
+    },
+    {
+      name: 'invite-user',
+      body: { action: 'cancel', invitation_id: 'invite-1' }
+    }
+  ]);
+  await assert.rejects(record.setUserAccountStatus('user-1', 'Pending'), /valid user account status/);
+  await assert.rejects(
+    record.setUserAccountStatus('user-1', 'Deactivated'),
+    /reason is required/
+  );
+});
+
+test('cancellation adapter rejects incomplete account-cleanup responses', async () => {
+  const { record } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke() {
+        return { data: { invitation_id: 'invite-1', status: 'Cancelled' }, error: null };
+      }
+    }
+  });
+
+  await assert.rejects(
+    record.cancelUserInvitation('invite-1'),
+    /invitation management service returned an invalid response/
+  );
+});
+
 test('wasteServerTime uses the guarded server-time RPC and clears its timeout', async () => {
   let call;
   const expected = '2026-11-17T22:18:00.000Z';
@@ -82,17 +182,22 @@ test('updateUserRole preserves RPC errors and rejects invalid or unchanged resul
     error: { message: 'Only Administrators may change user roles' }
   }));
   await assert.rejects(
-    failed.record.updateUserRole('user-1', 'Manager'),
+    failed.record.updateUserRole('user-1', 'Manager', 'Role review'),
     /Only Administrators may change user roles/
   );
 
   const unchanged = loadSupabaseRecord(() => Promise.resolve({ data: false, error: null }));
-  assert.equal(await unchanged.record.updateUserRole('user-1', 'Manager'), false);
+  assert.equal(await unchanged.record.updateUserRole('user-1', 'Manager', 'Role review'), false);
 
   const invalid = loadSupabaseRecord(() => Promise.resolve({ data: null, error: null }));
   await assert.rejects(
-    invalid.record.updateUserRole('user-1', 'Manager'),
+    invalid.record.updateUserRole('user-1', 'Manager', 'Role review'),
     /invalid role update result/
+  );
+
+  await assert.rejects(
+    invalid.record.updateUserRole('user-1', 'Manager'),
+    /reason is required/
   );
 });
 
@@ -713,6 +818,29 @@ test('inviteUser calls the Edge Function with normalized invitation fields', asy
   assert.deepEqual(Array.from(inviteRoles), ['Manager', 'Receptionist', 'Inventory Clerk', 'Chef / Kitchen Staff']);
 });
 
+test('user-management Edge Function requests abort after 15 seconds', async () => {
+  let signal;
+  const { record, timers } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      invoke(name, options) {
+        signal = options.signal;
+        return new Promise(() => {});
+      }
+    }
+  });
+
+  const pending = record.inviteUser({
+    email: 'staff@example.com',
+    fullName: 'Staff User',
+    role: 'Manager'
+  });
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  await assert.rejects(pending, /Invitation request timed out after 15 seconds/);
+  assert.equal(signal.aborted, true);
+  assert.equal(timers.size, 0);
+});
+
 test('inviteUser rejects Administrator and surfaces Edge Function error messages', async () => {
   let invoked = false;
   const { record } = loadSupabaseRecord(() => ({}), {
@@ -741,6 +869,59 @@ test('inviteUser rejects Administrator and surfaces Edge Function error messages
   );
 });
 
+test('resendUserInvitation invokes the Edge Function and retains structured error codes', async () => {
+  let invocation;
+  const { record } = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke(name, options) {
+        invocation = { name, options };
+        return {
+          data: {
+            invitation_id: 'invite-1',
+            status: 'Pending',
+            expires_at: '2026-11-25T12:00:00Z'
+          },
+          error: null
+        };
+      }
+    }
+  });
+
+  const result = await record.resendUserInvitation('invite-1');
+  assert.equal(invocation.name, 'invite-user');
+  assert.deepEqual(JSON.parse(JSON.stringify(invocation.options.body)), {
+    action: 'resend',
+    invitation_id: 'invite-1'
+  });
+  assert.equal(result.status, 'Pending');
+
+  const failed = loadSupabaseRecord(() => ({}), {
+    functions: {
+      async invoke() {
+        return {
+          data: null,
+          error: {
+            message: 'Edge Function returned a non-2xx status code',
+            context: {
+              clone: () => ({
+                json: async () => ({
+                  error: 'Supabase Auth email rate limit reached. Try again later.',
+                  message: 'Supabase Auth email rate limit reached. Try again later.',
+                  code: 'rate_limited'
+                })
+              })
+            }
+          }
+        };
+      }
+    }
+  });
+  await assert.rejects(
+    failed.record.resendUserInvitation('invite-1'),
+    error => error.message.includes('rate limit') && error.code === 'rate_limited'
+  );
+});
+
 test('loadUserInvites reads required history fields and expiry newest-first', async () => {
   const invitation = {
     id: 'invite-1',
@@ -750,7 +931,8 @@ test('loadUserInvites reads required history fields and expiry newest-first', as
     status: 'Accepted',
     invited_at: '2026-11-18T12:00:00Z',
     accepted_at: '2026-11-18T13:00:00Z',
-    expires_at: '2026-11-25T12:00:00Z'
+    expires_at: '2026-11-25T12:00:00Z',
+    invited_by: 'admin-1'
   };
   let query;
   const { record } = loadSupabaseRecord(() => ({}), {
@@ -771,7 +953,7 @@ test('loadUserInvites reads required history fields and expiry newest-first', as
 
   assert.deepEqual(await record.loadUserInvites(), [invitation]);
   assert.equal(query.table, 'user_invites');
-  assert.equal(query.columns, 'id,email,full_name,role,status,invited_at,accepted_at,expires_at');
+  assert.equal(query.columns, 'id,email,full_name,role,status,invited_at,accepted_at,expires_at,invited_by');
   assert.equal(query.order.column, 'invited_at');
   assert.equal(query.order.options.ascending, false);
 });

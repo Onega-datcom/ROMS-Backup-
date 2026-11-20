@@ -7,6 +7,11 @@ export const STAFF_ROLES = [
 ] as const;
 
 export type StaffRole = typeof STAFF_ROLES[number];
+export const INVITABLE_ROLES = STAFF_ROLES.filter(
+  (role): role is Exclude<StaffRole, "Administrator"> =>
+    role !== "Administrator",
+);
+export type InvitableRole = typeof INVITABLE_ROLES[number];
 
 export class InviteValidationError extends Error {}
 
@@ -17,16 +22,16 @@ const INVITE_FIELDS = new Set(["email", "full_name", "role"]);
 export interface InvitePayload {
   email: string;
   full_name: string;
-  role: StaffRole;
+  role: InvitableRole;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isStaffRole(value: unknown): value is StaffRole {
+function isInvitableRole(value: unknown): value is InvitableRole {
   return typeof value === "string" &&
-    STAFF_ROLES.some((role) => role === value);
+    INVITABLE_ROLES.some((role) => role === value);
 }
 
 export function normalizeAndValidateEmail(value: unknown): string {
@@ -73,7 +78,7 @@ export function parseInvitePayload(value: unknown): InvitePayload {
     );
   }
 
-  if (!isStaffRole(value.role)) {
+  if (!isInvitableRole(value.role)) {
     throw new InviteValidationError("A valid staff role is required.");
   }
 

@@ -70,7 +70,8 @@ Endpoint inventory and purpose:
 
 | Endpoint path | Main method(s) | Purpose |
 | --- | --- | --- |
-| `/rest/v1/profiles` | GET, PATCH | Load staff profiles and update a user's role |
+| `/rest/v1/profiles` | GET | Load staff profiles; profile writes are RPC/Edge-Function only |
+| `/rest/v1/user_invites` | GET | Read invitation history as an active Administrator |
 | `/rest/v1/product_categories` | GET | Load active product categories for product forms |
 | `/rest/v1/units` | GET | Load active measurement units |
 | `/rest/v1/suppliers` | GET | Load active suppliers |
@@ -421,3 +422,43 @@ They can be demonstrated through the application, Supabase Dashboard API documen
 ### Short answer for a professor
 
 > "Our system uses Supabase as a backend-as-a-service. We use its REST API for table operations, its RPC API to execute validated PostgreSQL functions for complex transactions, Supabase Auth for authentication, and Realtime WebSockets for live updates. The frontend calls these services through `supabase-config.js`, while the database tables, functions, triggers, and row-level security policies are defined in the `supabase` SQL files."
+
+## User Management (migration 032)
+
+User Management writes are intentionally not available through direct table DML:
+
+- Authenticated clients can read profiles according to RLS, but cannot insert, update, or delete `profiles`.
+- Authenticated clients cannot insert, update, or delete `user_invites`; only active Administrators can read staff and invitation history.
+- Role changes call `costtrack_update_profile_role(p_user_id, p_new_role, p_reason)`. It requires an active Administrator and a 1–500 character reason. Self-role changes and demotion of the last active Administrator are rejected by PostgreSQL.
+- Account status changes and invite lifecycle writes are performed by the server-side `invite-user` Edge Function using its service-role key. `costtrack_set_profile_account_status` rejects a blank deactivation reason and protects self and the last active Administrator.
+- Role, account-status, and invitation audit tables are append-only. Invitation audit records capture actor, timestamp, target email/name/role, action, and old/new status.
+
+The browser calls `POST /functions/v1/invite-user` with the signed-in user's access token and the project's publishable key. Supported actions:
+
+| Action | Request fields | Result |
+| --- | --- | --- |
+| `invite` | `email`, `full_name`, `role` | Creates a Pending invitation/profile and sends the invite email. New invitations support Manager, Receptionist, Inventory Clerk, and Chef / Kitchen Staff; Administrator access is granted by a reasoned role change. |
+| `resend` | `invitation_id` | Reissues the Auth invitation for a Pending or Expired invite, refreshes its seven-day database expiry, and records a Resent event. |
+| `cancel` | `invitation_id` | Cancels the invitation and revokes an unconfirmed Auth account; the invitation history remains. |
+| `accept` | No fields beyond `action` | Records acceptance after the signed-in invitee's email is confirmed. |
+| `deactivate` | `user_id`, required `reason` | Blocks Auth sign-in and active-role RLS access; records the reason. |
+| `reactivate` | `user_id`, optional `reason` | Restores Auth sign-in and Active status. |
+
+Failures return HTTP status plus a structured JSON body; `error` and `message` contain the same user-displayable text:
+
+```json
+{
+  "error": "Supabase Auth email rate limit reached. Try again later.",
+  "message": "Supabase Auth email rate limit reached. Try again later.",
+  "code": "rate_limited",
+  "request_id": "..."
+}
+```
+
+Relevant codes include `invalid_email`, `already_registered`, `pending_invitation_exists`, `not_administrator`, `reason_required`, `rate_limited`, and `server_error`. A duplicate invite returns `pending_invitation_exists`; the UI can offer the Resend action for that invitation. Supabase Auth `422` and `429` responses are mapped to already-registered and rate-limited errors respectively. The server logs a request ID and operation/error code, not the service key.
+
+The Edge Function sends invitation mail through the project's Supabase Auth SMTP configuration. Configure production SMTP in the Supabase Dashboard and deploy the function after applying migration 032. `SUPABASE_SERVICE_ROLE_KEY` must remain a server-managed Edge Function secret and must never be included in browser code.
+
+The Administrator User Management page has a two-card landing view and a Staff / Invitations workspace. The cards show the latest active-staff and pending-invitation counts. Staff can be searched and filtered by role and status; the current account and last active Administrator are labelled Protected. Role and account-status changes require a reason and a styled confirmation before calling the RPC or Edge Function. Deactivation blocks sign-in and CostTrack API access; reactivation restores access.
+
+The invitation form validates name, email, and role before sending. It warns when the address already has an account or a Pending/Expired invitation; an existing invitation can be resent without leaving the form. Invitation history displays inviter, status, invited/expiry/acceptance dates, and only valid Resend or Cancel actions. User Management requests have a 15-second timeout; errors are shown in a toast, while a successful write followed by a failed list refresh is reported as saved with a retry option.

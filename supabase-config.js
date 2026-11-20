@@ -1,6 +1,7 @@
 const SUPABASE_URL = 'https://niiodqunoflblfcgdods.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_IVE25Rqzu-lDLFayVYmhfQ_dvPIO6E5';
 const POS_BILL_SAVE_TIMEOUT_MS = 15000;
+const USER_MANAGEMENT_TIMEOUT_MS = 15000;
 const INVITABLE_USER_ROLES = Object.freeze([
   'Manager',
   'Receptionist',
@@ -67,7 +68,14 @@ function mapDatabaseRecord(collection, row) {
   const updatedAt = row.updated_at;
   if (collection === 'users') {
     rememberVersion(collection, row.id, updatedAt);
-    return { id: row.id, name: row.full_name, email: row.email, role: row.role };
+    return {
+      id: row.id,
+      name: row.full_name,
+      email: row.email,
+      role: row.role,
+      accountStatus: row.account_status,
+      updatedAt: row.updated_at || null
+    };
   }
   rememberVersion(collection, row.id, updatedAt);
   if (collection === 'recipes') {
@@ -449,18 +457,23 @@ function throwIfError(error) {
 
 async function throwInvitationError(error) {
   let message = error.message || 'The invitation could not be sent.';
+  let code = '';
   if (error.context && typeof error.context.clone === 'function') {
     try {
       const responseBody = await error.context.clone().json();
-      if (typeof responseBody?.error === 'string') message = responseBody.error;
+      if (typeof responseBody?.message === 'string') message = responseBody.message;
+      else if (typeof responseBody?.error === 'string') message = responseBody.error;
+      if (typeof responseBody?.code === 'string') code = responseBody.code;
     } catch {
       message = error.message || 'The invitation could not be sent.';
     }
   }
-  throw new Error(message);
+  const surfacedError = new Error(message);
+  if (code) surfacedError.code = code;
+  throw surfacedError;
 }
 
-async function withSaveTimeout(requestFactory, label) {
+async function withSaveTimeout(requestFactory, label, timeoutMs = POS_BILL_SAVE_TIMEOUT_MS) {
   const controller = new AbortController();
   let timeoutId;
   try {
@@ -468,8 +481,8 @@ async function withSaveTimeout(requestFactory, label) {
     const timeout = new Promise((resolve, reject) => {
       timeoutId = window.setTimeout(() => {
         controller.abort();
-        reject(new Error(`${label} timed out after 15 seconds.`));
-      }, POS_BILL_SAVE_TIMEOUT_MS);
+        reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+      }, timeoutMs);
     });
     return await Promise.race([request, timeout]);
   } finally {
@@ -479,6 +492,14 @@ async function withSaveTimeout(requestFactory, label) {
 
 function abortableRequest(request, signal) {
   return typeof request?.abortSignal === 'function' ? request.abortSignal(signal) : request;
+}
+
+function invokeUserManagementFunction(body, label) {
+  return withSaveTimeout(
+    signal => window.supabaseClient.functions.invoke('invite-user', { body, signal }),
+    label,
+    USER_MANAGEMENT_TIMEOUT_MS
+  );
 }
 
 window.supabaseRecord = {
@@ -492,25 +513,95 @@ window.supabaseRecord = {
     if (!INVITABLE_USER_ROLES.includes(role)) {
       throw new TypeError('A valid staff role is required.');
     }
-    const { data, error } = await window.supabaseClient.functions.invoke('invite-user', {
-      body: {
+    const { data, error } = await invokeUserManagementFunction(
+      {
         action: 'invite',
         email: email.trim().toLowerCase(),
         full_name: fullName.trim(),
         role
-      }
-    });
+      },
+      'Invitation request'
+    );
     if (error) await throwInvitationError(error);
     if (!data || typeof data.invitation_id !== 'string' || data.status !== 'Pending') {
       throw new Error('The invitation service returned an invalid response.');
     }
     return data;
   },
+  async setUserAccountStatus(userId, accountStatus, reason = '') {
+    if (typeof userId !== 'string' || !userId.trim()) {
+      throw new TypeError('A user account is required.');
+    }
+    if (!['Active', 'Deactivated'].includes(accountStatus)) {
+      throw new TypeError('A valid user account status is required.');
+    }
+    if (typeof reason !== 'string' || reason.length > 500) {
+      throw new TypeError('The account status reason must be 500 characters or fewer.');
+    }
+    if (accountStatus === 'Deactivated' && !reason.trim()) {
+      throw new TypeError('A reason is required to deactivate a user.');
+    }
+    const action = accountStatus === 'Deactivated' ? 'deactivate' : 'reactivate';
+    const { data, error } = await invokeUserManagementFunction(
+      { action, user_id: userId, reason: reason.trim() },
+      'Account status update'
+    );
+    if (error) await throwInvitationError(error);
+    if (!data || data.status !== accountStatus) {
+      throw new Error('The account management service returned an invalid response.');
+    }
+    return data;
+  },
+  async resendUserInvitation(invitationId) {
+    if (typeof invitationId !== 'string' || !invitationId.trim()) {
+      throw new TypeError('An invitation is required.');
+    }
+    const { data, error } = await invokeUserManagementFunction(
+      { action: 'resend', invitation_id: invitationId },
+      'Invitation resend'
+    );
+    if (error) await throwInvitationError(error);
+    if (
+      !data
+      || data.invitation_id !== invitationId
+      || data.status !== 'Pending'
+      || typeof data.expires_at !== 'string'
+    ) {
+      throw new Error('The invitation management service returned an invalid resend response.');
+    }
+    return data;
+  },
+  async cancelUserInvitation(invitationId) {
+    if (typeof invitationId !== 'string' || !invitationId.trim()) {
+      throw new TypeError('An invitation is required.');
+    }
+    const { data, error } = await invokeUserManagementFunction(
+      { action: 'cancel', invitation_id: invitationId },
+      'Invitation cancellation'
+    );
+    if (error) await throwInvitationError(error);
+    if (
+      !data
+      || data.status !== 'Cancelled'
+      || typeof data.account_removed !== 'boolean'
+      || (data.account_blocked !== undefined && typeof data.account_blocked !== 'boolean')
+    ) {
+      throw new Error('The invitation management service returned an invalid response.');
+    }
+    return data;
+  },
   async loadUserInvites() {
-    const { data, error } = await window.supabaseClient
-      .from('user_invites')
-      .select('id,email,full_name,role,status,invited_at,accepted_at,expires_at')
-      .order('invited_at', { ascending: false });
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(
+        window.supabaseClient
+          .from('user_invites')
+          .select('id,email,full_name,role,status,invited_at,accepted_at,expires_at,invited_by')
+          .order('invited_at', { ascending: false }),
+        signal
+      ),
+      'Invitation history load',
+      USER_MANAGEMENT_TIMEOUT_MS
+    );
     throwIfError(error);
     if (!Array.isArray(data) || data.some(invite =>
       !invite
@@ -520,6 +611,7 @@ window.supabaseRecord = {
       || typeof invite.role !== 'string'
       || !['Pending', 'Accepted', 'Expired', 'Cancelled'].includes(invite.status)
       || typeof invite.invited_at !== 'string'
+      || typeof invite.invited_by !== 'string'
       || typeof invite.expires_at !== 'string'
       || Number.isNaN(new Date(invite.expires_at).getTime())
       || (invite.accepted_at !== null && typeof invite.accepted_at !== 'string')
@@ -529,11 +621,21 @@ window.supabaseRecord = {
     return data;
   },
   async updateUserRole(userId, role, reason = '') {
-    const { data, error } = await window.supabaseClient.rpc('costtrack_update_profile_role', {
-      p_user_id: userId,
-      p_new_role: role,
-      p_reason: reason
-    });
+    if (typeof reason !== 'string' || reason.length > 500) {
+      throw new TypeError('The role-change reason must be 500 characters or fewer.');
+    }
+    if (!reason.trim()) {
+      throw new TypeError('A reason is required to change a user role.');
+    }
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(window.supabaseClient.rpc('costtrack_update_profile_role', {
+        p_user_id: userId,
+        p_new_role: role,
+        p_reason: reason
+      }), signal),
+      'Role update',
+      USER_MANAGEMENT_TIMEOUT_MS
+    );
     throwIfError(error);
     if (typeof data !== 'boolean') {
       throw new Error('The database returned an invalid role update result.');
@@ -634,7 +736,17 @@ window.supabaseRecord = {
     const client = window.supabaseClient;
     let result;
     if (collection === 'users') {
-      result = await client.from('profiles').select('id,email,full_name,role,updated_at').order('full_name');
+      result = await withSaveTimeout(
+        signal => abortableRequest(
+          client.from('profiles')
+            .select('id,email,full_name,role,account_status,updated_at')
+            .in('account_status', ['Active', 'Deactivated'])
+            .order('full_name'),
+          signal
+        ),
+        'Staff list load',
+        USER_MANAGEMENT_TIMEOUT_MS
+      );
     } else if (collection === 'ingredients') {
       const { data, error } = await client.rpc('costtrack_load_products');
       throwIfError(error);
