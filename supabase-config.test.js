@@ -162,6 +162,35 @@ test('wasteServerTime uses the guarded server-time RPC and clears its timeout', 
   assert.equal(timers.size, 0);
 });
 
+test('markTableAvailable uses the narrowly scoped table-cleaning RPC', async () => {
+  let call;
+  const { record } = loadSupabaseRecord((name, args) => {
+    call = { name, args };
+    return {
+      abortSignal() {
+        return Promise.resolve({ data: true, error: null });
+      }
+    };
+  });
+
+  assert.equal(await record.markTableAvailable('T-12'), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(call)), {
+    name: 'costtrack_mark_table_clean',
+    args: { p_table_id: 'T-12' }
+  });
+  await assert.rejects(record.markTableAvailable('  '), /A table is required/);
+
+  const invalidResult = loadSupabaseRecord(() => ({
+    abortSignal() {
+      return Promise.resolve({ data: false, error: null });
+    }
+  }));
+  await assert.rejects(
+    invalidResult.record.markTableAvailable('T-12'),
+    /invalid table-cleaning result/
+  );
+});
+
 test('updateUserRole calls the protected RPC and returns its changed result', async () => {
   let call;
   const { record } = loadSupabaseRecord((name, args) => {
@@ -240,6 +269,62 @@ test('waste save uses the RPC result including the database timestamp', async ()
   assert.equal(Object.hasOwn(rpcArgs.payload, 'recorded_at'), false);
   assert.equal(Object.hasOwn(rpcArgs.payload, 'waste_date'), false);
   assert.equal(saved.recordedAt, savedAt);
+  assert.equal(saved.date, '2026-11-18');
+});
+
+test('prepared-food waste saves through its stock-neutral RPC and maps the returned record', async () => {
+  let rpcName;
+  let rpcArgs;
+  const savedAt = '2026-11-18T22:18:00.123Z';
+  const { record } = loadSupabaseRecord((name, args) => {
+    rpcName = name;
+    rpcArgs = args;
+    return {
+      abortSignal() {
+        return Promise.resolve({
+          data: {
+            id: 'PREP-WASTE-1',
+            dish_name: 'Sisig',
+            production_batch_id: 'BATCH-1',
+            production_batch_label: 'Sisig · #1 · 2026-11-18',
+            quantity: 3,
+            reason: 'Leftover after service',
+            waste_date: '2026-11-18',
+            recorded_at: savedAt,
+            recorded_by: 'USER-1',
+            notes: ''
+          },
+          error: null
+        });
+      }
+    };
+  });
+
+  const saved = await record.upsert('preparedFoodWasteLogs', {
+    id: 'PREP-WASTE-1',
+    dishName: 'Sisig',
+    productionBatchId: 'BATCH-1',
+    quantity: 3,
+    reason: 'Leftover after service',
+    date: '2026-11-18',
+    notes: ''
+  });
+
+  assert.equal(rpcName, 'costtrack_log_prepared_food_waste');
+  assert.deepEqual(JSON.parse(JSON.stringify(rpcArgs.payload)), {
+    id: 'PREP-WASTE-1',
+    dish_name: 'Sisig',
+    production_batch_id: 'BATCH-1',
+    quantity: 3,
+    reason: 'Leftover after service',
+    waste_date: '2026-11-18',
+    notes: ''
+  });
+  assert.equal(Object.hasOwn(rpcArgs.payload, 'ingredient_id'), false);
+  assert.equal(Object.hasOwn(rpcArgs.payload, 'recorded_at'), false);
+  assert.equal(saved.productionBatchLabel, 'Sisig · #1 · 2026-11-18');
+  assert.equal(saved.recordedAt, savedAt);
+  assert.equal(saved.recordedBy, 'USER-1');
   assert.equal(saved.date, '2026-11-18');
 });
 

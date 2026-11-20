@@ -344,6 +344,32 @@ textarea:focus {
   color: #a3413d;
 }
 
+.primary.is-loading {
+  cursor: wait;
+  opacity: .85;
+}
+
+.primary.is-loading::after {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 8px;
+  vertical-align: -2px;
+  border: 2px solid rgba(255, 255, 255, .45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: public-spin .7s linear infinite;
+}
+
+@keyframes public-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary.is-loading::after { animation-duration: .01ms; }
+}
+
 @media (max-width: 850px) {
   .hero {
     min-height: 760px;

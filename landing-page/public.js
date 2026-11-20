@@ -14,6 +14,25 @@ const menu = [
 ];
 const money = value => `₱${value.toLocaleString('en-PH')}`;
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
+function setPublicButtonBusy(button, label) {
+  if (!button || button.disabled) return null;
+  const originalContent = button.innerHTML;
+  button.disabled = true;
+  button.classList.add('is-loading');
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = label;
+  const slowTimer = window.setTimeout(() => {
+    if (button.isConnected && button.disabled) button.textContent = 'Still processing…';
+  }, 5000);
+  return () => {
+    window.clearTimeout(slowTimer);
+    if (!button.isConnected) return;
+    button.disabled = false;
+    button.classList.remove('is-loading');
+    button.removeAttribute('aria-busy');
+    button.innerHTML = originalContent;
+  };
+}
 function publicReservationTimeOptions(date, selectedTime = '') {
   return window.CostTrackLogic.reservationTimeSlots(date)
     .map(time => `<option value="${time}" ${selectedTime === time ? 'selected' : ''}>${time}</option>`)
@@ -75,7 +94,7 @@ function buffet() { const packs = [['Silver','499',['Main dishes','Desserts','Un
 function reservation() {
   return shell('reservation', `<section class="form-hero"><div><small>A seat at our table</small><h1>Reserve your<br><em>moment.</em></h1><p>Tell us a little about your visit and we will take care of the rest.</p></div><img src="https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1000&q=85" alt="Set restaurant table"></section><section class="form-layout"><form id="reservationForm"><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><small>Reservation details</small><h2>Let's make it <em>special.</em></h2><div class="form-row"><label>Full name<input name="name" required placeholder="Your full name"></label><label>Contact number<input name="phone" required placeholder="09XX XXX XXXX"></label></div><label>Email address<input name="email" type="email" required placeholder="you@email.com"></label><fieldset class="guest-count-fields"><legend>Number of guests</legend><div class="guest-count-row"><label>Adults<input id="reservationAdults" name="adults" type="number" min="0" max="1000" step="1" value="2" required></label><label>Senior / PWD<input id="reservationSeniorPwdCount" name="seniorPwdCount" type="number" min="0" max="1000" step="1" value="0" required></label><label>Kids<input id="reservationChildren" name="children" type="number" min="0" max="1000" step="1" value="0" required></label></div><p class="guest-total">Total guests: <output data-guest-total for="reservationAdults reservationSeniorPwdCount reservationChildren" aria-live="polite">2</output><span data-guest-count-error hidden> Enter whole-number counts and include at least one guest.</span></p></fieldset><div class="form-row"><label>Reservation date<input name="date" type="date" required></label><label>Reservation time<select name="time" required><option value="" selected disabled>Choose a time</option>${publicReservationTimeOptions()}</select><small>Each reservation has a two-hour seating window. Choose a start from 10:00 AM through 7:00 PM so it ends by closing at 9:00 PM. Past times today are unavailable.</small></label></div><label>Occasion<select name="occasion"><option>Birthday</option><option>Anniversary</option><option>Family gathering</option><option>Business meeting</option></select></label><label>Special requests<textarea name="requests" rows="4" placeholder="Dietary requirements or seating preferences"></textarea></label><button class="primary">Request reservation ↗</button></form><aside><small>Good to know</small><h3>We hold your table for 15 minutes after your reservation time.</h3><p>Enter every guest by category above. The total updates automatically, including for large parties.</p><button class="link" data-page="status">Check reservation status →</button></aside></section>`);
 }
-function status() { return shell('status', `<section class="inner-hero status-hero"><small>Your reservation</small><h1>We saved you<br><em>a seat.</em></h1><p>Enter your reservation reference below to see the latest update.</p></section><section class="status-section"><form id="statusForm"><label>Reservation number<input name="reference" value="RES-2026-001" placeholder="RES-2026-001"></label><button class="primary">Check status ↗</button></form><div id="statusResult"></div></section>`); }
+function status() { return shell('status', `<section class="inner-hero status-hero"><small>Your reservation</small><h1>We saved you<br><em>a seat.</em></h1><p>Enter your reservation reference below to see the latest update.</p></section><section class="status-section"><form id="statusForm"><label>Reservation number<input name="reference" value="RES-2026-001" placeholder="RES-2026-001"></label><button class="primary">Check status ↗</button></form><div id="statusResult" role="status" aria-live="polite"></div></section>`); }
 function gallery() { const pics = [['Dining area','https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1000&q=85'],['Private rooms','https://images.unsplash.com/photo-1550966871-3ed3cdb5ed0c?auto=format&fit=crop&w=1000&q=85'],['Signature dishes','https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=1000&q=85'],['The buffet','https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1000&q=85'],['Good company','https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1000&q=85'],['Little celebrations','https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?auto=format&fit=crop&w=1000&q=85']]; return shell('gallery', `<section class="inner-hero gallery-hero"><small>A glimpse inside</small><h1>Gather beautifully.<br><em>Stay awhile.</em></h1></section><section class="gallery">${pics.map(p=>`<figure><img src="${p[1]}" alt="${p[0]}"><figcaption>${p[0]} <b>↗</b></figcaption></figure>`).join('')}</section>`); }
 function contact() { return shell('contact', `<section class="inner-hero"><small>Come find us</small><h1>Let's make<br><em>plans.</em></h1><p>Questions, celebrations, or just a hello—we would love to hear from you.</p></section><section class="contact"><div><small>ISOBEL restaurant</small><h2>Good food is<br><em>better shared.</em></h2><div class="contact-lines"><div><b>Visit us</b><span>Sample Restaurant Address</span><span>Batangas, Philippines</span></div><div><b>Call or email</b><span>(043) XXX-XXXX</span><span>contact@isobelrestaurant.com</span></div><div><b>Hours</b><span>Monday – Sunday</span><span>10:00 AM – 9:00 PM</span></div></div></div><form id="contactForm"><small>Send a note</small><label>Name<input required placeholder="Your name"></label><label>Email<input type="email" required placeholder="you@email.com"></label><label>Message<textarea required rows="5" placeholder="How can we help?"></textarea></label><button class="primary">Send message ↗</button></form></section>`); }
 const pages = { home, about, menu: menuPage, buffet, reservation, status, gallery, contact };
@@ -115,6 +134,7 @@ function bind() {
   reservationForm?.addEventListener('submit', async event => {
     event.preventDefault();
     const formElement = event.currentTarget;
+    if (formElement.dataset.saving === 'true') return;
     const form = new FormData(formElement);
     if (window.CostTrackLogic.reservationStartTimeIsInPast(form.get('date'), form.get('time'))) {
       let message = formElement.querySelector('.form-error');
@@ -140,8 +160,9 @@ function bind() {
       return;
     }
     const submit = formElement.querySelector('button[type="submit"],button:not([type])');
-    submit.disabled = true;
-    submit.setAttribute('aria-busy', 'true');
+    const restoreButton = setPublicButtonBusy(submit, 'Sending reservation…');
+    if (!restoreButton) return;
+    formElement.dataset.saving = 'true';
     try {
       const guestCounts = window.CostTrackLogic.normalizeReservationGuestCounts(
         form.get('adults'),
@@ -165,19 +186,19 @@ function bind() {
       const reference = typeof reservation === 'string' ? reservation : reservation.id || reservation.reference;
       if (!reference) throw new Error('The reservation was submitted but no reference was returned.');
       const email = String(form.get('email')).trim();
-      let referenceEmailSent = false;
-      try {
-        await window.supabaseRecord.sendPublicReservationReference(reference, email);
-        referenceEmailSent = true;
-      } catch (error) {
-        console.error('Reservation was saved, but its reference email could not be sent.', error);
-      }
-      const emailNotice = referenceEmailSent
-        ? `We sent the reference to ${escapeHTML(email)}.`
-        : 'We could not email the reference. Please save it so you can check your reservation status.';
-      formElement.innerHTML = `<div class="success"><span aria-hidden="true">✦</span><small>Reservation request received</small><h2>Thank you, ${escapeHTML(String(form.get('name')).trim().split(' ')[0])}.</h2><p>Your table request is with our team. It is not confirmed until the restaurant approves it.</p><b>${escapeHTML(reference)}</b><p>${emailNotice}</p><button class="link" data-page="status">Check reservation status →</button></div>`;
+      formElement.innerHTML = `<div class="success"><span aria-hidden="true">✦</span><small>Reservation request received</small><h2>Thank you, ${escapeHTML(String(form.get('name')).trim().split(' ')[0])}.</h2><p>Your table request is with our team. It is not confirmed until the restaurant approves it.</p><b>${escapeHTML(reference)}</b><p id="reservationReferenceEmailNotice" role="status" aria-live="polite">Sending your reservation reference to ${escapeHTML(email)}…</p><button class="link" data-page="status">Check reservation status →</button></div>`;
       sessionStorage.setItem(publicReservationCooldownKey, String(Date.now() + publicReservationCooldownMs));
       bind();
+      void window.supabaseRecord.sendPublicReservationReference(reference, email)
+        .then(() => {
+          const notice = document.querySelector('#reservationReferenceEmailNotice');
+          if (notice) notice.textContent = `We sent the reference to ${email}.`;
+        })
+        .catch(error => {
+          console.error('Reservation was saved, but its reference email could not be sent.', error);
+          const notice = document.querySelector('#reservationReferenceEmailNotice');
+          if (notice) notice.textContent = 'We could not email the reference. Please save it so you can check your reservation status.';
+        });
     } catch (error) {
       console.error('Public reservation could not be submitted.', error);
       let message = formElement.querySelector('.form-error');
@@ -188,13 +209,20 @@ function bind() {
         formElement.prepend(message);
       }
       message.textContent = publicReservationError(error);
-      submit.disabled = false;
-      submit.removeAttribute('aria-busy');
+    } finally {
+      delete formElement.dataset.saving;
+      restoreButton();
     }
   });
   document.querySelector('#statusForm')?.addEventListener('submit', async event => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    if (formElement.dataset.loading === 'true') return;
+    const form = new FormData(formElement);
+    const submit = formElement.querySelector('button[type="submit"],button:not([type])');
+    const restoreButton = setPublicButtonBusy(submit, 'Checking reservation…');
+    if (!restoreButton) return;
+    formElement.dataset.loading = 'true';
     const result = document.querySelector('#statusResult');
     result.textContent = 'Checking reservation…';
     try {
@@ -207,9 +235,23 @@ function bind() {
     } catch (error) {
       console.error('Reservation status lookup failed.', error);
       result.innerHTML = '<div class="empty" role="alert"><h3>We could not check that reservation.</h3><p>Please try again when your connection is available.</p></div>';
+    } finally {
+      delete formElement.dataset.loading;
+      restoreButton();
     }
   });
-  document.querySelector('#contactForm')?.addEventListener('submit', event => { event.preventDefault(); event.currentTarget.innerHTML = '<div class="success"><span>✦</span><h2>Message received.</h2><p>Our team will be in touch soon.</p></div>'; });
+  document.querySelector('#contactForm')?.addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    let message = form.querySelector('.form-error');
+    if (!message) {
+      message = document.createElement('p');
+      message.className = 'form-error';
+      message.setAttribute('role', 'alert');
+      form.prepend(message);
+    }
+    message.textContent = 'This contact form is not connected, so your message was not sent. Please use the restaurant contact details in the footer.';
+  });
 }
 window.addEventListener('hashchange', () => render());
 render();

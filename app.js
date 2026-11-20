@@ -1,4 +1,4 @@
-const KEYS = ['ingredients', 'recipes', 'inventoryTransactions', 'inventoryBatches', 'productionLogs', 'revenueRecords', 'wasteLogs', 'physicalCounts', 'users', 'reservations', 'restaurantTables', 'buffetRates', 'chargeItems', 'chargeItemVariants', 'packageTiers', 'packageInclusions', 'discounts', 'posSettings', 'shifts', 'cashMovements', 'posBills', 'billLines', 'billPayments', 'reservationDeposits', 'billApprovals', 'posNotifications', 'notifications'];
+const KEYS = ['ingredients', 'recipes', 'inventoryTransactions', 'inventoryBatches', 'productionLogs', 'revenueRecords', 'wasteLogs', 'preparedFoodWasteLogs', 'physicalCounts', 'users', 'reservations', 'restaurantTables', 'buffetRates', 'chargeItems', 'chargeItemVariants', 'packageTiers', 'packageInclusions', 'discounts', 'posSettings', 'shifts', 'cashMovements', 'posBills', 'billLines', 'billPayments', 'reservationDeposits', 'billApprovals', 'posNotifications', 'notifications'];
 const DATA_STORAGE_KEYS = [...KEYS.map(key => `costtrack_${key}`), 'costtrack_pending_sync_anonymous'];
 function clearDataStorage() {
   DATA_STORAGE_KEYS.forEach(key => localStorage.removeItem(key));
@@ -10,6 +10,9 @@ const state = {
   role: null,
   user: null,
   query: '',
+  notificationCenterFilter: 'All',
+  notificationCenterQuery: '',
+  notificationCenterPage: 1,
   sidebarFlyoutGroup: null,
   paletteItems: [],
   paletteSelection: 0,
@@ -69,7 +72,6 @@ state.tableManagementCapacity = 'All';
 state.tableManagementType = 'All';
 state.tableManagementArea = 'All';
 state.tableManagementQuery = '';
-state.revenueRange = '30';
 state.revenueStatus = 'Active';
 state.ingredientView = localStorage.getItem('costtrack_ingredient_view') || 'cards';
 state.ingredientSort = 'name';
@@ -91,6 +93,7 @@ state.userManagementStatus = 'All';
 state.userManagementRole = 'All';
 state.userManagementSearch = '';
 state.userManagementBusyId = '';
+state.userManagementBusyAction = '';
 state.userManagementRefreshLoading = false;
 state.userManagementRefreshError = '';
 state.userManagementRefreshSaved = false;
@@ -104,8 +107,6 @@ let revenueDashboardLoading = false;
 let revenueDashboardError = '';
 let revenueDashboardRequest = 0;
 let revenueDashboardRefreshAfterLoad = false;
-let revenuePageReportPending = false;
-let revenuePageReportRequest = 0;
 let reportChartSpecs = [];
 let reportCharts = [];
 try {
@@ -128,8 +129,8 @@ function persistReservationFilters() {
   }));
 }
 const roleAccess = {
-  'Administrator': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'reservations', 'calendar', 'tables', 'cashier', 'shifts', 'approvals', 'charge-catalog'],
-  'Manager': ['dashboard', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'reservations', 'calendar', 'tables', 'cashier', 'shifts', 'approvals', 'charge-catalog'],
+  'Administrator': ['dashboard', 'notifications', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'users', 'reservations', 'calendar', 'tables', 'cashier', 'shifts', 'approvals', 'charge-catalog'],
+  'Manager': ['dashboard', 'notifications', 'ingredients', 'receiving', 'recipes', 'production', 'waste', 'counts', 'reports', 'revenue', 'rates', 'reservations', 'calendar', 'tables', 'cashier', 'shifts', 'approvals', 'charge-catalog'],
   'Inventory Clerk': ['ingredients', 'receiving', 'counts', 'reports'],
   'Chef / Kitchen Staff': ['recipes', 'production', 'waste'],
   'Receptionist': ['dashboard', 'reservations', 'calendar', 'tables', 'cashier', 'shifts', 'approvals']
@@ -433,6 +434,32 @@ function toast(message, type = 'success', retryCollections = [], retryUserManage
   window.clearTimeout(toastTimeoutId);
   toastTimeoutId = window.setTimeout(() => { root.innerHTML = ''; }, 5000);
 }
+function setButtonBusy(button, label) {
+  if (!button || button.disabled) return null;
+  const originalContent = button.innerHTML;
+  const originalAriaLabel = button.getAttribute('aria-label');
+  button.disabled = true;
+  button.classList.add('is-loading');
+  button.setAttribute('aria-busy', 'true');
+  button.setAttribute('aria-label', label);
+  button.textContent = label;
+  const slowTimer = window.setTimeout(() => {
+    if (button.isConnected && button.disabled) {
+      button.textContent = 'Still processing…';
+      button.setAttribute('aria-label', 'Still processing. Please wait.');
+    }
+  }, 5000);
+  return () => {
+    window.clearTimeout(slowTimer);
+    if (!button.isConnected) return;
+    button.disabled = false;
+    button.classList.remove('is-loading');
+    button.removeAttribute('aria-busy');
+    if (originalAriaLabel === null) button.removeAttribute('aria-label');
+    else button.setAttribute('aria-label', originalAriaLabel);
+    button.innerHTML = originalContent;
+  };
+}
 const syncStates = {
   live: { label: 'Saved', color: 'live', icon: 'check' },
   syncing: { label: 'Saving…', color: 'syncing', icon: 'refresh' },
@@ -473,7 +500,7 @@ function realtimeCollectionsForView() {
     receiving: ['ingredients', 'inventory_transactions'],
     recipes: ['ingredients', 'recipes', 'recipe_ingredients'],
     production: ['ingredients', 'recipes', 'production_logs', 'production_batches', 'reservations'],
-    waste: ['ingredients', 'waste_logs', 'production_logs'],
+    waste: ['ingredients', 'waste_logs', 'prepared_food_waste_logs', 'production_logs'],
     counts: ['ingredients', 'physical_counts'],
     reservations: ['reservations', 'restaurant_tables', 'pos_bills', 'pos_reservation_deposits'],
     calendar: ['reservations', 'restaurant_tables'],
@@ -484,7 +511,7 @@ function realtimeCollectionsForView() {
     'charge-catalog': ['pos_charge_items', 'pos_package_tiers', 'pos_discounts', 'pos_settings'],
     rates: ['buffet_rates'],
     revenue: ['revenue_records'],
-    reports: ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'reservations', 'pos_bills', 'pos_bill_payments', 'pos_shifts', 'pos_cash_movements', 'pos_reservation_deposits']
+    reports: ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'waste_logs', 'prepared_food_waste_logs', 'inventory_transactions', 'physical_counts', 'reservations', 'pos_bills', 'pos_bill_payments', 'pos_shifts', 'pos_cash_movements', 'pos_reservation_deposits']
   };
   const alertTablesByRole = {
     Administrator: ['ingredients', 'inventory_batches', 'reservations', 'pos_shifts', 'pos_bills', 'pos_bill_approvals', 'pos_reservation_deposits', 'pos_notifications', 'notifications', 'notification_read_states'],
@@ -509,11 +536,11 @@ function realtimeCollectionsForView() {
 }
 function realtimeTablesForRole(tables) {
   const allowed = {
-    Administrator: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications', 'notifications', 'notification_read_states'],
-    Manager: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'production_logs', 'production_batches', 'waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications', 'notifications', 'notification_read_states'],
-    'Chef / Kitchen Staff': ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'production_batches', 'waste_logs', 'notifications', 'notification_read_states'],
+    Administrator: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'production_logs', 'production_batches', 'waste_logs', 'prepared_food_waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications', 'notifications', 'notification_read_states'],
+    Manager: ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'production_logs', 'production_batches', 'waste_logs', 'prepared_food_waste_logs', 'physical_counts', 'reservations', 'restaurant_tables', 'revenue_records', 'buffet_rates', 'pos_charge_items', 'pos_charge_item_variants', 'pos_package_tiers', 'pos_package_inclusions', 'pos_discounts', 'pos_settings', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications', 'notifications', 'notification_read_states'],
+    'Chef / Kitchen Staff': ['ingredients', 'recipes', 'recipe_ingredients', 'production_logs', 'production_batches', 'waste_logs', 'prepared_food_waste_logs', 'notifications', 'notification_read_states'],
     Receptionist: ['reservations', 'restaurant_tables', 'buffet_rates', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_shifts', 'pos_cash_movements', 'notifications', 'notification_read_states'],
-    'Inventory Clerk': ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'physical_counts', 'waste_logs', 'notifications', 'notification_read_states']
+    'Inventory Clerk': ['ingredients', 'recipes', 'recipe_ingredients', 'inventory_transactions', 'inventory_batches', 'physical_counts', 'waste_logs', 'prepared_food_waste_logs', 'notifications', 'notification_read_states']
   };
   const permitted = new Set(allowed[state.role] || []);
   return [...new Set(['profiles', ...tables.filter(table => permitted.has(table))])];
@@ -527,6 +554,7 @@ function realtimeCollectionName(table) {
     inventory_batches: 'inventoryBatches',
     production_logs: 'productionLogs',
     waste_logs: 'wasteLogs',
+    prepared_food_waste_logs: 'preparedFoodWasteLogs',
     physical_counts: 'physicalCounts',
     reservations: 'reservations',
     restaurant_tables: 'restaurantTables',
@@ -734,7 +762,7 @@ async function refreshRealtimeCollection(table, payload) {
       loadUnresolvedBookings(true);
     }
   }
-  if (['ingredients', 'inventory_batches', 'notifications', 'reservations', 'restaurant_tables', 'revenue_records', 'production_logs', 'waste_logs', 'inventory_transactions', 'physical_counts', 'recipes', 'buffet_rates', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'].includes(table)) {
+  if (['ingredients', 'inventory_batches', 'notifications', 'reservations', 'restaurant_tables', 'revenue_records', 'production_logs', 'waste_logs', 'prepared_food_waste_logs', 'inventory_transactions', 'physical_counts', 'recipes', 'buffet_rates', 'pos_shifts', 'pos_cash_movements', 'pos_bills', 'pos_bill_lines', 'pos_bill_payments', 'pos_reservation_deposits', 'pos_bill_approvals', 'pos_notifications'].includes(table)) {
     renderWithNotificationPopover();
   }
 }
@@ -823,7 +851,7 @@ const sidebarGroups = [
   { id: 'production', label: 'Kitchen Operations', icon: 'chef-hat', items: [['recipes', 'book', 'Recipes'], ['production', 'chef-hat', 'Production Board'], ['waste', 'trash', 'Waste Logs']] },
   { id: 'revenue-management', label: 'Revenue Management', icon: 'chart', items: [['revenue', 'chart', 'Revenue Tracking'], ['charge-catalog', 'package', 'Charge Catalog']] },
   { id: 'analytics', label: 'Analytics & Reports', icon: 'chart', items: [['reports', 'chart', 'Reports & analytics']] },
-  { id: 'system', label: 'System Management', icon: 'users', items: [['users', 'users', 'User Management']] }
+  { id: 'system', label: 'System Management', icon: 'users', items: [['notifications', 'bell', 'Notifications'], ['users', 'users', 'User Management']] }
 ];
 
 const shellIconPaths = {
@@ -911,6 +939,9 @@ function renderNavItem(view, icon, label, options = {}) {
   } else if (view === 'ingredients') {
     const count = lowStock().length;
     if (count) badge = `<b class="nav-badge" title="${count} low-stock ingredients" aria-label="${count} low-stock ingredients">${count > 9 ? '9+' : count}</b>`;
+  } else if (view === 'notifications') {
+    const count = activeNotifications().filter(item => !item.isRead).length;
+    if (count) badge = `<b class="nav-badge" title="${count} unread notifications" aria-label="${count} unread notifications">${count > 99 ? '99+' : count}</b>`;
   }
   return `<a class="nav-item ${options.single ? 'nav-single' : ''} ${active ? 'active' : ''}" href="#${view}" data-view="${view}" title="${esc(label)}" aria-label="${esc(label)}" ${active ? 'aria-current="page"' : ''} ${options.menuitem ? 'role="menuitem"' : ''}><span class="nav-icon">${shellIcon(icon)}</span><span class="nav-item-label">${esc(label)}</span>${badge}</a>`;
 }
@@ -978,6 +1009,110 @@ function notificationTimestampForUnresolved(row) {
   let hour = Number(parts[1]) % 12;
   if (parts[3].toUpperCase() === 'PM') hour += 12;
   return `${row.reservation_date}T${String(hour).padStart(2, '0')}:${parts[2]}:00+08:00`;
+}
+
+function notificationCenterCategory(alert) {
+  const category = String(alert.category || '').toLowerCase();
+  const type = String(alert.type || alert.title || '').toLowerCase();
+  if (['reservation', 'unresolved'].includes(category) || type.includes('reservation') || type.includes('booking')) return 'Reservations';
+  if (['stock', 'expiry', 'inventory'].includes(category) || type.includes('stock') || type.includes('inventory') || type.includes('product')) return 'Inventory';
+  if (category === 'pos' || type.includes('approval') || type.includes('bill') || type.includes('shift') || type.includes('discount')) {
+    if (type.includes('approval')) return 'Approvals';
+    return 'Operations';
+  }
+  if (type.includes('user') || type.includes('invitation') || type.includes('role') || type.includes('account') || type.includes('deactivated')) return 'Users';
+  if (['system', 'warning', 'error'].includes(category) || type.includes('error') || type.includes('warning')) return 'System';
+  return 'System';
+}
+
+function notificationCenterItems() {
+  const alerts = new Map();
+  activeNotifications().forEach(alert => alerts.set(alert.key, alert));
+
+  all('notifications').forEach(item => {
+    const alert = generalNotificationAlert(item);
+    if (!alerts.has(alert.key)) alerts.set(alert.key, { ...alert, isRead: item.isRead });
+  });
+
+  all('reservations').forEach(item => {
+    if (!['Confirmed', 'Cancelled', 'Completed', 'No-show', 'Seated'].includes(item.status)) return;
+    const key = `reservation:${item.id}:${item.status}`;
+    if (alerts.has(`reservation:${item.id}`) && item.status !== 'Pending') return;
+    alerts.set(key, {
+      key,
+      dedupeKey: key,
+      category: 'reservation',
+      type: `Reservation ${item.status}`,
+      title: `Reservation ${item.status}`,
+      detail: `${item.name || 'Guest'} · ${Number(item.guests || 0)} guests · ${notificationDateLabel(item.date)}${item.time ? ` · ${item.time}` : ''}`,
+      severity: item.status === 'Cancelled' || item.status === 'No-show' ? 'warning' : 'info',
+      icon: 'calendar',
+      createdAt: item.completedAt || item.seatedAt || item.createdAt || null,
+      isRead: state.notificationReadKeys.includes(key),
+      action: { view: 'reservations', label: 'Review reservation', query: item.name || '', recordId: item.id }
+    });
+  });
+
+  return [...alerts.values()].sort((left, right) =>
+    String(right.createdAt || '').localeCompare(String(left.createdAt || ''))
+  );
+}
+
+function notificationCenterPage() {
+  if (!['Administrator', 'Manager'].includes(state.role)) {
+    return '<div class="panel error-state" role="alert">The Notification Center is available to Administrators and Managers only.</div>';
+  }
+  const filters = ['All', 'Unread', 'Reservations', 'Inventory', 'Approvals', 'Users', 'Operations', 'System'];
+  let items = notificationCenterItems();
+  if (state.notificationCenterFilter === 'Unread') {
+    items = items.filter(item => !item.isRead);
+  } else if (state.notificationCenterFilter !== 'All') {
+    items = items.filter(item => notificationCenterCategory(item) === state.notificationCenterFilter);
+  }
+  const query = state.notificationCenterQuery.trim().toLowerCase();
+  if (query) {
+    items = items.filter(item =>
+      `${item.title || ''} ${item.detail || ''} ${notificationCenterCategory(item)}`.toLowerCase().includes(query)
+    );
+  }
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  state.notificationCenterPage = Math.min(Math.max(1, Number(state.notificationCenterPage || 1)), pageCount);
+  const start = (state.notificationCenterPage - 1) * pageSize;
+  const visible = items.slice(start, start + pageSize);
+  const unreadCount = notificationCenterItems().filter(item => !item.isRead).length;
+  const cards = visible.map(item => {
+    const category = notificationCenterCategory(item);
+    const categoryClass = category.toLowerCase();
+    const timestamp = item.createdAt ? formatOperationalDateTime(item.createdAt) : 'Time unavailable';
+    return `<article class="notification-center-card ${item.isRead ? 'is-read' : 'is-unread'}">
+      <button type="button" class="notification-center-main" data-notification-key="${esc(item.key)}" aria-label="${esc(item.isRead ? 'Open read notification' : 'Open unread notification')}: ${esc(item.title)}">
+        <span class="notification-center-category category-${esc(categoryClass)}">${esc(category)}</span>
+        <span class="notification-center-status ${item.isRead ? 'is-read' : 'is-unread'}">${item.isRead ? 'Read' : 'Unread'}</span>
+        <strong>${esc(item.title)}</strong>
+        <p>${esc(item.detail)}</p>
+        <time>${esc(timestamp)}</time>
+      </button>
+    </article>`;
+  }).join('');
+  const pagination = pageCount > 1
+    ? `<nav class="notification-center-pagination" aria-label="Notification pages">${Array.from({ length: pageCount }, (_, index) => {
+      const page = index + 1;
+      return `<button type="button" class="${page === state.notificationCenterPage ? 'active' : ''}" data-notification-center-page="${page}" ${page === state.notificationCenterPage ? 'aria-current="page"' : ''}>${page}</button>`;
+    }).join('')}</nav>`
+    : '';
+  return `${pageHeader('System', 'Notifications', 'Review, filter, search, and manage notification history.', `<button type="button" class="ghost-btn" data-notification-center-mark-all ${!unreadCount ? 'disabled' : ''}>Mark all read</button>`)}
+    <section class="notification-center-page">
+      <div class="notification-center-toolbar">
+        <label>Search<input type="search" value="${esc(state.notificationCenterQuery)}" data-notification-center-search placeholder="Search notification title or details" aria-label="Search notifications"></label>
+        <span class="notification-center-unread">${unreadCount} unread</span>
+      </div>
+      <div class="notification-center-filters" role="group" aria-label="Filter notifications">${filters.map(filter =>
+        `<button type="button" class="${state.notificationCenterFilter === filter ? 'active' : ''}" data-notification-center-filter="${esc(filter)}" ${state.notificationCenterFilter === filter ? 'aria-pressed="true"' : 'aria-pressed="false"'}>${esc(filter)}</button>`
+      ).join('')}</div>
+      <div class="notification-center-list">${cards || '<div class="empty-table"><strong>No notifications found</strong><small>Try another search or filter.</small></div>'}</div>
+      ${pagination}
+    </section>`;
 }
 
 function generalNotificationAlert(item) {
@@ -1241,10 +1376,7 @@ async function markAllNotificationsRead() {
   const wasOpen = Boolean(document.querySelector('[data-popover-panel="notifications"]:not([hidden])'));
   const button = document.querySelector('[data-notification-mark-all]');
   state.notificationMarkingRead = true;
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Marking read…';
-  }
+  const restoreButton = setButtonBusy(button, 'Marking read…');
   try {
     const keys = unread.map(item => item.key);
     for (let index = 0; index < keys.length; index += 500) {
@@ -1258,23 +1390,45 @@ async function markAllNotificationsRead() {
     toast(friendlyRpcError(error), 'error');
   } finally {
     state.notificationMarkingRead = false;
-    rerenderNotificationPopover(wasOpen);
+    restoreButton?.();
+    if (state.view === 'notifications') render();
+    else rerenderNotificationPopover(wasOpen);
   }
 }
 
 async function openNotification(key) {
-  const notification = activeNotifications().find(item => item.key === key);
+  const notification = activeNotifications().find(item => item.key === key)
+    || (state.view === 'notifications'
+      ? notificationCenterItems().find(item => item.key === key)
+      : null);
   const action = window.CostTrackLogic.notificationActionForRole(notification, state.role);
   if (!notification || !action) {
+    if (notification && state.view === 'notifications') {
+      try {
+        await window.supabaseRecord.markNotificationsRead([notification.key]);
+        applyReadNotificationKeys([notification.key]);
+        toast('Notification marked read.');
+        render();
+      } catch (error) {
+        console.error('Notification could not be marked read.', error);
+        toast(friendlyRpcError(error), 'error');
+      }
+      return;
+    }
     toast('This notification action is not available for your role.', 'error');
     return;
   }
+  const button = [...document.querySelectorAll('[data-notification-key]')]
+    .find(item => item.dataset.notificationKey === key);
+  const restoreButton = setButtonBusy(button, 'Opening…');
   try {
     await window.supabaseRecord.markNotificationsRead([notification.key]);
     applyReadNotificationKeys([notification.key]);
   } catch (error) {
     console.error('Notification could not be marked read.', error);
     toast(friendlyRpcError(error), 'error');
+  } finally {
+    restoreButton?.();
   }
   closeShellPopovers(false);
   state.query = action.query || '';
@@ -1647,7 +1801,7 @@ function roleDashboard() {
     metric('Voided Bill Amount', revenueLoadingLabel || money(revenueData.voided_bill_amount), '₱', 'red-icon', 'Shown separately · excluded from revenue')
   ];
   const cards = state.role === 'Receptionist'
-    ? [metric("Today's reservations", todayReservations.length, '▤', 'orange-icon', `${pendingReservations.length} awaiting confirmation`), metric('Guests expected', todayReservations.reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => liveTableAvailability(table, todayDate, reservations).status === 'Available').length, '⌂', 'orange-icon', 'Ready for assignment')]
+    ? [metric("Today's reservations", todayReservations.length, '▤', 'orange-icon', `${pendingReservations.length} awaiting confirmation`), metric('Guests expected', todayReservations.reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => table.status !== 'Needs cleaning' && ['Available', 'Reserved Later'].includes(liveTableAvailability(table, todayDate, reservations).status)).length, '⌂', 'orange-icon', 'Includes tables with a safe gap before reservations')]
     : state.role === 'Chef / Kitchen Staff'
     ? [metric('Recipes created', recipes.length, '◇', 'purple-icon', `${new Set(recipes.map(item => item.category)).size} categories`), metric('Production logs today', productionToday, '♨', 'green-icon', 'Batches recorded today'), metric('Waste logs today', wasteToday, '◌', 'red-icon', money(wasteCost()) + ' total waste cost'), metric('Active recipes', activeRecipes.length, '↗', 'orange-icon', 'Available to produce')]
     : state.role === 'Inventory Clerk'
@@ -1670,8 +1824,90 @@ function roleDashboard() {
   const fohMetrics = canAccess('reservations') ? `<div class="panel"><div class="panel-title">Front-of-house today</div><div class="metric-grid compact-metric-grid">${metric('Reservations', todayReservations.length, '▤', 'orange-icon', 'Scheduled today')}${metric('Walk-ins', todayWalkIns, '⌂', 'purple-icon', 'Recorded today')}${metric('Seated covers', seatedCovers, '✓', 'green-icon', 'Currently seated')}</div></div>` : '';
   return `<div class="welcome-row"><div><div class="eyebrow">${eyebrow}</div><h1>${dashboardGreeting()}</h1><p>${subtitle}</p><p class="dashboard-date">Business date · <time datetime="${businessDate}">${esc(businessDateLabel)}</time></p></div>${state.role === 'Receptionist' ? '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>' : state.role === 'Inventory Clerk' || state.role === 'Administrator' || state.role === 'Manager' ? '<button class="primary-btn" data-action="open-receiving">+ Receive inventory</button>' : '<button class="primary-btn" data-view="production">Open production board</button>'}</div>${revenueDashboardErrorPanel}<div class="metric-grid role-metric-grid">${cards.join('')}</div>${fohMetrics}${state.role === 'Receptionist' ? `<div class="dashboard-grid">${reservationPanel}<div class="panel"><div class="panel-title">Front-of-house checklist</div><div class="checklist"><span>✓ Confirm pending bookings</span><span>○ Check in arriving guests</span><span>○ Review table assignments</span></div></div></div>` : state.role === 'Chef / Kitchen Staff' ? `<div class="dashboard-grid">${kitchenPanel}<div class="panel"><div class="panel-title">Today’s kitchen checklist</div><div class="checklist"><span>✓ Review today’s prep targets</span><span>○ Start a batch from the production board</span><span>○ Mark each cooked batch ready</span></div></div></div>` : state.role === 'Inventory Clerk' ? inventoryPanel : state.role === 'Manager' ? `<div class="dashboard-grid">${inventoryPanel}${reservationPanel}</div>` : `<div class="dashboard-grid">${reservationPanel}${inventoryPanel}</div>`}${state.role === 'Chef / Kitchen Staff' ? '' : costAnalytics}`;
 }
+function inventoryBatchVisibility(productBatches, asOfDate = manilaBusinessToday()) {
+  const classified = productBatches.map(batch => ({
+    batch,
+    expiry: window.CostTrackLogic.batchStatus(batch, asOfDate, 3)
+  }));
+  const eligible = classified
+    .filter(({ expiry }) => ['Active', 'Expiring soon'].includes(expiry.status))
+    .map(({ batch }) => batch);
+  const fifoOrder = window.CostTrackLogic.orderBatches(eligible, 'FIFO');
+  const fefoOrder = window.CostTrackLogic.orderBatches(eligible, 'FEFO');
+  const fifoIds = new Set(fifoOrder.map(batch => String(batch.id)));
+  const otherBatches = window.CostTrackLogic.orderBatches(
+    classified.filter(({ batch }) => !fifoIds.has(String(batch.id))).map(({ batch }) => batch),
+    'FIFO'
+  );
+  const expiryOrdered = classified
+    .filter(({ batch, expiry }) => Number(batch.quantityRemaining || 0) > 0
+      && expiry.status !== 'Voided'
+      && expiry.status !== 'Depleted'
+      && (batch.expirationDate || batch.expiration_date))
+    .sort((left, right) => String(left.batch.expirationDate || left.batch.expiration_date)
+      .localeCompare(String(right.batch.expirationDate || right.batch.expiration_date)));
+  return {
+    classified,
+    fifoOrder,
+    fefoOrder,
+    orderedBatches: [...fifoOrder, ...otherBatches],
+    nearestExpiry: expiryOrdered[0] || null,
+    expiringSoonCount: classified.filter(({ expiry }) => expiry.status === 'Expiring soon').length,
+    expiredCount: classified.filter(({ expiry }) => expiry.status === 'Expired').length
+  };
+}
+
+function inventoryBatchLabel(batch) {
+  return batch.batchCode || `Batch ${String(batch.id || '').slice(0, 8)}`;
+}
+
+function inventoryExpiryLabel(daysUntilExpiry) {
+  if (daysUntilExpiry == null) return '—';
+  if (daysUntilExpiry < 0) {
+    const daysOverdue = Math.abs(daysUntilExpiry);
+    return `Expired ${daysOverdue} day${daysOverdue === 1 ? '' : 's'} ago`;
+  }
+  if (daysUntilExpiry === 0) return 'Expires today';
+  return `Expires in ${daysUntilExpiry} day${daysUntilExpiry === 1 ? '' : 's'}`;
+}
+
+function inventoryCardBatchIntelligence(snapshot) {
+  if (!snapshot.classified.length) return '';
+  const nearest = snapshot.nearestExpiry;
+  const urgency = snapshot.expiredCount
+    ? 'is-expired'
+    : snapshot.expiringSoonCount
+      ? 'is-warning'
+      : snapshot.fifoOrder.length && snapshot.nearestExpiry
+        ? 'is-healthy'
+        : 'is-neutral';
+  const attention = snapshot.expiredCount && snapshot.expiringSoonCount
+    ? `${snapshot.expiredCount} expired · ${snapshot.expiringSoonCount} expiring soon`
+    : snapshot.expiredCount
+      ? `${snapshot.expiredCount} expired`
+      : snapshot.expiringSoonCount
+        ? `${snapshot.expiringSoonCount} expiring soon`
+        : snapshot.fifoOrder.length
+          ? snapshot.nearestExpiry ? 'Expiry healthy' : 'No expiry dates'
+          : 'No active lots';
+  const expiryText = nearest
+    ? `${attention} · ${esc(inventoryBatchLabel(nearest.batch))} · ${esc(inventoryExpiryLabel(nearest.expiry.daysUntilExpiry))}`
+    : attention;
+  const fifoFirst = snapshot.fifoOrder[0];
+  return `<div class="inventory-card-intelligence" aria-label="Batch priority and expiration">
+    <span class="inventory-expiry-indicator ${urgency}">${expiryText}</span>
+    ${fifoFirst ? `<span class="inventory-first-use">FIFO first: <strong>${esc(inventoryBatchLabel(fifoFirst))}</strong></span>` : ''}
+  </div>`;
+}
+
 function ingredientCardsPage() {
   const ingredients = all('ingredients');
+  const batchesByProduct = new Map();
+  all('inventoryBatches').forEach(batch => {
+    const productBatches = batchesByProduct.get(batch.productId) || [];
+    productBatches.push(batch);
+    batchesByProduct.set(batch.productId, productBatches);
+  });
   const categories = [...new Set(ingredients.map(item => item.category))];
   const units = [...new Set(ingredients.map(item => item.unit))];
   const filtered = ingredients.filter(item => {
@@ -1682,7 +1918,10 @@ function ingredientCardsPage() {
   const canManageProducts = window.CostTrackLogic.canPerformInventoryAction(state.role, 'product.manage');
   const sorted = filtered.slice().sort((a, b) => { const key = state.ingredientSort === 'stock' ? Number(a.stock) - Number(b.stock) : state.ingredientSort === 'cost' ? Number(a.cost) - Number(b.cost) : state.ingredientSort === 'status' ? stockStatus(a).localeCompare(stockStatus(b)) : a.name.localeCompare(b.name); return state.ingredientSortDirection === 'asc' ? key : -key; });
   const toggle = `<button class="ghost-btn compact-btn" data-action="toggle-ingredient-view">${state.ingredientView === 'cards' ? 'Table view' : 'Card view'}</button>`;
-  const cardMarkup = sorted.length ? sorted.map(item => `<article class="catalog-card"><div class="catalog-card-top"><span class="ingredient-dot large-dot">${item.name[0]}</span><div class="product-status-group"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span><span class="product-active-status ${item.isActive === false ? 'is-inactive' : ''}">${item.isActive === false ? 'Inactive' : 'Active'}</span></div></div><h3>${esc(item.name)}</h3><span class="tag">${esc(item.category)}</span><div class="catalog-stat"><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} <em>${item.unit}</em></strong></div>${canSeeCost ? `<div><small>Cost / unit</small><strong>${money(item.cost)}</strong></div>` : ''}</div><div class="catalog-card-footer"><span>Minimum ${item.minimum} ${item.unit}</span><div class="card-actions">${actions('ingredient', item.id, item)}</div></div></article>`).join('') : `<div class="panel empty-state">No ingredients match these filters.${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">Add product</button>' : ''}</div>`;
+  const cardMarkup = sorted.length ? sorted.map(item => {
+    const batchSnapshot = inventoryBatchVisibility(batchesByProduct.get(item.id) || []);
+    return `<article class="catalog-card"><div class="catalog-card-top"><span class="ingredient-dot large-dot">${item.name[0]}</span><div class="product-status-group"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span><span class="product-active-status ${item.isActive === false ? 'is-inactive' : ''}">${item.isActive === false ? 'Inactive' : 'Active'}</span></div></div><h3>${esc(item.name)}</h3><span class="tag">${esc(item.category)}</span><div class="catalog-stat"><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} <em>${item.unit}</em></strong></div>${canSeeCost ? `<div><small>Cost / unit</small><strong>${money(item.cost)}</strong></div>` : ''}</div>${inventoryCardBatchIntelligence(batchSnapshot)}<div class="catalog-card-footer"><span>Minimum ${item.minimum} ${item.unit}</span><div class="card-actions">${actions('ingredient', item.id, item)}</div></div></article>`;
+  }).join('') : `<div class="panel empty-state">No ingredients match these filters.${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">Add product</button>' : ''}</div>`;
   const tableMarkup = `<div class="panel table-panel"><div class="table-scroll"><table data-table="inventory"><thead><tr>${[['name','Ingredient'],['stock','Stock'],...(canSeeCost ? [['cost','Cost / unit']] : []),['status','Status'],['','']].map(([key, label]) => key ? `<th${key === 'cost' ? ' class="mobile-hidden-cell"' : ''}><button class="sort-header" data-sort-ingredient="${key}">${label} ↕</button></th>` : '<th></th>').join('')}</tr></thead><tbody>${sorted.length ? sorted.map(item => `<tr><td data-label="Ingredient"><strong>${esc(item.name)}</strong><small class="sub-cell">${esc(item.category)} · ${esc(item.unit)} · ${item.isActive === false ? 'Inactive' : 'Active'}</small></td><td data-label="Stock">${formatStockQuantity(item.stock)} ${esc(item.unit)}</td>${canSeeCost ? `<td data-label="Cost / unit" data-mobile-hidden="true">${money(item.cost)}</td>` : ''}<td data-label="Status"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></td><td data-label="Actions">${actions('ingredient', item.id, item)}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No ingredients match these filters.</td></tr>`}</tbody></table></div></div>`;
   return `${pageHeader('Inventory', 'Products', 'Review product stock and reorder thresholds.', `${toggle} ${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">+ Add product</button>' : ''}`)}<div class="catalog-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search products or categories..." value="${esc(state.query)}"></div><select data-filter="ingredientCategory"><option>All categories</option>${categories.map(item => `<option ${state.ingredientCategory === item ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select><label class="filter-check"><input type="checkbox" data-low-stock-filter ${state.ingredientStatus === 'Low Stock' ? 'checked' : ''}> Low stock only</label><span class="record-count">${filtered.length} products</span></div>${state.ingredientView === 'cards' ? `<div class="ingredient-card-grid">${cardMarkup}</div>` : tableMarkup}`;
 }
@@ -1738,10 +1977,12 @@ function receivingPage() {
   });
 }
 const wasteReasons = ['Expired', 'Spoiled', 'Burned', 'Over-preparation', 'Spillage', 'Dropped / contaminated', 'Prep trim', 'Other'];
+const preparedFoodWasteReasons = ['Leftover after service', 'Unsold prepared food', 'Over-production', 'Expired prepared food', 'Burned', 'Contaminated', 'Other'];
 function logsPage(type) {
   const isWaste = type === 'waste';
   if (isWaste) {
     const records = all('wasteLogs');
+    const preparedRecords = all('preparedFoodWasteLogs');
     const filters = state.wasteFilters;
     const recipesByLogId = new Map(all('productionLogs').map(log => [log.id, log]));
     const matches = records.filter(item => {
@@ -1762,6 +2003,20 @@ function logsPage(type) {
       const linkedName = linkedLog ? recipe(linkedLog.recipeId)?.name || '' : '';
       return `${product?.name || ''} ${item.reason || ''} ${item.notes || ''} ${linkedName}`.toLowerCase().includes(state.query.toLowerCase());
     }).sort((a, b) => String(b.recordedAt || b.date || '').localeCompare(String(a.recordedAt || a.date || '')));
+    const preparedMatches = preparedRecords.filter(item => {
+      const timestamp = item.recordedAt ? new Date(item.recordedAt) : null;
+      if (filters.from && item.date < filters.from) return false;
+      if (filters.to && item.date > filters.to) return false;
+      if (filters.reason !== 'All' && item.reason !== filters.reason) return false;
+      if (filters.staff === 'Mine' && item.recordedBy !== state.user?.id) return false;
+      if (filters.staff === 'Others' && (!item.recordedBy || item.recordedBy === state.user?.id)) return false;
+      if (filters.staff === 'Legacy' && item.recordedAt) return false;
+      if ((filters.timeFrom || filters.timeTo) && (!timestamp || Number.isNaN(timestamp.getTime()))) return false;
+      const clock = timestamp ? `${String(timestamp.getHours()).padStart(2, '0')}:${String(timestamp.getMinutes()).padStart(2, '0')}` : '';
+      if (filters.timeFrom && clock < filters.timeFrom) return false;
+      if (filters.timeTo && clock > filters.timeTo) return false;
+      return `${item.dishName || ''} ${item.productionBatchLabel || ''} ${item.reason || ''} ${item.notes || ''}`.toLowerCase().includes(state.query.toLowerCase());
+    }).sort((a, b) => String(b.recordedAt || b.date || '').localeCompare(String(a.recordedAt || a.date || '')));
     const canSeeCosts = ['Administrator', 'Manager'].includes(state.role);
     const selectedIngredient = filters.ingredient !== 'All';
     const totalQuantity = selectedIngredient ? matches.reduce((sum, item) => sum + Number(item.quantity || 0), 0) : null;
@@ -1773,7 +2028,7 @@ function logsPage(type) {
         ? new Date(item.recordedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
         : 'Time not recorded';
       const staffLabel = !item.recordedBy ? 'Not recorded' : item.recordedBy === state.user?.id ? 'You' : 'Other staff';
-      return `<tr><td><strong>${esc(product?.name || 'Unknown ingredient')}</strong></td><td>${Number(item.quantity)} ${esc(product?.unit || '')}</td><td><span class="tag">${esc(item.reason || 'Unspecified')}</span></td><td>${esc(linkedLog ? recipe(linkedLog.recipeId)?.name || 'Unknown dish' : '—')}</td><td>${esc(item.date || '')}<small class="sub-cell">${esc(activityTime)}</small></td><td>${staffLabel}</td>${canSeeCosts ? `<td>${money(Number(item.quantity || 0) * Number(product?.cost || 0))}</td>` : ''}<td>${esc(item.notes || '—')}</td></tr>`;
+      return `<tr><td data-label="Ingredient"><strong>${esc(product?.name || 'Unknown ingredient')}</strong></td><td data-label="Quantity">${Number(item.quantity)} ${esc(product?.unit || '')}</td><td data-label="Reason"><span class="tag">${esc(item.reason || 'Unspecified')}</span></td><td data-label="Dish / batch">${esc(linkedLog ? recipe(linkedLog.recipeId)?.name || 'Unknown dish' : '—')}</td><td data-label="Date / time">${esc(item.date || '')}<small class="sub-cell">${esc(activityTime)}</small></td><td data-label="Logged by">${staffLabel}</td>${canSeeCosts ? `<td data-label="Estimated cost">${money(Number(item.quantity || 0) * Number(product?.cost || 0))}</td>` : ''}<td data-label="Notes">${esc(item.notes || '—')}</td></tr>`;
     });
     const pageSize = state.tablePageSize || 10;
     const wastePageCount = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -1789,19 +2044,61 @@ function logsPage(type) {
     const wastePagination = rows.length
       ? `<div class="table-pagination" aria-label="Waste log pagination"><button type="button" class="ghost-btn compact-btn" data-table-page="${wastePage - 1}" data-table-id="waste" ${wastePage <= 1 ? 'disabled' : ''}>Previous</button><div class="table-page-numbers">${wastePageButtons}</div><span class="table-page-summary">${((wastePage - 1) * pageSize) + 1}–${Math.min(wastePage * pageSize, rows.length)} of ${rows.length}</span><button type="button" class="ghost-btn compact-btn" data-table-page="${wastePage + 1}" data-table-id="waste" ${wastePage >= wastePageCount ? 'disabled' : ''}>Next</button></div>`
       : '';
-    const reasonOptions = [...new Set([...wasteReasons, ...records.map(item => item.reason).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+    const preparedRows = preparedMatches.map(item => {
+      const activityTime = item.recordedAt
+        ? new Date(item.recordedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : 'Time not recorded';
+      const staffLabel = !item.recordedBy ? 'Not recorded' : item.recordedBy === state.user?.id ? 'You' : 'Other staff';
+      return `<tr><td data-label="Dish"><strong>${esc(item.dishName || 'Unnamed dish')}</strong></td><td data-label="Production batch">${esc(item.productionBatchLabel || '—')}</td><td data-label="Portions">${Number(item.quantity)} portions</td><td data-label="Reason"><span class="tag">${esc(item.reason || 'Unspecified')}</span></td><td data-label="Waste date / time">${esc(item.date || '')}<small class="sub-cell">${esc(activityTime)}</small></td><td data-label="Logged by">${staffLabel}</td><td data-label="Notes">${esc(item.notes || '—')}</td></tr>`;
+    });
+    const preparedPageCount = Math.max(1, Math.ceil(preparedRows.length / pageSize));
+    const preparedPage = Math.min(Math.max(1, Number(state.tablePages.preparedWaste || 1)), preparedPageCount);
+    state.tablePages.preparedWaste = preparedPage;
+    const preparedPageRows = preparedRows.slice((preparedPage - 1) * pageSize, preparedPage * pageSize);
+    const preparedPageStart = Math.max(1, Math.min(preparedPage - 2, preparedPageCount - 4));
+    const preparedPageEnd = Math.min(preparedPageCount, preparedPageStart + 4);
+    const preparedPageButtons = Array.from({ length: preparedPageEnd - preparedPageStart + 1 }, (_, offset) => {
+      const page = preparedPageStart + offset;
+      return `<button type="button" class="${page === preparedPage ? 'active' : ''}" data-table-page="${page}" data-table-id="preparedWaste" ${page === preparedPage ? 'aria-current="page"' : ''}>${page}</button>`;
+    }).join('');
+    const preparedPagination = preparedRows.length
+      ? `<div class="table-pagination" aria-label="Prepared-food waste pagination"><button type="button" class="ghost-btn compact-btn" data-table-page="${preparedPage - 1}" data-table-id="preparedWaste" ${preparedPage <= 1 ? 'disabled' : ''}>Previous</button><div class="table-page-numbers">${preparedPageButtons}</div><span class="table-page-summary">${((preparedPage - 1) * pageSize) + 1}–${Math.min(preparedPage * pageSize, preparedRows.length)} of ${preparedRows.length}</span><button type="button" class="ghost-btn compact-btn" data-table-page="${preparedPage + 1}" data-table-id="preparedWaste" ${preparedPage >= preparedPageCount ? 'disabled' : ''}>Next</button></div>`
+      : '';
+    const ingredientInsight = new Map();
+    matches.forEach(item => {
+      const product = ingredient(item.ingredientId);
+      if (!product) return;
+      const current = ingredientInsight.get(item.ingredientId) || { name: product.name, unit: product.unit, quantity: 0 };
+      current.quantity += Number(item.quantity || 0);
+      ingredientInsight.set(item.ingredientId, current);
+    });
+    const topIngredients = [...ingredientInsight.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 3);
+    const dishInsight = new Map();
+    preparedMatches.forEach(item => {
+      const key = String(item.dishName || '').trim().toLowerCase();
+      if (!key) return;
+      const current = dishInsight.get(key) || { name: String(item.dishName).trim(), quantity: 0 };
+      current.quantity += Number(item.quantity || 0);
+      dishInsight.set(key, current);
+    });
+    const topDishes = [...dishInsight.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 3);
+    const reasonOptions = [...new Set([...wasteReasons, ...preparedFoodWasteReasons, ...records.map(item => item.reason), ...preparedRecords.map(item => item.reason)].filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const filterMarkup = `<div class="waste-filters">
       <label>From date<input data-waste-filter="from" type="date" value="${esc(filters.from)}"></label>
       <label>To date<input data-waste-filter="to" type="date" value="${esc(filters.to)}"></label>
       <label>Time from<input data-waste-filter="timeFrom" type="time" value="${esc(filters.timeFrom)}"></label>
       <label>Time to<input data-waste-filter="timeTo" type="time" value="${esc(filters.timeTo)}"></label>
-      <label>Ingredient<select data-waste-filter="ingredient"><option value="All">All ingredients</option>${all('ingredients').slice().sort((a, b) => a.name.localeCompare(b.name)).map(item => `<option value="${esc(item.id)}" ${filters.ingredient === item.id ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
+      <label>Ingredient waste only<select data-waste-filter="ingredient"><option value="All">All ingredients</option>${all('ingredients').slice().sort((a, b) => a.name.localeCompare(b.name)).map(item => `<option value="${esc(item.id)}" ${filters.ingredient === item.id ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
       <label>Reason<select data-waste-filter="reason"><option value="All">All reasons</option>${reasonOptions.map(reason => `<option value="${esc(reason)}" ${filters.reason === reason ? 'selected' : ''}>${esc(reason)}</option>`).join('')}</select></label>
       <label>Staff<select data-waste-filter="staff"><option value="All" ${filters.staff === 'All' ? 'selected' : ''}>Everyone</option><option value="Mine" ${filters.staff === 'Mine' ? 'selected' : ''}>My entries</option><option value="Others" ${filters.staff === 'Others' ? 'selected' : ''}>Other staff</option><option value="Legacy" ${filters.staff === 'Legacy' ? 'selected' : ''}>Older entries</option></select></label>
       <span class="waste-filter-actions"><button class="primary-btn compact-btn" data-action="apply-waste-filters">Apply</button><button class="ghost-btn compact-btn" data-action="clear-waste-filters">Clear</button></span>
     </div>`;
-    const summaries = `<div class="waste-summary"><div><small>Entries shown</small><strong>${matches.length}</strong></div>${selectedIngredient ? `<div><small>Quantity shown</small><strong>${Number(totalQuantity.toFixed(4))} ${esc(ingredient(filters.ingredient)?.unit || '')}</strong></div>` : ''}${canSeeCosts ? `<div><small>Estimated discarded cost</small><strong>${money(totalCost)}</strong></div>` : ''}</div>`;
-    return `${pageHeader('Kitchen operations', 'Waste logs', 'Quickly record discarded ingredients, see the stock impact before saving, and trace waste to a service batch. Only discarded items reduce inventory.', '<button class="primary-btn" data-action="open-waste">+ Log waste</button>')}<div class="panel waste-history-panel"><div class="waste-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search waste, reason, dish, or notes..." value="${esc(state.query)}"></div><span class="record-count">${matches.length} entries</span></div>${filterMarkup}${summaries}<div class="table-scroll"><table><thead><tr><th>Ingredient</th><th>Quantity</th><th>Reason</th><th>Dish / batch</th><th>Date / time</th><th>Logged by</th>${canSeeCosts ? '<th>Estimated cost</th>' : ''}<th>Notes</th></tr></thead><tbody>${pagedWasteRows.length ? pagedWasteRows.join('') : `<tr><td colspan="${canSeeCosts ? 8 : 7}" class="empty-state">No waste entries match these filters.</td></tr>`}</tbody></table></div>${wastePagination}</div>`;
+    const summaries = `<div class="waste-summary"><div><small>Ingredient waste entries</small><strong>${matches.length}</strong></div><div><small>Prepared-food entries</small><strong>${preparedMatches.length}</strong></div><div><small>Prepared portions wasted</small><strong>${Number(preparedMatches.reduce((sum, item) => sum + Number(item.quantity || 0), 0).toFixed(4))}</strong></div><div><small>Combined waste entries</small><strong>${matches.length + preparedMatches.length}</strong></div>${selectedIngredient ? `<div><small>Quantity shown</small><strong>${Number(totalQuantity.toFixed(4))} ${esc(ingredient(filters.ingredient)?.unit || '')}</strong></div>` : ''}${canSeeCosts ? `<div><small>Ingredient discarded cost</small><strong>${money(totalCost)}</strong></div>` : ''}</div>`;
+    const insights = `<div class="waste-insight-grid">
+      <section class="waste-insight-card"><h3>Top wasted ingredients</h3><p>Quantities retain each ingredient’s own stock unit.</p>${topIngredients.length ? `<ol>${topIngredients.map(item => `<li><span>${esc(item.name)}</span><strong>${Number(item.quantity.toFixed(4))} ${esc(item.unit)}</strong></li>`).join('')}</ol>` : '<p class="waste-insight-empty">No ingredient entries for these filters.</p>'}</section>
+      <section class="waste-insight-card"><h3>Top wasted dishes</h3><p>Prepared-food quantities are portions, not inventory units.</p>${topDishes.length ? `<ol>${topDishes.map(item => `<li><span>${esc(item.name)}</span><strong>${Number(item.quantity.toFixed(4))} portions</strong></li>`).join('')}</ol>` : '<p class="waste-insight-empty">No prepared-food entries for these filters.</p>'}</section>
+    </div>`;
+    return `${pageHeader('Kitchen operations', 'Waste logs', 'Choose ingredient waste to deduct raw stock, or prepared-food waste to record discarded dishes without changing ingredient inventory.', '<button class="primary-btn" data-action="open-waste">+ Log waste</button>')}<div class="panel waste-history-panel"><div class="waste-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search waste, reason, dish, or notes..." value="${esc(state.query)}"></div><span class="record-count">${matches.length + preparedMatches.length} entries</span></div>${filterMarkup}${summaries}${insights}<h2 class="waste-section-title">Ingredient waste</h2><p class="waste-section-note">Only these entries deduct raw ingredient stock.</p><div class="table-scroll"><table><thead><tr><th>Ingredient</th><th>Quantity</th><th>Reason</th><th>Dish / batch</th><th>Date / time</th><th>Logged by</th>${canSeeCosts ? '<th>Estimated cost</th>' : ''}<th>Notes</th></tr></thead><tbody>${pagedWasteRows.length ? pagedWasteRows.join('') : `<tr><td colspan="${canSeeCosts ? 8 : 7}" class="empty-state">No ingredient waste entries match these filters.</td></tr>`}</tbody></table></div>${wastePagination}<h2 class="waste-section-title prepared-waste-title">Prepared food / leftovers</h2><p class="waste-section-note">These entries record discarded cooked food only. They never return or deduct ingredients.</p><div class="table-scroll"><table class="prepared-waste-table"><thead><tr><th>Dish</th><th>Production batch</th><th>Portions</th><th>Reason</th><th>Waste date / time</th><th>Logged by</th><th>Notes</th></tr></thead><tbody>${preparedPageRows.length ? preparedPageRows.join('') : '<tr><td colspan="7" class="empty-state">No prepared-food waste entries match these filters.</td></tr>'}</tbody></table></div>${preparedPagination}</div>`;
   }
   const records = all('productionLogs');
   const rows = records.slice().reverse()
@@ -1991,12 +2288,13 @@ function countsPage() {
   const rows = all('physicalCounts').slice().reverse().map(item => {
     const stockItem = ingredient(item.ingredientId);
     const difference = item.actual - item.expected;
-    return `<tr><td><strong>${esc(stockItem?.name || 'Unknown')}</strong></td><td>${item.expected} ${esc(stockItem?.unit || '')}</td><td>${item.actual} ${esc(stockItem?.unit || '')}</td><td class="${difference < 0 ? 'negative' : 'positive'}">${difference > 0 ? '+' : ''}${difference.toFixed(2)}</td><td><span class="status ${difference < 0 ? 'status-low' : 'status-good'}">${difference < 0 ? 'Shortage' : difference > 0 ? 'Overage' : 'Matched'}</span></td><td>${esc(item.date || '')}</td><td>${actions('count', item.id)}</td></tr>`;
+    const formattedDifference = new Intl.NumberFormat('en-PH', { maximumFractionDigits: 4 }).format(difference);
+    return `<tr><td><strong>${esc(stockItem?.name || 'Unknown')}</strong></td><td>${item.expected} ${esc(stockItem?.unit || '')}</td><td>${item.actual} ${esc(stockItem?.unit || '')}</td><td class="${difference < 0 ? 'negative' : 'positive'}">${difference > 0 ? '+' : ''}${formattedDifference}</td><td><span class="status ${difference < 0 ? 'status-low' : 'status-good'}">${difference < 0 ? 'Shortage' : difference > 0 ? 'Overage' : 'Matched'}</span></td><td>${esc(item.date || '')}</td><td>${actions('count', item.id)}</td></tr>`;
   });
   return tablePage({
     eyebrow: 'Reconciliation',
     title: 'Physical inventory count',
-    subtitle: 'Compare expected system stock with what is physically on hand.',
+    subtitle: 'Expected stock is loaded from inventory. Review the variance before recording a count and adjusting stock.',
     action: canSubmitCount ? '<button class="primary-btn" data-action="open-count">+ Record count</button>' : '',
     search: 'counts',
     tableClass: 'physical-count-table',
@@ -2004,6 +2302,22 @@ function countsPage() {
     headers: ['Ingredient', 'Expected', 'Actual count', 'Variance', 'Result', 'Count date', ''],
     rows
   });
+}
+function updatePhysicalCountPreview(form) {
+  const preview = form.querySelector('[data-count-variance]');
+  const expected = form.elements.expected.value;
+  const actual = form.elements.actual.value;
+  if (!preview) return;
+  if (expected === '' || actual === '') {
+    preview.textContent = 'Select an ingredient and enter the actual quantity to preview variance.';
+    preview.dataset.state = 'empty';
+    return;
+  }
+  const variance = Number(actual) - Number(expected);
+  const unit = ingredient(form.elements.ingredientId.value)?.unit || '';
+  const formattedVariance = new Intl.NumberFormat('en-PH', { maximumFractionDigits: 4 }).format(variance);
+  preview.textContent = `${variance < 0 ? 'Shortage' : variance > 0 ? 'Overage' : 'Matched'} · ${variance > 0 ? '+' : ''}${formattedVariance} ${unit}`;
+  preview.dataset.state = variance < 0 ? 'shortage' : variance > 0 ? 'overage' : 'matched';
 }
 function ratesPage() {
   const rows = all('buffetRates').slice().sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)).map(item =>
@@ -2092,7 +2406,7 @@ function cashierPage() {
     eyebrow: 'Front of House',
     title: 'Cashier',
     subtitle: 'Create and settle bills without changing stock. Deposits are payments, never discounts.',
-    action: `${activeShift ? '<span class="pos-shift-chip">Shift open</span>' : '<button class="ghost-btn" data-action="new-shift">Open shift</button>'} <button class="primary-btn" data-action="new-bill" ${activeShift ? '' : 'disabled'}>+ New bill</button>`,
+    action: `${activeShift ? '<span class="pos-shift-chip">Shift open</span>' : '<button class="ghost-btn" data-action="new-shift">Open shift</button>'} <button class="primary-btn" data-action="new-bill" ${activeShift ? '' : 'aria-disabled="true" title="Open your cashier shift before creating a bill."'}>+ New bill</button>`,
     search: 'cashier',
     tableId: 'cashier',
     headers: ['Bill #', 'Customer', 'Served', 'Status', 'Balance', 'Paid', ''],
@@ -2397,6 +2711,7 @@ function usersPage() {
     const canResend = ['Pending', 'Expired'].includes(status);
     const canCancel = status === 'Pending';
     const busy = state.userManagementBusyId === invite.id;
+    const busyAction = busy ? state.userManagementBusyAction : '';
     const inviter = inviterNames.get(String(invite.invited_by))
       || (String(invite.invited_by) === String(state.user?.id) ? state.user.email : 'Staff account');
     return `<tr>
@@ -2409,8 +2724,8 @@ function usersPage() {
       <td data-label="Accepted">${esc(formatUserManagementDate(invite.accepted_at))}</td>
       <td data-label="Invited by">${esc(inviter)}</td>
       <td data-label="Actions"><div class="user-invitation-actions">
-        ${canResend ? `<button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>${busy ? 'Sending…' : 'Resend'}</button>` : ''}
-        ${canCancel ? `<button type="button" class="ghost-btn" data-action="cancel-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>Cancel</button>` : '—'}
+        ${canResend ? `<button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>${busy && busyAction === 'resend' ? 'Sending…' : 'Resend'}</button>` : ''}
+        ${canCancel ? `<button type="button" class="ghost-btn" data-action="cancel-user-invite" data-id="${esc(invite.id)}" ${busy ? 'disabled' : ''}>${busy && busyAction === 'cancel' ? 'Cancelling…' : 'Cancel'}</button>` : '—'}
       </div></td>
     </tr>`;
   });
@@ -2532,7 +2847,8 @@ function updateInviteDuplicateNotice(form) {
     notice.textContent = `An account already exists for ${duplicate.user.email}. Change the user's role in Staff instead of sending another invitation.`;
     return;
   }
-  notice.innerHTML = `<span>A ${duplicate.status.toLowerCase()} invitation already exists for ${esc(duplicate.invitation.email)}.</span><button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(duplicate.invitation.id)}" ${state.userManagementBusyId === duplicate.invitation.id ? 'disabled' : ''}>${state.userManagementBusyId === duplicate.invitation.id ? 'Sending…' : 'Resend invitation'}</button>`;
+  const resending = state.userManagementBusyId === duplicate.invitation.id && state.userManagementBusyAction === 'resend';
+  notice.innerHTML = `<span>A ${duplicate.status.toLowerCase()} invitation already exists for ${esc(duplicate.invitation.email)}.</span><button type="button" class="ghost-btn" data-action="resend-user-invite" data-id="${esc(duplicate.invitation.id)}" ${state.userManagementBusyId === duplicate.invitation.id ? 'disabled' : ''}>${resending ? 'Sending…' : 'Resend invitation'}</button>`;
 }
 
 function openUserRoleModal(userId) {
@@ -2597,6 +2913,9 @@ function setUserManagementFormBusy(form, busy, label = 'Saving…') {
     if (!form.dataset.submitLabel) form.dataset.submitLabel = submit.textContent;
     submit.disabled = busy;
     submit.textContent = busy ? label : form.dataset.submitLabel;
+    submit.classList.toggle('is-loading', busy);
+    if (busy) submit.setAttribute('aria-busy', 'true');
+    else submit.removeAttribute('aria-busy');
   }
 }
 
@@ -2670,9 +2989,9 @@ async function retryUserManagementLists(button = null) {
 }
 
 async function finishUserManagementSave(successMessage, focusAction, focusId, warningMessage = '') {
+  toast(warningMessage || successMessage, warningMessage ? 'error' : 'success');
   try {
     const refreshed = await refreshUserManagementLists();
-    if (refreshed) toast(warningMessage || successMessage, warningMessage ? 'error' : 'success');
     if (focusAction) focusUserManagementAction(focusAction, focusId);
   } catch (error) {
     console.error('A User Management action was saved, but its lists could not be refreshed.', error);
@@ -2820,6 +3139,7 @@ async function runUserInvitationAction(invitationId, action) {
     if (!confirmed) return;
   }
   state.userManagementBusyId = invitationId;
+  state.userManagementBusyAction = action;
   render();
   const inviteForm = document.querySelector('#modalForm[data-type="user-invite"]');
   if (inviteForm) updateInviteDuplicateNotice(inviteForm);
@@ -2850,6 +3170,7 @@ async function runUserInvitationAction(invitationId, action) {
     toast(error.message || `The invitation could not be ${action === 'resend' ? 'resent' : 'cancelled'}.`, 'error');
   } finally {
     state.userManagementBusyId = '';
+    state.userManagementBusyAction = '';
     if (state.view === 'users' && state.role === 'Administrator') {
       render();
       if (inviteForm?.isConnected) {
@@ -2906,6 +3227,7 @@ async function retryUserInvitationLoad() {
 }
 function options(items, valueKey = 'id', labelKey = 'name') { return items.map(x => `<option value="${x[valueKey]}">${esc(x[labelKey])}</option>`).join(''); }
 function updateWasteFormPreview(form) {
+  if (form.elements.wasteType?.value !== 'ingredient') return;
   const product = ingredient(form.elements.ingredientId.value);
   const quantity = Number(form.elements.quantity.value || 0);
   const stockLabel = form.querySelector('[data-waste-stock]');
@@ -2922,6 +3244,36 @@ function updateWasteFormPreview(form) {
     ? `Not enough stock. Current balance: ${Number(product.stock)} ${product.unit}.`
     : `After logging, about ${Number(remaining.toFixed(4))} ${product.unit} will remain.`;
   impactLabel.classList.toggle('is-warning', remaining < 0);
+}
+function setWasteFormType(form) {
+  const selectedType = form.elements.wasteType?.value || '';
+  form.querySelectorAll('[data-waste-type-panel]').forEach(panel => {
+    const active = panel.dataset.wasteTypePanel === selectedType;
+    panel.hidden = !active;
+    panel.querySelectorAll('input, select, textarea').forEach(control => { control.disabled = !active; });
+  });
+  const submit = form.querySelector('.modal-submit');
+  if (submit) submit.disabled = !selectedType;
+  updateWasteFormPreview(form);
+}
+async function refreshPreparedWasteBatches(form, serviceDate) {
+  const select = form.elements.productionBatchId;
+  if (!select) return;
+  select.disabled = true;
+  select.innerHTML = '<option value="">Loading ready batches…</option>';
+  try {
+    const batches = (await window.supabaseRecord.loadProductionBatches(serviceDate))
+      .filter(batch => batch.status === 'Ready');
+    if (!form.isConnected || form.elements.preparedDate.value !== serviceDate) return;
+    select.innerHTML = `<option value="">Not linked</option>${batches.map(batch => `<option value="${esc(batch.id)}" data-dish-name="${esc(batch.recipeName)}">${esc(batch.recipeName)} · #${Number(batch.batchNumber)} · ${esc(batch.serviceDate)}</option>`).join('')}`;
+    select.disabled = form.elements.wasteType.value !== 'prepared';
+  } catch (error) {
+    if (!form.isConnected || form.elements.preparedDate.value !== serviceDate) return;
+    console.error('Ready production batches could not be refreshed for prepared-food waste.', error);
+    select.innerHTML = '<option value="">Not linked</option>';
+    select.disabled = form.elements.wasteType.value !== 'prepared';
+    toast('Ready production batches could not be loaded for this date. You can still record prepared-food waste without linking a batch.', 'error');
+  }
 }
 async function openForm(type, item) {
   const requiredAction = {
@@ -2995,6 +3347,7 @@ async function openForm(type, item) {
           <label>Preferred supplier<input name="preferredSupplier" list="preferredSupplierSuggestions" value="${esc(value('preferredSupplier'))}" maxlength="200" placeholder="Choose or type a supplier" autocomplete="off"><datalist id="preferredSupplierSuggestions">${suppliers}</datalist><small class="field-help">Optional. Select a saved supplier or enter a name.</small></label>
         </div>
         <label class="product-expiry-toggle"><input name="trackExpiry" type="checkbox" ${value('trackExpiry') ? 'checked' : ''}><span><strong>Track expiration dates</strong><small>Require an expiration date for every delivery of this product. Dates are recorded per received lot.</small></span></label>
+        <label>Shelf life (days)<input name="shelfLifeDays" type="number" min="1" max="3650" step="1" value="${esc(value('shelfLifeDays') || '')}" placeholder="e.g. 30"><small class="field-help">When set, expiration is calculated automatically from the date received. Leave blank to enter it manually per invoice lot.</small></label>
       </fieldset>
       <fieldset class="product-form-section">
         <legend>Additional information</legend>
@@ -3026,27 +3379,64 @@ async function openForm(type, item) {
     recentProductionDate.setDate(recentProductionDate.getDate() - 3);
     const recentProduction = all('productionLogs').filter(log => log.date >= localDateStr(recentProductionDate));
     const ingredientOptions = all('ingredients').filter(item => item.isActive !== false).slice().sort((a, b) => a.name.localeCompare(b.name)).map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.unit)}</option>`).join('');
+    const dishSuggestions = [...new Set(all('recipes').map(recipeItem => recipeItem.name).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => `<option value="${esc(name)}"></option>`).join('');
     modal('Log kitchen waste', `<label class="full">Recorded at<input name="recordedAtDisplay" value="${esc(recordedAtLabel)}" readonly aria-readonly="true"></label>
-      <p class="waste-form-intro">Record discarded food or ingredients only. The stock deduction is applied once when this entry is saved.</p>
-      <label>Ingredient<select name="ingredientId" required><option value="">Choose an ingredient</option>${ingredientOptions}</select><small class="field-help" data-waste-stock>Select an ingredient to see available stock.</small></label>
-      <label>Related dish / production batch <span class="field-help">Optional — helps identify where the waste came from.</span><select name="productionLogId"><option value="">Not linked</option>${recentProduction.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map(log => `<option value="${esc(log.id)}">${esc(recipe(log.recipeId)?.name || 'Unknown dish')} · ${log.quantity} batch${Number(log.quantity) === 1 ? '' : 'es'} · ${esc(log.date)}</option>`).join('')}</select></label>
-      <label>Quantity discarded<input name="quantity" type="number" min=".0001" max="1000000" step=".0001" placeholder="e.g. 0.5" required><small class="field-help">Enter the amount using the ingredient’s stock unit.</small></label>
-      <fieldset class="waste-reason-group" data-waste-reason-group role="radiogroup" aria-required="true">
-        <legend>Reason</legend>
-        <div class="waste-reason-options">${wasteReasons.map((reason, index) => `<label class="waste-reason-chip"><input type="radio" name="reason" value="${esc(reason)}" ${index === 0 ? 'required' : ''}><span>${esc(reason)}</span></label>`).join('')}</div>
-        <small class="field-help" data-waste-reason-error role="alert" hidden>Choose one reason.</small>
+      <fieldset class="waste-type-selector" role="radiogroup" aria-required="true">
+        <legend>Waste type <span class="field-help">Choose a category before entering a record.</span></legend>
+        <div class="waste-type-options">
+          <label><input type="radio" name="wasteType" value="ingredient" required><span><strong>Ingredient waste</strong><small>Deducts raw inventory stock.</small></span></label>
+          <label><input type="radio" name="wasteType" value="prepared" required><span><strong>Prepared food / leftovers</strong><small>Records portions only; ingredients are unchanged.</small></span></label>
+        </div>
       </fieldset>
-      <small class="field-help waste-impact" data-waste-impact aria-live="polite"></small>
-      <label>Notes <span class="field-help">Optional — required when you choose Other. Add a short detail such as storage issue or reason for over-preparation.</span><textarea name="notes" rows="2" maxlength="500" placeholder="Optional detail"></textarea></label>
-      <p class="waste-disposition-note">Safe leftovers that are stored or reused are not waste entries. Log them here only if they are later discarded.</p>`, 'Record waste', 'waste-modal');
+      <section data-waste-type-panel="ingredient" hidden>
+        <p class="waste-form-intro">Record discarded ingredients. The stock deduction is applied once when this entry is saved.</p>
+        <label>Ingredient<select name="ingredientId" required disabled><option value="">Choose an ingredient</option>${ingredientOptions}</select><small class="field-help" data-waste-stock>Select an ingredient to see available stock.</small></label>
+        <label>Related dish / production batch <span class="field-help">Optional — helps identify where the waste came from.</span><select name="productionLogId" disabled><option value="">Not linked</option>${recentProduction.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).map(log => `<option value="${esc(log.id)}">${esc(recipe(log.recipeId)?.name || 'Unknown dish')} · ${log.quantity} batch${Number(log.quantity) === 1 ? '' : 'es'} · ${esc(log.date)}</option>`).join('')}</select></label>
+        <label>Quantity discarded<input name="quantity" type="number" min=".0001" max="1000000" step=".0001" placeholder="e.g. 0.5" required disabled><small class="field-help">Enter the amount using the ingredient’s stock unit.</small></label>
+        <fieldset class="waste-reason-group" data-waste-reason-group role="radiogroup" aria-required="true">
+          <legend>Reason</legend>
+          <div class="waste-reason-options">${wasteReasons.map((reason, index) => `<label class="waste-reason-chip"><input type="radio" name="reason" value="${esc(reason)}" ${index === 0 ? 'required' : ''} disabled><span>${esc(reason)}</span></label>`).join('')}</div>
+          <small class="field-help" data-waste-reason-error role="alert" hidden>Choose one reason.</small>
+        </fieldset>
+        <small class="field-help waste-impact" data-waste-impact aria-live="polite"></small>
+        <label>Notes <span class="field-help">Optional — required when you choose Other. Add a short detail such as storage issue or reason for over-preparation.</span><textarea name="notes" rows="2" maxlength="500" placeholder="Optional detail" disabled></textarea></label>
+        <p class="waste-disposition-note">Safe leftovers that are stored or reused are not waste entries. Log them here only if they are later discarded.</p>
+      </section>
+      <section data-waste-type-panel="prepared" hidden>
+        <p class="waste-form-intro">Use this for cooked dishes, buffet leftovers, unsold prepared food, or excess production. No ingredient stock is returned or changed.</p>
+        <label>Dish name <span class="field-help">Selecting a production batch fills and locks its recipe name.</span><input name="dishName" type="text" list="preparedWasteDishSuggestions" maxlength="200" placeholder="e.g. Sisig" required disabled><datalist id="preparedWasteDishSuggestions">${dishSuggestions}</datalist></label>
+        <label>Production batch <span class="field-help">Optional — ready batches for the selected waste date.</span><select name="productionBatchId" disabled><option value="">Not linked</option></select></label>
+        <label>Portions wasted<input name="preparedQuantity" type="number" min=".0001" max="1000000" step=".0001" placeholder="e.g. 3" required disabled></label>
+        <fieldset class="waste-reason-group prepared-waste-reason-group" data-prepared-waste-reason-group role="radiogroup" aria-required="true">
+          <legend>Waste reason</legend>
+          <div class="waste-reason-options">${preparedFoodWasteReasons.map((reason, index) => `<label class="waste-reason-chip"><input type="radio" name="preparedReason" value="${esc(reason)}" ${index === 0 ? 'required' : ''} disabled><span>${esc(reason)}</span></label>`).join('')}</div>
+          <small class="field-help" data-prepared-waste-reason-error role="alert" hidden>Choose one reason.</small>
+        </fieldset>
+        <label>Waste date<input name="preparedDate" type="date" value="${manilaBusinessToday()}" max="${manilaBusinessToday()}" required disabled></label>
+        <label>Notes <span class="field-help">Optional — required when you choose Other.</span><textarea name="preparedNotes" rows="2" maxlength="500" placeholder="Optional detail" disabled></textarea></label>
+      </section>`, 'Record waste', 'waste-modal');
     const form = document.querySelector('#modalForm');
     form.dataset.type = type;
     form.dataset.serverTimestamp = serverTimestamp;
-    form.querySelector('[name="ingredientId"]').focus();
+    const submit = form.querySelector('.modal-submit');
+    if (submit) submit.disabled = true;
+    form.querySelector('[name="wasteType"]').focus();
+    refreshPreparedWasteBatches(form, manilaBusinessToday());
     return;
   }
   else if (type === 'production') modal('Log production batch', `<div class="form-grid"><label>Recipe<select name="recipeId" required>${options(all('recipes'))}</select></label><label>Batches<input name="quantity" type="number" min="1" step="1" required></label><label>Covers produced <small class="field-help">Optional</small><input name="coversProduced" type="number" min="0" step="1"></label><label>Mode<select name="mode"><option>Batch production</option><option>End-of-day sales summary</option></select></label><label>Date<input name="date" type="date" value="${today()}" required></label></div>`);
-  else if (type === 'count') modal('Record physical count', `<div class="form-grid"><label>Ingredient<select name="ingredientId" required>${options(all('ingredients').filter(item => item.isActive !== false))}</select></label><label>Expected quantity<input name="expected" type="number" min="0" step=".01" required></label><label>Actual count<input name="actual" type="number" min="0" step=".01" required></label><label>Count date<input name="date" type="date" value="${today()}" required></label></div>`, 'Save record', 'physical-count-modal');
+  else if (type === 'count') modal('Record physical count', `<div class="physical-count-form">
+    <p class="physical-count-guidance">Expected quantity is loaded from current system stock and locked. Saving this count immediately adjusts stock to the recorded actual quantity.</p>
+    <div class="form-grid">
+      <label>Ingredient<select name="ingredientId" required><option value="" selected disabled>Choose an ingredient</option>${options(all('ingredients').filter(item => item.isActive !== false))}</select></label>
+      <label>Expected quantity<input name="expected" type="number" min="0" step=".0001" placeholder="Select an ingredient" readonly required></label>
+      <label>Actual count<input name="actual" type="number" min="0" step=".0001" required></label>
+      <label>Count date<input name="date" type="date" value="${today()}" required></label>
+    </div>
+    <output class="physical-count-preview" data-count-variance data-state="empty" aria-live="polite">Select an ingredient and enter the actual quantity to preview variance.</output>
+  </div>`, 'Save record', 'physical-count-modal');
   else if (type === 'user') {
     if (!item) return toast('Select a user to view their details.', 'error');
     modal('User Details', `<section class="user-details-section">
@@ -3058,7 +3448,7 @@ async function openForm(type, item) {
   document.querySelector('#modalForm').dataset.type = type; if (item) document.querySelector('#modalForm').dataset.id = item.id;
 }
 function emptyReceivingLine() {
-  return { id: id('RCV'), ingredientId: '', quantity: '', unitCost: '', batchCode: '', expirationDate: '' };
+  return { id: `RCV-${crypto.randomUUID()}`, ingredientId: '', quantity: '', unitCost: '', batchCode: '', expirationDate: '' };
 }
 function readReceivingDraft(form) {
   state.receivingForm = {
@@ -3081,7 +3471,13 @@ function receivingLineMarkup(line, index) {
   const products = all('ingredients').filter(item => item.isActive !== false);
   const product = products.find(item => item.id === line.ingredientId);
   const expiryRequired = Boolean(product?.trackExpiry);
-  return `<fieldset class="receipt-line" data-line-index="${index}" data-id="${esc(line.id)}"><legend>Product ${index + 1}</legend>${state.receivingDraft.length > 1 ? `<button type="button" class="receipt-remove-line" data-action="remove-receiving-line" data-index="${index}" aria-label="Remove product ${index + 1}">Remove</button>` : ''}<div class="receipt-line-grid"><label>Product<select name="ingredient_${index}" data-field="ingredientId" required><option value="">Choose a product</option>${products.map(item => `<option value="${esc(item.id)}" ${line.ingredientId === item.id ? 'selected' : ''}>${esc(item.name)} · ${esc(item.unit)}</option>`).join('')}</select></label><label>Quantity received<input name="quantity_${index}" data-field="quantity" type="number" min=".0001" step=".0001" value="${esc(line.quantity)}" placeholder="0.00" required></label><label>Unit cost<input name="unitCost_${index}" data-field="unitCost" type="number" min="0" step=".01" value="${esc(line.unitCost)}" placeholder="₱ 0.00" required><span class="field-help">Per stocking unit</span></label><label>Lot / batch number<input name="batchCode_${index}" data-field="batchCode" value="${esc(line.batchCode)}" maxlength="100" placeholder="Printed on package"><span class="field-help">Optional</span></label><label>Expiration date<input name="expirationDate_${index}" data-field="expirationDate" type="date" value="${esc(line.expirationDate)}" ${expiryRequired ? 'required' : ''}><span class="field-help" data-expiration-help>${expiryRequired ? 'Required for this product' : 'Optional — add when available'}</span></label></div><div class="receipt-line-total">Line total <strong data-receipt-line-total>${money(Number(line.quantity || 0) * Number(line.unitCost || 0))}</strong></div></fieldset>`;
+  const batchCode = line.batchCode || `LOT-${manilaBusinessToday().replaceAll('-', '')}-${String(index + 1).padStart(2, '0')}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+  const receivedDate = state.receivingForm?.receivedDate || manilaBusinessToday();
+  const shelfLifeDays = Number(product?.shelfLifeDays || 0);
+  const calculatedExpiration = expiryRequired && shelfLifeDays > 0
+    ? (() => { const date = new Date(`${receivedDate}T12:00:00`); date.setDate(date.getDate() + shelfLifeDays); return localDateStr(date); })()
+    : line.expirationDate;
+  return `<fieldset class="receipt-line" data-line-index="${index}" data-id="${esc(line.id)}"><legend>Product ${index + 1}</legend>${state.receivingDraft.length > 1 ? `<button type="button" class="receipt-remove-line" data-action="remove-receiving-line" data-index="${index}" aria-label="Remove product ${index + 1}">Remove</button>` : ''}<div class="receipt-line-grid"><label>Product<select name="ingredient_${index}" data-field="ingredientId" required><option value="">Choose a product</option>${products.map(item => `<option value="${esc(item.id)}" ${line.ingredientId === item.id ? 'selected' : ''}>${esc(item.name)} · ${esc(item.unit)}</option>`).join('')}</select></label><label>Quantity received<input name="quantity_${index}" data-field="quantity" type="number" min=".0001" step=".0001" value="${esc(line.quantity)}" placeholder="0.00" required></label><label>Unit cost<input name="unitCost_${index}" data-field="unitCost" type="number" min="0" step=".01" value="${esc(line.unitCost)}" placeholder="₱ 0.00" required><span class="field-help">Per stocking unit</span></label><label>Lot / batch number<input name="batchCode_${index}" data-field="batchCode" value="${esc(batchCode)}" readonly><span class="field-help">Generated automatically</span></label><label>Expiration date<input name="expirationDate_${index}" data-field="expirationDate" type="date" value="${esc(calculatedExpiration)}" min="${esc(receivedDate)}" ${expiryRequired && shelfLifeDays > 0 ? 'readonly' : ''} ${expiryRequired ? 'required' : ''}><span class="field-help" data-expiration-help>${expiryRequired ? (shelfLifeDays > 0 ? `Set automatically from the ${shelfLifeDays}-day shelf life` : 'Enter a valid expiration date') : 'Optional — add when available'}</span></label></div><div class="receipt-line-total">Line total <strong data-receipt-line-total>${money(Number(line.quantity || 0) * Number(line.unitCost || 0))}</strong></div></fieldset>`;
 }
 function updateReceivingExpiryRequirements(form) {
   form.querySelectorAll('.receipt-line').forEach(line => {
@@ -3090,9 +3486,24 @@ function updateReceivingExpiryRequirements(form) {
     const expiration = line.querySelector('[data-field="expirationDate"]');
     const help = line.querySelector('[data-expiration-help]');
     const required = Boolean(product?.trackExpiry);
+    const shelfLifeDays = Number(product?.shelfLifeDays || 0);
+    const receivedDate = form.elements.receivedDate.value;
+    expiration.min = receivedDate || today();
+    if (required && shelfLifeDays > 0 && receivedDate) {
+      const date = new Date(`${receivedDate}T12:00:00`);
+      date.setDate(date.getDate() + shelfLifeDays);
+      expiration.value = localDateStr(date);
+      expiration.readOnly = true;
+    } else {
+      expiration.readOnly = shelfLifeDays > 0 && required;
+    }
     expiration.required = required;
     expiration.closest('label').classList.toggle('required-field', required);
-    help.textContent = required ? 'Required for this product' : 'Optional — add when available';
+    help.textContent = required
+      ? shelfLifeDays > 0
+        ? `Set automatically from the ${shelfLifeDays}-day shelf life`
+        : 'Enter a valid expiration date'
+      : 'Optional — add when available';
   });
 }
 function updateReceivingTotals(form) {
@@ -3116,7 +3527,7 @@ function renderReceivingModal() {
     ...(state.supplierOptions || []),
     ...all('ingredients').map(product => product.preferredSupplier).filter(Boolean)
   ])].sort((a, b) => a.localeCompare(b)).map(supplier => `<option value="${esc(supplier)}"></option>`).join('');
-  modal('Record delivery invoice', `<div class="receipt-form"><p class="receipt-intro">Enter the supplier invoice and each product lot received. This saves the invoice lines and updates stock together.</p><fieldset class="receipt-section"><legend>Invoice and delivery</legend><div class="form-grid receipt-header-grid"><label>Supplier name<input name="supplierName" list="receiptSupplierSuggestions" maxlength="200" value="${esc(header.supplierName || '')}" placeholder="Choose or type a supplier" required><datalist id="receiptSupplierSuggestions">${supplierOptions}</datalist></label><label>Invoice / receipt number<input name="invoiceNumber" maxlength="100" value="${esc(header.invoiceNumber || '')}" placeholder="e.g. INV-2026-001" required></label><label>Invoice date<input name="invoiceDate" type="date" value="${esc(header.invoiceDate || today())}" required></label><label>Date received<input name="receivedDate" type="date" value="${esc(header.receivedDate || today())}" required></label></div></fieldset><fieldset class="receipt-section"><legend>Products received</legend><div class="receipt-items-heading"><div><strong>Invoice items</strong><small>Add a separate line for each product or lot.</small></div>${noProducts ? '' : '<button type="button" class="ghost-btn compact-btn" data-action="add-receiving-line">+ Add product</button>'}</div>${noProducts ? '<p class="receipt-empty-hint">No products are available. Ask an Administrator to add products before recording a delivery.</p>' : `<div class="receipt-lines">${lines.map(receivingLineMarkup).join('')}</div>`}<div class="receipt-total"><span>Items subtotal <small>Quantity × unit cost, before tax or other charges</small></span><strong data-receipt-total>₱0.00</strong></div></fieldset><label class="receipt-note">Delivery note <span class="field-help">Optional — e.g. delivery condition or reference</span><textarea name="note" rows="2" maxlength="500" placeholder="Add a note about this delivery">${esc(header.note || '')}</textarea></label></div>`, 'Record delivery');
+  modal('Record delivery invoice', `<div class="receipt-form"><p class="receipt-intro">Enter the supplier invoice and each product lot received. The receipt number and delivery dates are generated and locked to the Manila business date.</p><fieldset class="receipt-section"><legend>Invoice and delivery</legend><div class="form-grid receipt-header-grid"><label>Supplier name<input name="supplierName" list="receiptSupplierSuggestions" maxlength="200" value="${esc(header.supplierName || '')}" placeholder="Choose or type a supplier" required><datalist id="receiptSupplierSuggestions">${supplierOptions}</datalist></label><label>Invoice / receipt number<input name="invoiceNumber" maxlength="100" value="${esc(header.invoiceNumber || '')}" readonly required></label><label>Invoice date<input name="invoiceDate" type="date" value="${esc(header.invoiceDate || manilaBusinessToday())}" max="${esc(manilaBusinessToday())}" readonly required></label><label>Date received<input name="receivedDate" type="date" value="${esc(header.receivedDate || manilaBusinessToday())}" max="${esc(manilaBusinessToday())}" readonly required></label></div></fieldset><fieldset class="receipt-section"><legend>Products received</legend><div class="receipt-items-heading"><div><strong>Invoice items</strong><small>Add a separate line for each product or lot.</small></div>${noProducts ? '' : '<button type="button" class="ghost-btn compact-btn" data-action="add-receiving-line">+ Add product</button>'}</div>${noProducts ? '<p class="receipt-empty-hint">No products are available. Ask an Administrator to add products before recording a delivery.</p>' : `<div class="receipt-lines">${lines.map(receivingLineMarkup).join('')}</div>`}<div class="receipt-total"><span>Items subtotal <small>Quantity × unit cost, before tax or other charges</small></span><strong data-receipt-total>₱0.00</strong></div></fieldset><label class="receipt-note">Delivery note <span class="field-help">Optional — e.g. delivery condition or reference</span><textarea name="note" rows="2" maxlength="500" placeholder="Add a note about this delivery">${esc(header.note || '')}</textarea></label></div>`, 'Record delivery');
   const form = document.querySelector('#modalForm');
   document.querySelector('.modal').classList.add('receiving-modal');
   form.dataset.type = 'receiving';
@@ -3132,7 +3543,9 @@ async function openReceivingForm() {
     console.error('Supplier suggestions could not be loaded.', error);
     return toast(friendlyRpcError(error), 'error');
   }
-  state.receivingForm = { supplierName: '', invoiceNumber: '', invoiceDate: today(), receivedDate: today(), note: '' };
+  const date = manilaBusinessToday();
+  const invoiceNumber = `INV-${date.replaceAll('-', '')}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  state.receivingForm = { supplierName: '', invoiceNumber, invoiceDate: date, receivedDate: date, note: '' };
   state.receivingDraft = [emptyReceivingLine()];
   renderReceivingModal();
 }
@@ -3335,7 +3748,7 @@ function openProductDeactivationForm(product) {
   form.dataset.id = product.id;
   form.dataset.lifecycleAction = 'deactivate';
 }
-async function runProductLifecycle(action, product, reason = '') {
+async function runProductLifecycle(action, product, reason = '', processingBackdrop = null) {
   try {
     const result = await window.supabaseRecord.productLifecycle(action, product.id, reason);
     if (action === 'delete') {
@@ -3359,6 +3772,7 @@ async function runProductLifecycle(action, product, reason = '') {
       .catch(error => showSaveRefreshWarning(['ingredients'], error));
   } catch (error) {
     console.error(`Product ${action} failed.`, error);
+    if (processingBackdrop?.isConnected) closeModal(true);
     const outcome = { delete: 'deleted', deactivate: 'deactivated', reactivate: 'reactivated' }[action];
     toast(error.message || `The product could not be ${outcome}.`, 'error');
   }
@@ -3403,14 +3817,63 @@ async function confirmProductLifecycleAction(action, productId) {
       modalClass: 'confirmation-modal product-lifecycle-confirmation'
     }
   );
-  if (confirmed) await runProductLifecycle(action, product);
+  if (!confirmed) return;
+  const actionLabel = deleting ? 'Deleting' : 'Reactivating';
+  const processingBackdrop = modal(
+    `${actionLabel} ${esc(product.name)}`,
+    `<p role="status" data-product-lifecycle-status>${actionLabel} product…</p>`,
+    null,
+    'product-lifecycle-modal product-lifecycle-processing',
+    'processing'
+  );
+  processingBackdrop.querySelectorAll('[data-action="close-modal"]').forEach(button => button.remove());
+  const status = processingBackdrop.querySelector('[data-product-lifecycle-status]');
+  const slowTimer = window.setTimeout(() => {
+    if (status?.isConnected) status.textContent = 'Still processing. Please wait…';
+  }, 5000);
+  try {
+    await runProductLifecycle(action, product, '', processingBackdrop);
+  } finally {
+    window.clearTimeout(slowTimer);
+  }
 }
 function viewRecord(type, item) {
   if (type === 'ingredient') {
     const movements = all('inventoryTransactions').filter(row => row.ingredientId === item.id).slice().reverse();
     const canSeeCost = ['Administrator', 'Manager', 'Inventory Clerk'].includes(state.role);
     const movementRows = movements.length ? movements.map(row => `<tr><td>${esc(row.date)}</td><td>${esc(row.type)}</td><td>${row.quantity} ${esc(item.unit)}</td>${canSeeCost ? `<td>${money(row.unitCost)}</td>` : ''}<td>${esc(row.user || '—')}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No stock movements recorded yet.</td></tr>`;
-    modal(item.name, `<div class="detail-grid"><div><small>Category</small><strong>${esc(item.category)}</strong></div><div><small>Stock status</small><strong>${stockStatus(item)}</strong></div><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} ${esc(item.unit)}</strong></div>${canSeeCost ? `<div><small>Cost per unit</small><strong>${money(item.cost)}</strong></div>` : ''}<div><small>Minimum stock</small><strong>${item.minimum} ${esc(item.unit)}</strong></div><div><small>Preferred supplier</small><strong>${esc(item.preferredSupplier || 'Not set')}</strong></div><div><small>Expiry tracking</small><strong>${item.trackExpiry ? 'Required on each receipt' : 'Not required'}</strong></div>${item.notes ? `<div class="full"><small>Product notes</small><strong>${esc(item.notes)}</strong></div>` : ''}<div class="full"><small>Stock movement history</small><div class="table-scroll"><table><thead><tr><th>Date</th><th>Type</th><th>Quantity</th>${canSeeCost ? '<th>Unit cost</th>' : ''}<th>User</th></tr></thead><tbody>${movementRows}</tbody></table></div></div></div>`, null, '', 'read-only');
+    const productBatches = all('inventoryBatches').filter(batch => batch.productId === item.id);
+    const batchSnapshot = inventoryBatchVisibility(productBatches);
+    const fifoRank = new Map(batchSnapshot.fifoOrder.map((batch, index) => [String(batch.id), index + 1]));
+    const fefoRank = new Map(batchSnapshot.fefoOrder.map((batch, index) => [String(batch.id), index + 1]));
+    const batchStatuses = new Map(batchSnapshot.classified.map(entry => [String(entry.batch.id), entry.expiry]));
+    const batchRows = batchSnapshot.orderedBatches.length
+      ? batchSnapshot.orderedBatches.map(batch => {
+        const status = batchStatuses.get(String(batch.id));
+        const statusClass = status.status === 'Expired' ? 'is-expired'
+          : status.status === 'Expiring soon' ? 'is-warning'
+            : ['Active', 'Depleted'].includes(status.status) ? 'is-healthy' : 'is-neutral';
+        const fifoPosition = fifoRank.get(String(batch.id));
+        const fefoPosition = fefoRank.get(String(batch.id));
+        const priority = fifoPosition
+          ? `<span class="inventory-priority-pill">FIFO #${fifoPosition}</span><span class="inventory-priority-pill is-fefo">FEFO #${fefoPosition}</span>`
+          : '<span class="inventory-priority-unavailable">Not eligible</span>';
+        const expirationDate = batch.expirationDate || batch.expiration_date;
+        const dateLabel = expirationDate
+          ? new Date(`${expirationDate}T12:00:00`).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+          : '—';
+        return `<tr><td><strong>${esc(inventoryBatchLabel(batch))}</strong></td><td>${formatStockQuantity(batch.quantityRemaining)} ${esc(item.unit)}</td><td>${esc(dateLabel)}</td><td>${esc(inventoryExpiryLabel(status.daysUntilExpiry))}</td><td><span class="inventory-batch-status ${statusClass}">${esc(status.status)}</span></td><td><div class="inventory-priority-list">${priority}</div></td></tr>`;
+      }).join('')
+      : '<tr><td colspan="6" class="empty-state">No batch or lot records are available for this product.</td></tr>';
+    const fifoFirst = batchSnapshot.fifoOrder[0];
+    const fefoFirst = batchSnapshot.fefoOrder[0];
+    const batchGuidance = `<div class="inventory-batch-guidance">
+      <div><small>FIFO usage order</small><strong>${fifoFirst ? `Use first: ${esc(inventoryBatchLabel(fifoFirst))}` : 'No active batch available'}</strong></div>
+      <div><small>FEFO expiry order</small><strong>${fefoFirst ? `Earliest expiry: ${esc(inventoryBatchLabel(fefoFirst))}` : 'No active batch available'}</strong></div>
+      <span>${batchSnapshot.expiringSoonCount} expiring soon · ${batchSnapshot.expiredCount} expired</span>
+    </div>`;
+    const batchTable = `<div class="table-scroll inventory-batch-table-scroll"><table class="inventory-batch-table"><thead><tr><th>Lot number</th><th>Quantity</th><th>Expiration date</th><th>Days remaining</th><th>Status</th><th>Recommended usage order</th></tr></thead><tbody>${batchRows}</tbody></table></div>`;
+    modal(item.name, `<div class="detail-grid"><div><small>Category</small><strong>${esc(item.category)}</strong></div><div><small>Stock status</small><strong>${stockStatus(item)}</strong></div><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} ${esc(item.unit)}</strong></div>${canSeeCost ? `<div><small>Cost per unit</small><strong>${money(item.cost)}</strong></div>` : ''}<div><small>Minimum stock</small><strong>${item.minimum} ${esc(item.unit)}</strong></div><div><small>Preferred supplier</small><strong>${esc(item.preferredSupplier || 'Not set')}</strong></div><div><small>Expiry tracking</small><strong>${item.trackExpiry ? 'Required on each receipt' : 'Not required'}</strong></div>${item.notes ? `<div class="full"><small>Product notes</small><strong>${esc(item.notes)}</strong></div>` : ''}<div class="full"><small>Batch and lot priority</small>${batchGuidance}${batchTable}</div><div class="full"><small>Stock movement history</small><div class="table-scroll"><table><thead><tr><th>Date</th><th>Type</th><th>Quantity</th>${canSeeCost ? '<th>Unit cost</th>' : ''}<th>User</th></tr></thead><tbody>${movementRows}</tbody></table></div></div></div>`, null, '', 'read-only');
   }
   if (type === 'recipe') {
     const canSeeCosts = ['Administrator', 'Manager'].includes(state.role);
@@ -3478,19 +3941,20 @@ function reservationCard(item, showRevenue = false) {
   const rateLabel = rate && revenueEstimate !== null
     ? `${money(revenueEstimate)} estimated buffet revenue`
     : 'No rate set';
-  const details = `<small><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small>Adults ${adultCount} · Senior/PWD ${seniorPwdCount} · Kids ${children} · Total guests ${totalGuests}${item.actualCovers == null ? '' : ` · Actual covers ${guestCount}`} · ${esc(item.table || 'Unassigned')}</small>${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest; keep the table occupied until they leave.</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}`;
+  const primaryGuestSummary = `${totalGuests} guest${totalGuests === 1 ? '' : 's'}${item.actualCovers == null ? '' : ` · ${guestCount} actual`}${item.table ? ` · ${esc(item.table)}` : ''}`;
+  const details = `<small class="reservation-card-time"><strong>${esc(item.time || 'Time not set')}${endTime ? `–${esc(endTime)}` : ''}</strong> · ${esc(reservationMealPeriod(item))}</small><span class="status ${reservationStatusClass(item.status)}">${esc(item.status)}</span><span class="tag">${item.type === 'Walk-in' ? 'Walk-in' : 'Reservation'}</span>${historyLabel}<b>${esc(reservationDisplayName(item))}</b><small class="reservation-card-primary-summary">${primaryGuestSummary}</small><span class="reservation-card-secondary-details">${packageItem && packageTier ? `<small>Package: ${esc(packageItem.name)} · ${esc(packageTier.name)} × ${Number(item.packagePaxCount || 0)} pax</small>` : ''}${heldTotal ? `<small>Held deposit: ${money(heldTotal)}</small>` : ''}${depositHistory}${item.seatedAt ? `<small>Seated ${new Date(item.seatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached</small>' : ''}${item.completedAt ? `<small>Completed ${new Date(item.completedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>` : ''}${shiftHint}${canAccessRevenue() && item.status === 'Completed' && !hasRevenue ? '<small class="report-disclaimer">No revenue entry yet</small>' : ''}${showRevenue && canAccessRevenue() ? `<em>${esc(rateLabel)}</em>` : ''}</span>`;
   const lifecycleActions = isPastReservation
     ? item.status === 'Seated'
       ? `${openBill
         ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>`
-        : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`}`
+        : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'aria-disabled="true" title="Open your cashier shift before creating a bill."'}>Open bill</button>`}`
       : ''
     : item.status === 'Pending'
     ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Confirmed" data-id="${esc(item.id)}">Confirm</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
     : item.status === 'Confirmed'
       ? `<button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Seated" data-id="${esc(item.id)}">Seat</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="No-show" data-id="${esc(item.id)}">No-show</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Cancelled" data-id="${esc(item.id)}">Cancel</button>`
       : item.status === 'Seated'
-        ? `${openBill ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>` : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`}<button type="button" class="reservation-confirm-btn" data-action="record-deposit" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before recording a deposit."'}>Record deposit</button><button type="button" class="reservation-confirm-btn" data-action="reservation-transition" data-transition="Completed" data-id="${esc(item.id)}" aria-describedby="reservation-complete-help-${esc(item.id)}" disabled title="A reservation is completed automatically when its linked bill is closed and fully settled.">Complete</button><small class="field-help" id="reservation-complete-help-${esc(item.id)}">Complete is available only through closing and settling the linked bill.</small>`
+        ? `${openBill ? `<button type="button" class="reservation-confirm-btn" data-action="open-bill" data-id="${esc(openBill.id)}">Open bill</button>` : `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'aria-disabled="true" title="Open your cashier shift before creating a bill."'}>Open bill</button>`}<button type="button" class="reservation-confirm-btn" data-action="record-deposit" data-id="${esc(item.id)}" ${hasOpenShift ? '' : 'aria-disabled="true" title="Open your cashier shift before recording a deposit."'}>Record deposit</button><small class="field-help" id="reservation-complete-help-${esc(item.id)}">Reservation completes automatically when its linked bill is closed and fully settled.</small>`
         : '';
   const depositActions = !isPastReservation && ['Administrator', 'Manager'].includes(state.role)
     ? heldDeposits.map(deposit => `<span class="deposit-action-group"><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="refund" data-id="${esc(deposit.id)}">Refund ${money(deposit.amount)}</button><button type="button" class="ghost-btn compact-btn" data-action="deposit-decision" data-decision="forfeit" data-id="${esc(deposit.id)}">Forfeit</button></span>`).join('')
@@ -3524,7 +3988,7 @@ function unresolvedBookingCard(row) {
   const openBillAction = row.resolution_label === 'Payable'
     ? `<button type="button" class="reservation-confirm-btn" data-action="open-unresolved-bill" data-id="${esc(reservationId)}">Open bill</button>`
     : status === 'Seated'
-      ? `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(reservationId)}" ${hasOpenShift ? '' : 'disabled title="Open your cashier shift before creating a bill."'}>Open bill</button>`
+      ? `<button type="button" class="reservation-confirm-btn" data-action="open-reservation-bill" data-id="${esc(reservationId)}" ${hasOpenShift ? '' : 'aria-disabled="true" title="Open your cashier shift before creating a bill."'}>Open bill</button>`
       : '';
   const resolveAction = canResolve && row.resolution_label !== 'Payable'
     ? `<button type="button" class="primary-btn compact-btn" data-action="resolve-stale-booking" data-id="${esc(reservationId)}">Resolve</button>`
@@ -3671,23 +4135,58 @@ function reservationForm(item = {}, defaults = {}) {
 function walkInTableOptions(partySize = 0, date = today(), time = null) {
   const now = new Date();
   const walkInTime = time || window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+  const walkInStart = window.CostTrackLogic.parseReservationTime(walkInTime);
   const reservations = all('reservations');
-  const tables = window.CostTrackLogic.isReservationTimeWithinOpenHours(walkInTime)
+  const suitableTables = window.CostTrackLogic.isReservationTimeWithinOpenHours(walkInTime)
     ? all('restaurantTables').filter(table =>
       table.status !== 'Needs cleaning'
       &&
       Number(table.seats) >= Number(partySize || 0)
       && !reservations.some(item => item.table === table.id && item.date <= date && item.status === 'Seated')
-      && !window.CostTrackLogic.tableHasReservationConflict(table.id, date, walkInTime, reservations, '', today())
     )
     : [];
+  const tables = suitableTables.filter(table =>
+    !window.CostTrackLogic.tableReservationConflict(table.id, date, walkInTime, reservations, '', today())
+  );
+  const optionMarkup = (table, conflict = null) => {
+    const details = [table.tableType, table.area].filter(value => value && value !== 'Unassigned').join(' · ');
+    const futureReservation = conflict ? null : reservations
+      .filter(item =>
+        item.table === table.id
+        && item.date === date
+        && ['Pending', 'Confirmed'].includes(item.status)
+        && walkInStart !== null
+        && (window.CostTrackLogic.parseReservationTime(item.time) ?? -1)
+          >= walkInStart + window.CostTrackLogic.MAX_TABLE_STAY_MINUTES
+      )
+      .sort((left, right) =>
+        (window.CostTrackLogic.parseReservationTime(left.time) ?? Number.MAX_SAFE_INTEGER)
+        - (window.CostTrackLogic.parseReservationTime(right.time) ?? Number.MAX_SAFE_INTEGER))[0];
+    const guest = booking => booking?.name || (booking?.type === 'Walk-in' ? 'Walk-in guest' : 'guest');
+    const reservationDetail = conflict
+      ? ` · Reserved for ${esc(guest(conflict))} at ${esc(conflict.time || 'the scheduled time')} — overlaps this seating`
+      : futureReservation
+        ? ` · Reserved at ${esc(futureReservation.time)}${futureReservation.name ? ` for ${esc(futureReservation.name)}` : ''}`
+        : '';
+    return `<option value="${esc(table.id)}" ${conflict ? 'disabled' : ''}>${esc(table.id)} · ${Number(table.seats)} seats${details ? ` · ${esc(details)}` : ''}${reservationDetail}</option>`;
+  };
+  const eligibleMarkup = tables.map(table => optionMarkup(table)).join('');
+  const conflictMarkup = suitableTables
+    .map(table => ({ table, conflict: window.CostTrackLogic.tableReservationConflict(table.id, date, walkInTime, reservations, '', today()) }))
+    .filter(item => item.conflict)
+    .map(item => optionMarkup(item.table, item.conflict))
+    .join('');
   return {
     tables,
-    markup: tables.map(table => {
-      const details = [table.tableType, table.area].filter(value => value && value !== 'Unassigned').join(' · ');
-      return `<option value="${esc(table.id)}">${esc(table.id)} · ${table.seats} seats${details ? ` · ${esc(details)}` : ''}</option>`;
-    }).join('')
+    markup: `${eligibleMarkup}${conflictMarkup}`
   };
+}
+function walkInReservationWarning(tableId, booking) {
+  const guest = booking?.name || (booking?.type === 'Walk-in' ? 'Walk-in guest' : 'guest');
+  if (booking?.status === 'Seated') {
+    return `Table ${tableId} is occupied by ${guest}${booking.time ? ` at ${booking.time}` : ''}. Choose another table.`;
+  }
+  return `Table ${tableId} is reserved for ${guest} at ${booking?.time || 'the scheduled time'}; assigning this walk-in may cause an overlap.`;
 }
 function walkInForm() {
   const now = new Date();
@@ -3696,7 +4195,7 @@ function walkInForm() {
     return toast('Walk-ins must start early enough to finish by closing. The latest seating time is 7:00 PM.', 'error');
   }
   const available = walkInTableOptions();
-  const tableMessage = `<small class="field-help walk-in-table-message ${available.tables.length ? 'is-hidden' : ''}">No available tables are currently suitable for this party.</small>`;
+  const tableMessage = `<small class="field-help walk-in-table-message ${available.tables.length ? 'is-hidden' : ''}">No safe table is currently suitable for this party and seating window. Conflicting reservations are shown as disabled options.</small>`;
   const counts = [
     ['Adults', 'adults'],
     ['Senior / PWD', 'seniorPwdCount'],
@@ -3706,7 +4205,7 @@ function walkInForm() {
     `<label>${label}<input name="${name}" type="number" min="0" max="1000" step="1" value="0" required></label>`
   ).join('');
   const hasOpenShift = all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id);
-  modal('Record walk-in', `<div class="form-grid">${countFields}<label>Table<select name="table" required ${available.tables.length ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label></div><div class="form-grid"><label>Guest name (optional)<input name="name" maxlength="160" value="Walk-in guest" autocomplete="name"></label><label>Phone (optional)<input name="phone" type="tel" maxlength="40" autocomplete="tel"></label><label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="email"></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Seated time and meal period are recorded automatically. Tables must fit the total covers and have no overlapping two-hour booking.</small></label><div class="walk-in-billing-action"><button type="submit" class="primary-btn" data-walk-in-action="seat-and-open"${available.tables.length && hasOpenShift ? '' : ' disabled'}>Seat and open bill</button><small class="field-help">${hasOpenShift ? 'The bill opens with these same head counts and remains unpaid until you close it.' : 'An open cashier shift is required to create the bill. You can seat only, or open a shift and try again.'}</small></div>`, 'Seat only');
+  modal('Record walk-in', `<div class="form-grid">${countFields}<label>Table<select name="table" required ${available.markup ? '' : 'disabled'}><option value="">Select table</option>${available.markup}</select>${tableMessage}</label></div><div class="form-grid"><label>Guest name (optional)<input name="name" maxlength="160" value="Walk-in guest" autocomplete="name"></label><label>Phone (optional)<input name="phone" type="tel" maxlength="40" autocomplete="tel"></label><label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="email"></label></div><label>Notes<textarea name="notes"></textarea><small class="field-help">Seated time and meal period are recorded automatically. Tables must fit the total covers and have no overlapping two-hour booking.</small></label><div class="walk-in-billing-action"><button type="submit" class="primary-btn" data-walk-in-action="seat-and-open"${available.tables.length && hasOpenShift ? '' : ' disabled'}>Seat and open bill</button><small class="field-help">${hasOpenShift ? 'The bill opens with these same head counts and remains unpaid until you close it.' : 'An open cashier shift is required to create the bill. You can seat only, or open a shift and try again.'}</small></div>`, 'Seat only');
   const form = document.querySelector('#modalForm');
   form.dataset.type = 'walk-in';
   form.dataset.walkInKey = id('WALKIN');
@@ -3724,11 +4223,11 @@ function refreshWalkInTables(form) {
   const available = walkInTableOptions(partySize);
   const selected = select.value;
   select.innerHTML = `<option value="">${available.tables.length ? 'Select table' : 'No available table'}</option>${available.markup}`;
-  select.disabled = !available.tables.length;
+  select.disabled = !available.markup;
   if (available.tables.some(table => table.id === selected)) select.value = selected;
   const message = select.parentElement.querySelector('.walk-in-table-message');
   if (message) {
-    message.textContent = 'No available tables are currently suitable for this party and seating window.';
+    message.textContent = 'No safe table is currently suitable for this party and seating window. Conflicting reservations are shown as disabled options.';
     message.classList.toggle('is-hidden', Boolean(available.tables.length));
   }
   form.dataset.hasAvailableTable = String(Boolean(available.tables.length));
@@ -3752,16 +4251,6 @@ function reportHasClosedBills(rows) {
     || Number(item.net_revenue ?? item.revenue ?? 0) > 0
   );
 }
-function dailyRevenueTable(rows) {
-  const totals = window.CostTrackLogic.closedBillRevenueTotals(rows);
-  const headers = ['Business date', 'Closed bills', 'Net revenue', 'Discounts', 'Customers', 'Voided bills', 'Voided amount'];
-  const tableRows = rows.map(item => {
-    const zeroRevenue = Number(item.net_revenue || 0) === 0;
-    return `<tr class="${zeroRevenue ? 'zero-revenue' : ''}"><td>${esc(item.period)}</td><td>${Number(item.closed_bill_count || 0)}</td><td>${money(item.net_revenue)}</td><td>${money(item.discount_total)}</td><td>${Number(item.customers_served || 0)}</td><td>${Number(item.voided_bill_count || 0)}</td><td>${money(item.voided_bill_amount)}</td></tr>`;
-  });
-  const footer = ['Total', totals.closedBillCount, money(totals.netRevenue), money(totals.discountTotal), totals.customersServed, totals.voidedBillCount, money(totals.voidedBillAmount)];
-  return reportTable(headers, tableRows, 'No closed bills in this range.', footer);
-}
 function dailyRevenueChart(rows) {
   return reportChartPanel(
     'reportRevenueChart',
@@ -3776,51 +4265,24 @@ function dailyRevenueChart(rows) {
     'No closed bills in this range.'
   );
 }
-async function loadRevenuePageReport() {
-  const [start, end] = dateRangeBounds();
-  if (!start || !end || !canAccessRevenue() || !state.user || revenuePageReportPending) return;
-  const key = reportDataKey('daily_revenue', start, end, 1);
-  if (reportServerData[key]) return;
-  const requestId = ++revenuePageReportRequest;
-  const requestVersion = reportDataVersion;
-  revenuePageReportPending = true;
-  try {
-    const data = await window.supabaseRecord.posRevenueReport(
-      'daily_revenue', start, end, 'day', state.reportIncludeWaste, 1, 100
-    );
-    if (requestVersion === reportDataVersion) reportServerData[key] = data;
-  } catch (error) {
-    if (requestVersion === reportDataVersion) {
-      reportServerData[key] = { error: friendlyRpcError(error) };
-    }
-  } finally {
-    if (requestId === revenuePageReportRequest) {
-      revenuePageReportPending = false;
-      if (state.view === 'revenue') render();
-    }
-  }
-}
 function revenuePage() {
   if (!canAccessRevenue()) return revenueAccessDenied();
-  const [rangeStart, rangeEnd] = dateRangeBounds();
-  const invalidDateRange = state.dateRange === 'custom' && (!rangeStart || !rangeEnd || rangeStart > rangeEnd);
-  const key = reportDataKey('daily_revenue', rangeStart, rangeEnd, 1);
-  const server = rangeStart && rangeEnd ? reportServerData[key] : null;
-  const data = server && !server.error ? server : {};
-  const currentRows = data.rows || [];
-  const totals = window.CostTrackLogic.closedBillRevenueTotals(currentRows);
-  const records = rangeStart && rangeEnd ? revenueRecords().filter(item => item.business_date >= rangeStart && item.business_date <= rangeEnd) : [];
-  const legacyRows = records.slice().sort((a, b) => String(b.business_date || '').localeCompare(String(a.business_date || ''))).slice(0, 30).map(item => {
-    return `<tr class="${item.status === 'Voided' ? 'is-voided' : ''}"><td><strong>${esc(item.business_date)}</strong></td><td>${esc(item.meal_period)}</td><td>${Number(item.adult_customers || 0)}</td><td>${Number(item.child_customers || 0)}</td><td>${Number(item.senior_pwd_customers || 0)}</td><td>${Number(item.total_customers || 0)}</td><td class="numeric">${money(item.total_revenue)}</td><td><span class="status">${esc(item.status || 'Archived')}</span></td></tr>`;
-  }).join('') || '<tr><td colspan="8" class="empty-table">No archived legacy revenue records in this range.</td></tr>';
-  const reportContent = invalidDateRange
-    ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>'
-    : !server
-      ? '<div class="panel loading-state" role="status">Loading closed-bill revenue…</div>'
-      : server.error
-        ? `<div class="panel error-state" role="alert">${esc(server.error)} <button class="ghost-btn" data-action="retry-revenue-report">Retry</button></div>`
-        : `<div class="report-disclaimer">Current revenue includes only closed POS bills. Voids, deposits, and legacy revenue records are excluded.</div><div class="metric-grid">${metric('Net revenue', money(totals.netRevenue), '₱', 'green-icon', 'Closed POS bills')}${metric('Closed bills', totals.closedBillCount, '▤', 'purple-icon', 'Counted once')}${metric('Voided amount', money(totals.voidedBillAmount), '₱', 'red-icon', 'Separate from revenue')}</div><div class="report-chart-grid">${dailyRevenueChart(currentRows)}</div><div class="panel report-table-panel">${dailyRevenueTable(currentRows)}</div>`;
-  return `${pageHeader('Closed POS bills', 'Revenue', 'Current revenue uses the same closed-bill report as Reports. Legacy records remain separate for historical reference.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar revenue-report-toolbar">${dateRangeControls()}</div>${reportContent}<details class="panel legacy-revenue-archive"><summary>Legacy revenue archive · excluded from current totals</summary><p class="panel-subtitle">Historical revenue_records are preserved for reference only and excluded from reports.</p><div class="table-scroll"><table><thead><tr><th>Date</th><th>Meal period</th><th>Adults</th><th>Children</th><th>Senior/PWD</th><th>Customers</th><th>Archived amount</th><th>Legacy status</th></tr></thead><tbody>${legacyRows}</tbody></table></div></details>`;
+  const data = revenueDashboardData || {};
+  const loadingLabel = revenueDashboardError
+    ? 'Unavailable'
+    : revenueDashboardLoading || !revenueDashboardData ? 'Loading…' : null;
+  const errorPanel = revenueDashboardError
+    ? `<div class="panel error-state" role="alert">${esc(revenueDashboardError)} <button class="ghost-btn" data-action="retry-revenue-dashboard">Retry</button></div>`
+    : '';
+  return `${pageHeader('Revenue management', 'Management Revenue Dashboard', 'Today’s operating revenue snapshot from closed POS bills.', '<button class="ghost-btn" data-action="retry-revenue-dashboard">Refresh</button> <button class="primary-btn" data-view="reports">Open Reports & Analytics</button>')}
+    ${errorPanel}
+    <div class="metric-grid revenue-dashboard-kpis">
+      ${metric("Today's Revenue", loadingLabel || money(data.today_revenue), '₱', 'green-icon', 'Closed bills · Manila business date')}
+      ${metric('Closed Bills', loadingLabel || Number(data.closed_bill_count || 0).toLocaleString(), '▤', 'purple-icon', 'Today only')}
+      ${metric('Average Check', loadingLabel || money(data.average_check), '↗', 'orange-icon', 'Net revenue per closed bill')}
+      ${metric('Voided Amount', loadingLabel || money(data.voided_bill_amount), '!', 'red-icon', `${Number(data.voided_bill_count || 0).toLocaleString()} voided bills · excluded from revenue`)}
+    </div>
+    <div class="panel revenue-dashboard-guidance"><strong>Reporting workspace</strong><p>Use Reports & Analytics for date ranges, revenue trends, daily breakdowns, customer and shift analysis, and bill-level detail. This dashboard is a current-day summary, not a second reporting view.</p><button class="text-btn" data-view="reports">View detailed reports →</button></div>`;
 }
 function reservationsPage() {
   const reservations = all('reservations');
@@ -3893,10 +4355,19 @@ function reservationsPage() {
     .map(table => {
     const availability = liveTableAvailability(table, today(), reservations);
     const booking = availability.primaryBooking;
-    const statusClass = availability.status === 'Available' ? 'status-good' : availability.status === 'Reserved' ? 'status-low' : 'status-out';
+    const statusClass = availability.status === 'Available'
+      ? 'status-good'
+      : availability.status === 'Reserved Later' ? 'status-low' : 'status-out';
     const detail = booking
-      ? `${booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest')} · ${booking.date < today() ? `${reservationDateLabel(booking.date)} · ` : ''}${booking.time || 'Time not set'}`
+      ? booking.status === 'Seated'
+        ? `${booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest')} · ${booking.date < today() ? `${reservationDateLabel(booking.date)} · ` : ''}${booking.time || 'Time not set'}`
+        : `Reserved at ${booking.time || 'Time not set'}${booking.name ? ` · ${booking.name}` : ''}`
       : `${Number(table.seats)} seats`;
+    const availabilityHint = availability.status === 'Reserved Later' && table.status !== 'Needs cleaning'
+      ? '<small>A two-hour walk-in can finish before this reservation.</small>'
+      : availability.status === 'Reserved Active'
+        ? '<small>Protected: a new two-hour walk-in would overlap.</small>'
+        : '';
     const unresolvedBooking = booking?.status === 'Seated'
       ? unresolvedRows.find(row => row.reservation_id === booking.id && row.table_id === table.id)
       : null;
@@ -3907,7 +4378,7 @@ function reservationsPage() {
     const unresolvedLink = pastSeatedBooking
       ? `<small class="reservation-stay-warning">Past seated booking remains ${unresolvedBooking?.resolution_label === 'Payable' ? 'payable' : 'unresolved'}; a timer does not free the table.</small><button type="button" class="text-btn" data-action="show-unresolved-booking" data-id="${esc(booking.id)}">View unresolved booking</button>`
       : '';
-    return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${warning}${unresolvedLink}</div>`;
+    return `<div class="table-status-card"><strong>${esc(table.id)}</strong><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span><small>${esc(detail)}</small>${availabilityHint}${warning}${unresolvedLink}</div>`;
   }).join('');
   const listLabel = unresolvedMode ? 'Unresolved bookings' : newWebsiteMode ? 'New website reservations · last 24 hours' : state.reservationDateFilter === 'Upcoming' ? 'Upcoming reservations' : state.reservationDateFilter === 'Today' ? "Today's reservations" : reservationDateLabel(selectedDate);
   const unresolvedBadge = state.unresolvedBookings.loading
@@ -3940,7 +4411,7 @@ function tableManagementPage() {
   const counts = tables.reduce((result, table) => {
     result[availabilityByTable.get(table.id).status] += 1;
     return result;
-  }, { Available: 0, Reserved: 0, Occupied: 0, 'Needs cleaning': 0 });
+  }, { Available: 0, 'Reserved Later': 0, 'Reserved Active': 0, Occupied: 0, 'Needs cleaning': 0 });
   const matchingTables = tables.filter(table => {
     const availability = availabilityByTable.get(table.id);
     const capacity = Number(table.seats);
@@ -3951,7 +4422,10 @@ function tableManagementPage() {
       || (capacityFilter === 'Medium' && capacity >= 3 && capacity <= 4)
       || (capacityFilter === 'Large' && capacity >= 5);
     const bookingText = availability.bookings.map(item => `${item.name || ''} ${item.email || ''} ${item.phone || ''}`).join(' ');
-    return (statusFilter === 'All' || availability.status === statusFilter)
+    const statusMatches = statusFilter === 'All'
+      || (statusFilter === 'Reserved' && availability.status.startsWith('Reserved '))
+      || availability.status === statusFilter;
+    return statusMatches
       && capacityMatches
       && (typeFilter === 'All' || tableType === typeFilter)
       && (areaFilter === 'All' || area === areaFilter)
@@ -3960,15 +4434,17 @@ function tableManagementPage() {
   const canManage = ['Administrator', 'Manager'].includes(state.role);
   const capacityOptions = ['All', 'Small', 'Medium', 'Large']
     .map(value => `<option value="${value}" ${capacityFilter === value ? 'selected' : ''}>${value === 'All' ? 'All capacities' : value === 'Small' ? '1–2 seats' : value === 'Medium' ? '3–4 seats' : '5+ seats'}</option>`).join('');
-  const statusOptions = ['All', 'Available', 'Reserved', 'Occupied', 'Needs cleaning']
-    .map(value => `<option value="${value}" ${statusFilter === value ? 'selected' : ''}>${value === 'All' ? 'All statuses' : value}</option>`).join('');
+  const statusOptions = [['All', 'All statuses'], ['Available', 'Available'], ['Reserved', 'Reserved (all)'], ['Reserved Later', 'Reserved Later'], ['Reserved Active', 'Reserved Active'], ['Occupied', 'Occupied'], ['Needs cleaning', 'Needs cleaning']]
+    .map(([value, label]) => `<option value="${value}" ${statusFilter === value ? 'selected' : ''}>${label}</option>`).join('');
   const typeOptions = ['All', 'Family', 'Casual', 'Unassigned']
     .map(value => `<option value="${value}" ${typeFilter === value ? 'selected' : ''}>${value === 'All' ? 'All table types' : value === 'Unassigned' ? 'Unclassified' : value}</option>`).join('');
   const areaOptions = ['All', 'Front', 'Back', 'Unassigned']
     .map(value => `<option value="${value}" ${areaFilter === value ? 'selected' : ''}>${value === 'All' ? 'All areas' : value === 'Unassigned' ? 'Area not set' : value}</option>`).join('');
   const renderCard = table => {
     const availability = availabilityByTable.get(table.id);
-    const statusClass = availability.status === 'Available' ? 'status-good' : availability.status === 'Reserved' ? 'status-low' : 'status-out';
+    const statusClass = availability.status === 'Available'
+      ? 'status-good'
+      : availability.status === 'Reserved Later' ? 'status-low' : 'status-out';
     const tableType = table.tableType || 'Unassigned';
     const area = table.area || 'Unassigned';
     const booking = availability.primaryBooking;
@@ -3991,7 +4467,7 @@ function tableManagementPage() {
       ? `<small class="reservation-stay-warning">Past seated booking remains ${staleResolution?.resolution_label === 'Payable' ? 'payable' : 'unresolved'}; the two-hour timer does not free this table.</small>`
       : '';
     const bookingDetails = booking
-      ? `<div class="table-booking-details"><strong>${esc(booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest'))}</strong><span>${esc(bookingDate)}${esc(booking.time || 'Time not set')}${bookingEnd ? `–${esc(bookingEnd)}` : ''} · ${Number(booking.guests || 0)} guest${Number(booking.guests || 0) === 1 ? '' : 's'}</span><button type="button" class="text-btn" data-action="edit-reservation" data-id="${esc(booking.id)}">Open booking</button>${staleBookingNotice}${availability.stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest. Keep this table occupied until they leave.</small>' : ''}${availability.bookingWindowEnded ? '<small class="reservation-stay-warning" role="status">The two-hour window passed. Confirm whether the guest arrived, or update the booking status.</small>' : ''}</div>`
+      ? `<div class="table-booking-details"><strong>${esc(booking.name || (booking.type === 'Walk-in' ? 'Walk-in guest' : 'Guest'))}</strong><span>${esc(bookingDate)}${booking.status === 'Seated' ? '' : 'Reserved at '}${esc(booking.time || 'Time not set')}${bookingEnd ? `–${esc(bookingEnd)}` : ''} · ${Number(booking.guests || 0)} guest${Number(booking.guests || 0) === 1 ? '' : 's'}</span><button type="button" class="text-btn" data-action="edit-reservation" data-id="${esc(booking.id)}">Open booking</button>${staleBookingNotice}${availability.stayLimitReached ? '<small class="reservation-stay-warning" role="status">Two-hour limit reached — notify the guest. Keep this table occupied until they leave.</small>' : ''}${availability.bookingWindowEnded ? '<small class="reservation-stay-warning" role="status">The two-hour window passed. Confirm whether the guest arrived, or update the booking status.</small>' : ''}</div>`
       : '<small class="table-empty-detail">No active booking assigned for this date</small>';
     const additionalBookings = availability.bookings.length > (booking ? 1 : 0)
       ? `<small class="table-additional-bookings">+${availability.bookings.length - (booking ? 1 : 0)} more booking${availability.bookings.length - (booking ? 1 : 0) === 1 ? '' : 's'} on this date</small>`
@@ -4002,7 +4478,7 @@ function tableManagementPage() {
       : historyExists
         ? '<button type="button" class="ghost-btn compact-btn" disabled title="Tables linked to reservation history cannot be deleted">In use</button>'
         : `<button type="button" class="danger-btn compact-btn" data-action="delete-table" data-id="${esc(table.id)}">Delete</button>`;
-    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${canManage && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>` : ''}${staleBooking || canManage ? historyControl : ''}</div></article>`;
+    return `<article class="table-management-card"><div class="table-management-card-heading"><div><small>TABLE</small><h2>${esc(table.id)}</h2></div><span class="status ${statusClass}" data-table-availability="${availability.status}">${availability.status}</span></div><div class="table-card-tags"><span class="table-type-badge">${esc(tableType === 'Unassigned' ? 'Unclassified' : tableType)}</span>${areaBadge}</div><p class="table-capacity">${Number(table.seats)} seats</p>${bookingDetails}${additionalBookings}<div class="table-management-actions">${assignable ? `<button type="button" class="primary-btn compact-btn" data-action="assign-table" data-id="${esc(table.id)}">Assign booking</button>` : ''}${['Administrator', 'Manager', 'Receptionist'].includes(state.role) && table.status === 'Needs cleaning' && availability.status === 'Needs cleaning' ? `<button type="button" class="primary-btn compact-btn" data-action="mark-table-clean" data-id="${esc(table.id)}">Mark available</button>` : ''}${canManage ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-table" data-id="${esc(table.id)}">Edit</button>` : ''}${staleBooking || canManage ? historyControl : ''}</div></article>`;
   };
   const cards = matchingTables.length
     ? `<div class="table-management-grid">${matchingTables.map(renderCard).join('')}</div>`
@@ -4013,9 +4489,55 @@ function tableManagementPage() {
     ? `<span class="table-management-header-actions"><button type="button" class="ghost-btn" data-action="apply-table-layout" ${layoutReady ? 'disabled' : ''}>${layoutReady ? 'Layout configured' : 'Set up restaurant layout'}</button><button type="button" class="primary-btn" data-action="open-table-form">+ Add table</button></span>`
     : '';
 
-  return `${pageHeader('Front of house', 'Table management', 'Manage the client’s seating layout and see availability derived from reservations and walk-ins.', headerActions)}<div class="table-management-summary"><div class="table-summary-card"><small>All tables</small><strong>${tables.length}</strong></div><div class="table-summary-card"><small>Total seats</small><strong>${totalSeats}</strong></div><div class="table-summary-card status-good"><small>Available</small><strong>${counts.Available}</strong></div><div class="table-summary-card status-low"><small>Reserved</small><strong>${counts.Reserved}</strong></div><div class="table-summary-card status-out"><small>Occupied</small><strong>${counts.Occupied}</strong></div><div class="table-summary-card status-out"><small>Needs cleaning</small><strong>${counts['Needs cleaning']}</strong></div></div><section class="panel table-management-panel"><div class="table-management-toolbar"><label>Date<input type="date" min="${today()}" value="${esc(date)}" data-table-date></label><label>Status<select data-table-status>${statusOptions}</select></label><label>Capacity<select data-table-capacity>${capacityOptions}</select></label><label>Table type<select data-table-type>${typeOptions}</select></label><label>Area<select data-table-area>${areaOptions}</select></label><label class="table-management-search">Search<input id="tableManagementSearch" type="search" value="${esc(state.tableManagementQuery)}" placeholder="Table or guest" aria-label="Search tables or guests"></label></div><p class="table-management-note">Availability is derived from active reservations and walk-ins. A table set to Needs cleaning stays unavailable until a Manager or Administrator marks it available. Reservations occupy two-hour windows; a seated party remains Occupied until completion.</p>${cards}</section>`;
+  return `${pageHeader('Front of house', 'Table management', 'Manage the client’s seating layout and see availability derived from reservations and walk-ins.', headerActions)}<div class="table-management-summary"><div class="table-summary-card"><small>All tables</small><strong>${tables.length}</strong></div><div class="table-summary-card"><small>Total seats</small><strong>${totalSeats}</strong></div><div class="table-summary-card status-good"><small>Available</small><strong>${counts.Available}</strong></div><div class="table-summary-card status-low"><small>Reserved later</small><strong>${counts['Reserved Later']}</strong></div><div class="table-summary-card status-out"><small>Reserved active</small><strong>${counts['Reserved Active']}</strong></div><div class="table-summary-card status-out"><small>Occupied</small><strong>${counts.Occupied}</strong></div><div class="table-summary-card status-out"><small>Needs cleaning</small><strong>${counts['Needs cleaning']}</strong></div></div><section class="panel table-management-panel"><div class="table-management-toolbar"><label>Date<input type="date" min="${today()}" value="${esc(date)}" data-table-date></label><label>Status<select data-table-status>${statusOptions}</select></label><label>Capacity<select data-table-capacity>${capacityOptions}</select></label><label>Table type<select data-table-type>${typeOptions}</select></label><label>Area<select data-table-area>${areaOptions}</select></label><label class="table-management-search">Search<input id="tableManagementSearch" type="search" value="${esc(state.tableManagementQuery)}" placeholder="Table or guest" aria-label="Search tables or guests"></label></div><p class="table-management-note">Availability is derived from reservations and walk-ins. Reserved Later tables may be used only when a standard two-hour walk-in ends by the reservation time. Reserved Active tables are protected from new seating; a seated party remains Occupied until completion.</p>${cards}</section>`;
 }
-async function applyRestaurantTableLayout() {
+async function markTableAvailable(table, button) {
+  if (!['Administrator', 'Manager', 'Receptionist'].includes(state.role)) {
+    return toast('You do not have permission to update table cleaning status.', 'error');
+  }
+  if (table.status !== 'Needs cleaning') return toast('This table no longer needs cleaning.', 'error');
+  if (state.role === 'Receptionist' && (!state.user || !supabaseSyncEnabled)) {
+    return toast('Cloud data is not ready. Please wait for the initial load.', 'error');
+  }
+  if (state.role === 'Receptionist' && !navigator.onLine) {
+    return toast('You are offline. Reconnect to save.', 'error');
+  }
+  const restoreButton = setButtonBusy(button, 'Saving…');
+  if (!restoreButton) return;
+  try {
+    if (state.role === 'Receptionist') {
+      const collections = ['restaurantTables'];
+      setSyncState('syncing');
+      rememberLocalChange('restaurantTables', table.id);
+      const outcome = await window.CostTrackLogic.saveThenRefresh(async () => {
+        await window.supabaseRecord.markTableAvailable(table.id);
+        const updated = { ...table, status: 'Available' };
+        upsertLocalRecord('restaurantTables', updated);
+        invalidateUnresolvedBookings();
+        invalidateReportData();
+        setPostSaveSyncState();
+        render();
+        return updated;
+      }, () => refreshSavedCollections(collections), error => showSaveRefreshWarning(collections, error));
+      if (!outcome.saved) throw new Error('The table cleaning update did not complete.');
+    } else {
+      await save('restaurantTables', all('restaurantTables').map(item =>
+        item.id === table.id ? { ...item, status: 'Available' } : item
+      ));
+    }
+    toast(`${table.id} marked available.`);
+  } catch (error) {
+    console.error('Table cleaning status update failed.', error);
+    if (state.role === 'Receptionist') {
+      setSyncState(navigator.onLine ? 'error' : 'offline', error.message);
+      render();
+    }
+    toast(friendlyRpcError(error), 'error');
+  } finally {
+    restoreButton();
+  }
+}
+async function applyRestaurantTableLayout(button) {
   if (!['Administrator', 'Manager'].includes(state.role)) {
     return toast('Only Managers and Administrators can set up the restaurant layout.', 'error');
   }
@@ -4040,6 +4562,8 @@ async function applyRestaurantTableLayout() {
     title: 'Apply table layout',
     confirmLabel: 'Apply layout'
   })) return;
+  const restoreButton = setButtonBusy(button, 'Applying layout…');
+  if (button && !restoreButton) return;
   const updates = new Map(plan.updates.map(table => [String(table.id), table]));
   const nextTables = [
     ...tables.map(table => updates.get(String(table.id)) || table),
@@ -4051,6 +4575,8 @@ async function applyRestaurantTableLayout() {
     console.error('Restaurant table layout setup failed.', error);
     toast(friendlyRpcError(error), 'error');
     return;
+  } finally {
+    restoreButton?.();
   }
   toast(`Layout ready: ${plan.updates.length} existing table${plan.updates.length === 1 ? '' : 's'} updated, ${capacityChanges} capacities changed, and ${plan.additions.length} added.${extraCount ? ` ${extraCount} extra table${extraCount === 1 ? ' remains' : 's remain'} Unclassified.` : ''}`, 'success');
 }
@@ -4275,6 +4801,19 @@ async function seatAndOpenWalkIn(form) {
   const now = new Date();
   const date = today();
   const time = window.CostTrackLogic.formatReservationTime(now.getHours() * 60 + now.getMinutes());
+  const reservations = all('reservations');
+  const occupiedBooking = reservations.find(item =>
+    item.table === data.table && item.date <= date && item.status === 'Seated'
+  );
+  const conflictingBooking = window.CostTrackLogic.tableReservationConflict(
+    data.table, date, time, reservations, '', today()
+  );
+  const blockingBooking = occupiedBooking || conflictingBooking;
+  if (blockingBooking) {
+    restoreWalkInSubmit(form);
+    toast(walkInReservationWarning(data.table, blockingBooking), 'error');
+    return;
+  }
   try {
     const result = await window.supabaseRecord.posSeatAndOpenWalkIn({
       customerName: String(data.name || '').trim() || 'Walk-in guest',
@@ -4346,6 +4885,30 @@ async function handleSubmit(form, submitter = null) {
   }[type];
   if (requiredAction && !window.CostTrackLogic.canPerformInventoryAction(state.role, requiredAction)) {
     return toast('You do not have permission to perform this action.', 'error');
+  }
+  if (type === 'count') {
+    const stockItem = ingredient(data.ingredientId);
+    if (!stockItem) return toast('Select an available ingredient before recording a count.', 'error');
+    const expected = Number(form.elements.expected.value);
+    const currentStock = Number(stockItem.stock);
+    const actual = Number(data.actual);
+    if (!Number.isFinite(expected) || expected !== currentStock) {
+      return toast('Expected stock has changed. Select the ingredient again before recording the count.', 'error');
+    }
+    if (!Number.isFinite(actual) || actual < 0) {
+      return toast('Enter a valid actual quantity of zero or more.', 'error');
+    }
+    const variance = actual - expected;
+    if (variance !== 0) {
+      const quantityLabel = value => `${new Intl.NumberFormat('en-PH', { maximumFractionDigits: 4 }).format(value)} ${stockItem.unit}`;
+      const direction = variance < 0 ? 'shortage' : 'overage';
+      const confirmed = await confirmInApp(
+        `Expected stock is ${quantityLabel(expected)} and the counted quantity is ${quantityLabel(actual)} (${direction} of ${quantityLabel(Math.abs(variance))}). Recording this count immediately adjusts system stock to the counted quantity.`,
+        { title: 'Confirm count variance', confirmLabel: 'Record and adjust stock' }
+      );
+      if (!confirmed) return;
+    }
+    data.expected = expected;
   }
   if (['shift', 'shift-close', 'cash-movement', 'reservation-deposit', 'deposit-decision'].includes(type)) {
     try {
@@ -4657,6 +5220,36 @@ async function handleSubmit(form, submitter = null) {
     return;
   }
   if (type === 'waste') {
+    if (data.wasteType === 'prepared') {
+      const record = {
+        id: form.dataset.preparedWasteId || (form.dataset.preparedWasteId = id('PREP-WASTE')),
+        dishName: data.dishName.trim(),
+        productionBatchId: data.productionBatchId || null,
+        quantity: Number(data.preparedQuantity),
+        reason: data.preparedReason,
+        date: data.preparedDate,
+        notes: data.preparedNotes.trim()
+      };
+      try {
+        await save('preparedFoodWasteLogs', [...all('preparedFoodWasteLogs'), record]);
+        delete form.dataset.preparedWasteId;
+        state.modalDirty = false;
+        closeModal(true);
+        toast('Prepared-food waste recorded. Ingredient inventory was not changed.');
+        render();
+      } catch (error) {
+        console.error('Prepared-food waste entry could not be saved.', error);
+        const submit = document.querySelector('#modalForm .modal-submit');
+        if (submit) {
+          submit.disabled = false;
+          submit.classList.remove('is-loading');
+          submit.removeAttribute('aria-busy');
+          submit.textContent = 'Record waste';
+        }
+        toast(friendlyRpcError(error), 'error');
+      }
+      return;
+    }
     const record = {
       id: form.dataset.wasteId || (form.dataset.wasteId = id('WASTE')),
       ingredientId: data.ingredientId,
@@ -4736,13 +5329,16 @@ async function handleSubmit(form, submitter = null) {
       return toast('Choose an available table with enough seats for this party.', 'error');
     }
     const reservations = all('reservations');
-    const hasUnresolvedSeating = reservations.some(item =>
+    const occupiedBooking = reservations.find(item =>
       item.table === selectedTable.id && item.date <= date && item.status === 'Seated'
     );
-    if (hasUnresolvedSeating
-      || window.CostTrackLogic.tableHasReservationConflict(selectedTable.id, date, time, reservations, '', today())) {
+    const conflictingBooking = window.CostTrackLogic.tableReservationConflict(
+      selectedTable.id, date, time, reservations, '', today()
+    );
+    const blockingBooking = occupiedBooking || conflictingBooking;
+    if (blockingBooking) {
       restoreModalSubmit(form, 'Record walk-in');
-      return toast('That table is no longer available for a two-hour walk-in. Choose another table.', 'error');
+      return toast(walkInReservationWarning(selectedTable.id, blockingBooking), 'error');
     }
     const record = {
       id: id('RS'),
@@ -4991,11 +5587,13 @@ async function handleSubmit(form, submitter = null) {
       minimum: Number(data.minimum),
       preferredSupplier: data.preferredSupplier.trim(),
       trackExpiry: form.elements.trackExpiry.checked,
+      shelfLifeDays: data.shelfLifeDays ? Number(data.shelfLifeDays) : null,
       notes: data.notes.trim()
     };
     await save('ingredients', editId
       ? all('ingredients').map(item => item.id === editId ? { ...item, ...record } : item)
       : [...all('ingredients'), record]);
+    successMessage = editId ? 'Product updated successfully.' : 'Product added successfully.';
   } else {
     const collection = collections[type];
     if (!collection) return toast('This record type cannot be saved from the browser.', 'error');
@@ -5013,7 +5611,7 @@ async function handleSubmit(form, submitter = null) {
   toast(successMessage);
   render();
 }
-async function transitionReservation(itemId, nextStatus) {
+async function transitionReservation(itemId, nextStatus, button = null) {
   const reservation = all('reservations').find(item => item.id === itemId);
   if (!reservation) return toast('Reservation not found.', 'error');
   if (nextStatus === 'Completed') {
@@ -5023,6 +5621,10 @@ async function transitionReservation(itemId, nextStatus) {
   const valid = { Pending: ['Confirmed', 'Cancelled'], Confirmed: ['Seated', 'No-show', 'Cancelled'], Seated: ['Completed'] };
   if (!valid[reservation.status]?.includes(nextStatus)) return toast('That reservation status transition is not valid.', 'error');
   if (nextStatus === 'Confirmed') return openReservationConfirmation(reservation);
+  if (nextStatus === 'Cancelled' && !await confirmInApp(`Cancel the reservation for ${reservation.name}?`, {
+    title: 'Cancel reservation',
+    confirmLabel: 'Cancel reservation'
+  })) return;
   if (nextStatus === 'No-show' && !await confirmInApp(`Mark ${reservation.name} as a no-show?`, {
     title: 'Mark as no-show',
     confirmLabel: 'Mark no-show'
@@ -5035,6 +5637,8 @@ async function transitionReservation(itemId, nextStatus) {
     if (!Number.isInteger(actualCovers) || actualCovers < 1) return toast('Actual covers must be a positive whole number.', 'error');
   }
   const updated = { ...reservation, status: nextStatus, actualCovers, seatedAt: nextStatus === 'Seated' ? new Date().toISOString() : reservation.seatedAt, completedAt: nextStatus === 'Completed' ? new Date().toISOString() : reservation.completedAt };
+  const restoreButton = setButtonBusy(button, nextStatus === 'Seated' ? 'Seating guest…' : `Marking ${nextStatus.toLowerCase()}…`);
+  if (button && !restoreButton) return;
   try {
     await saveRecord('reservations', updated);
     if (reservation.table) {
@@ -5048,6 +5652,8 @@ async function transitionReservation(itemId, nextStatus) {
     render();
   } catch (error) {
     toast(friendlyRpcError(error), 'error');
+  } finally {
+    restoreButton?.();
   }
 }
 function openReservationConfirmation(reservation) {
@@ -5628,20 +6234,18 @@ document.addEventListener('click', event => {
     return;
   }
   if (action === 'open-table-form') return tableForm();
-  if (action === 'apply-table-layout') return applyRestaurantTableLayout();
+  if (action === 'apply-table-layout') return applyRestaurantTableLayout(actionElement);
   const table = all('restaurantTables').find(item => item.id === actionElement.dataset.id);
   if (!table) return toast('This table is no longer available. Reload and try again.', 'error');
   if (action === 'mark-table-clean') {
-    if (!['Administrator', 'Manager'].includes(state.role)) return toast('Only Managers and Administrators can update table cleaning status.', 'error');
+    if (!['Administrator', 'Manager', 'Receptionist'].includes(state.role)) return toast('You do not have permission to update table cleaning status.', 'error');
     if (table.status !== 'Needs cleaning') return toast('This table no longer needs cleaning.', 'error');
-    save('restaurantTables', all('restaurantTables').map(item => item.id === table.id ? { ...item, status: 'Available' } : item))
-      .then(() => { toast(`${table.id} marked available.`); render(); })
-      .catch(error => toast(friendlyRpcError(error), 'error'));
+    void markTableAvailable(table, actionElement);
     return;
   }
   if (action === 'edit-table') return tableForm(table);
   if (action === 'assign-table') return tableAssignmentForm(table);
-  return deleteRecord('table', table.id);
+  return deleteRecord('table', table.id, actionElement);
 });
 document.addEventListener('click', async event => {
   const cashTender = event.target.closest('[data-cash-tender]');
@@ -5746,11 +6350,17 @@ document.addEventListener('click', async event => {
   }
   if (action === 'deposit-history') return showReservationDepositHistory(actionElement.dataset.id);
   if (action === 'resolve-stale-booking') return staleBookingResolutionForm(actionElement.dataset.id);
-  if (action === 'refresh-unresolved-bookings') {
-    invalidateUnresolvedBookings();
-    return loadUnresolvedBookings(true);
+  if (action === 'refresh-unresolved-bookings' || action === 'retry-unresolved-bookings') {
+    if (action === 'refresh-unresolved-bookings') invalidateUnresolvedBookings();
+    const restoreButton = setButtonBusy(actionElement, action === 'retry-unresolved-bookings' ? 'Retrying…' : 'Refreshing…');
+    if (!restoreButton) return;
+    try {
+      await loadUnresolvedBookings(true);
+    } finally {
+      restoreButton();
+    }
+    return;
   }
-  if (action === 'retry-unresolved-bookings') return loadUnresolvedBookings(true);
   if (action === 'show-unresolved-booking') {
     state.reservationFilter = 'Unresolved';
     state.reservationTypeFilter = 'All';
@@ -5767,6 +6377,9 @@ document.addEventListener('click', async event => {
   if (action === 'open-reservation-bill') {
     const reservation = all('reservations').find(item => item.id === actionElement.dataset.id);
     if (!reservation || reservation.status !== 'Seated') return toast('Only seated reservations can open a bill.', 'error');
+    if (!all('shifts').some(shift => shift.status === 'Open' && shift.openedBy === state.user?.id)) {
+      return toast('Open your cashier shift before creating a bill.', 'error');
+    }
     if (all('posBills').some(bill => bill.reservationId === reservation.id && bill.status === 'Open')) {
       return toast('This reservation already has an open bill.', 'error');
     }
@@ -5796,12 +6409,30 @@ document.addEventListener('click', async event => {
       title: 'Deactivate buffet rate',
       confirmLabel: 'Deactivate'
     })) return;
-    save('buffetRates', all('buffetRates').map(item => item.id === rate.id ? { ...item, isActive: false } : item))
-      .then(() => { toast('Buffet rate deactivated.'); render(); })
-      .catch(() => {});
+    const button = event.target.closest('[data-action]');
+    const restoreButton = setButtonBusy(button, 'Deactivating…');
+    if (!restoreButton) return;
+    try {
+      await save('buffetRates', all('buffetRates').map(item =>
+        item.id === rate.id ? { ...item, isActive: false } : item
+      ));
+      toast('Buffet rate deactivated.');
+      render();
+    } catch (error) {
+      console.error('Buffet rate could not be deactivated.', error);
+      toast(friendlyRpcError(error), 'error');
+    } finally {
+      restoreButton();
+    }
   }
-  if (action === 'reservation-transition') return transitionReservation(event.target.closest('[data-action]').dataset.id, event.target.closest('[data-action]').dataset.transition);
-  if (action === 'delete-reservation') return deleteRecord('reservation', event.target.closest('[data-action]').dataset.id);
+  if (action === 'reservation-transition') {
+    const button = event.target.closest('[data-action]');
+    return transitionReservation(button.dataset.id, button.dataset.transition, button);
+  }
+  if (action === 'delete-reservation') {
+    const button = event.target.closest('[data-action]');
+    return deleteRecord('reservation', button.dataset.id, button);
+  }
 });
 document.addEventListener('click', event => {
   const category = event.target.closest('[data-recipe-category]')?.dataset.recipeCategory;
@@ -5894,7 +6525,7 @@ document.addEventListener('click', event => {
     const map = { ingredient: 'ingredients', recipe: 'recipes', user: 'users' };
     const record = all(map[type]).find(item => item.id === action.dataset.id);
     if (record) type === 'recipe' ? openRecipeForm(record) : openForm(type, record);
-  } else if (name.startsWith('delete-')) deleteRecord(name.replace('delete-', ''), action.dataset.id);
+  } else if (name.startsWith('delete-')) deleteRecord(name.replace('delete-', ''), action.dataset.id, action);
 });
 document.addEventListener('submit', async event => {
   const formId = event.target.getAttribute('id');
@@ -6050,6 +6681,10 @@ document.addEventListener('change', event => {
 document.addEventListener('change', event => {
   const wasteForm = event.target.closest('#modalForm[data-type="waste"]');
   if (wasteForm) {
+    if (event.target.matches('input[type="radio"][name="wasteType"]')) {
+      setWasteFormType(wasteForm);
+      state.modalDirty = true;
+    }
     updateWasteFormPreview(wasteForm);
     if (event.target.matches('input[type="radio"][name="reason"]')) {
       state.modalDirty = true;
@@ -6057,6 +6692,25 @@ document.addEventListener('change', event => {
       wasteForm.querySelector('[data-waste-reason-group]')?.classList.remove('has-error');
       wasteForm.querySelector('[data-waste-reason-error]').hidden = true;
       wasteForm.querySelectorAll('input[type="radio"][name="reason"]').forEach(radio => radio.removeAttribute('aria-invalid'));
+    }
+    if (event.target.matches('input[type="radio"][name="preparedReason"]')) {
+      state.modalDirty = true;
+      wasteForm.elements.preparedNotes.required = event.target.value === 'Other';
+      wasteForm.querySelector('[data-prepared-waste-reason-group]')?.classList.remove('has-error');
+      wasteForm.querySelector('[data-prepared-waste-reason-error]').hidden = true;
+      wasteForm.querySelectorAll('input[type="radio"][name="preparedReason"]').forEach(radio => radio.removeAttribute('aria-invalid'));
+    }
+    if (event.target.matches('[name="productionBatchId"]')) {
+      const selectedOption = event.target.selectedOptions[0];
+      if (selectedOption?.dataset.dishName) {
+        wasteForm.elements.dishName.value = selectedOption.dataset.dishName;
+      }
+      wasteForm.elements.dishName.readOnly = Boolean(selectedOption?.dataset.dishName);
+    }
+    if (event.target.matches('[name="preparedDate"]')) {
+      wasteForm.elements.productionBatchId.value = '';
+      wasteForm.elements.dishName.readOnly = false;
+      refreshPreparedWasteBatches(wasteForm, event.target.value);
     }
   }
   if (event.target.closest('#modalForm[data-type="receiving"]')) {
@@ -6107,10 +6761,17 @@ document.addEventListener('change', event => {
   }
 });
 document.addEventListener('change', event => {
-  if (event.target.matches('[data-revenue-range]')) {
-    state.revenueRange = event.target.value;
-    render();
-  }
+  const form = event.target.closest('#modalForm[data-type="count"]');
+  if (!form || !event.target.matches('[name="ingredientId"]')) return;
+  const selectedProduct = ingredient(event.target.value);
+  const expectedStock = Number(selectedProduct?.stock);
+  form.elements.expected.value = Number.isFinite(expectedStock) ? String(expectedStock) : '';
+  form.elements.actual.value = '';
+  updatePhysicalCountPreview(form);
+});
+document.addEventListener('input', event => {
+  const form = event.target.closest('#modalForm[data-type="count"]');
+  if (form && event.target.matches('[name="actual"]')) updatePhysicalCountPreview(form);
 });
 document.addEventListener('change', event => {
   const form = event.target.closest('#modalForm[data-type="reservation"]');
@@ -6148,8 +6809,8 @@ async function syncWithSupabase() {
   const collectionsByRole = {
     Administrator: KEYS,
     Manager: KEYS.filter(key => key !== 'users'),
-    'Inventory Clerk': ['ingredients', 'inventoryTransactions', 'inventoryBatches', 'physicalCounts', 'notifications'],
-    'Chef / Kitchen Staff': ['ingredients', 'recipes', 'productionLogs', 'wasteLogs', 'notifications'],
+    'Inventory Clerk': ['ingredients', 'inventoryTransactions', 'inventoryBatches', 'physicalCounts', 'wasteLogs', 'preparedFoodWasteLogs', 'notifications'],
+    'Chef / Kitchen Staff': ['ingredients', 'recipes', 'productionLogs', 'wasteLogs', 'preparedFoodWasteLogs', 'notifications'],
     Receptionist: ['reservations', 'restaurantTables', 'buffetRates', 'chargeItems', 'packageTiers', 'discounts', 'posSettings', 'shifts', 'cashMovements', 'posBills', 'billLines', 'billPayments', 'reservationDeposits', 'billApprovals', 'notifications']
   };
   const collections = collectionsByRole[state.role] || [];
@@ -6280,13 +6941,16 @@ document.querySelector('#discardSyncButton').classList.add('is-hidden');
 document.addEventListener('click', event => {
   const target = event.target;
   const popoverTrigger = target.closest('[data-popover-trigger]');
-  const viewLink = target.closest('#sidebar [data-view], .breadcrumb [data-view]');
+  const viewLink = target.closest('[data-view]');
   const groupToggle = target.closest('#sidebar [data-action="toggle-nav-group"]');
   const shellAction = target.closest('[data-shell-action]');
   const createAction = target.closest('[data-create-action]');
   const notificationItem = target.closest('[data-notification-key]');
   const notificationMarkAll = target.closest('[data-notification-mark-all]');
   const notificationViewAll = target.closest('[data-notification-view-all]');
+  const notificationCenterFilter = target.closest('[data-notification-center-filter]');
+  const notificationCenterPageButton = target.closest('[data-notification-center-page]');
+  const notificationCenterMarkAll = target.closest('[data-notification-center-mark-all]');
   const paletteOption = target.closest('[data-palette-index]');
 
   if (!target.closest('.shell-popover-wrap')) closeShellPopovers(false);
@@ -6318,6 +6982,24 @@ document.addEventListener('click', event => {
   if (createAction) {
     event.preventDefault();
     runCreateAction(createAction.dataset.createAction);
+    return;
+  }
+  if (notificationCenterFilter) {
+    event.preventDefault();
+    state.notificationCenterFilter = notificationCenterFilter.dataset.notificationCenterFilter;
+    state.notificationCenterPage = 1;
+    render();
+    return;
+  }
+  if (notificationCenterPageButton) {
+    event.preventDefault();
+    state.notificationCenterPage = Number(notificationCenterPageButton.dataset.notificationCenterPage);
+    render();
+    return;
+  }
+  if (notificationCenterMarkAll) {
+    event.preventDefault();
+    markAllNotificationsRead();
     return;
   }
   if (notificationMarkAll) {
@@ -6379,6 +7061,19 @@ document.addEventListener('input', event => {
   if (event.target.id !== 'paletteSearch') return;
   state.paletteSelection = 0;
   updatePaletteResults(event.target.value);
+});
+document.addEventListener('input', event => {
+  if (!event.target.matches('[data-notification-center-search]')) return;
+  state.notificationCenterQuery = event.target.value;
+  state.notificationCenterPage = 1;
+  render();
+  requestAnimationFrame(() => {
+    const search = document.querySelector('[data-notification-center-search]');
+    if (search) {
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }
+  });
 });
 document.addEventListener('keydown', event => {
   const palette = document.querySelector('#commandPaletteRoot .command-palette');
@@ -6710,7 +7405,7 @@ function clearFieldErrors(form) {
   form.querySelectorAll('.has-error').forEach(label => label.classList.remove('has-error'));
   form.querySelectorAll('.field-error').forEach(error => error.remove());
   form.querySelectorAll('[aria-invalid="true"]').forEach(control => control.removeAttribute('aria-invalid'));
-  form.querySelectorAll('[data-waste-reason-error]').forEach(error => { error.hidden = true; });
+  form.querySelectorAll('[data-waste-reason-error],[data-prepared-waste-reason-error]').forEach(error => { error.hidden = true; });
 }
 
 function normaliseRenderedStatuses() {
@@ -6718,8 +7413,8 @@ function normaliseRenderedStatuses() {
     const value = element.textContent.trim().toLowerCase();
     const tableAvailability = element.dataset.tableAvailability;
     const kind = tableAvailability === 'Available' ? 'good'
-      : tableAvailability === 'Reserved' ? 'low'
-        : tableAvailability === 'Occupied' ? 'out'
+      : ['Reserved', 'Reserved Later'].includes(tableAvailability) ? 'low'
+        : ['Reserved Active', 'Occupied', 'Needs cleaning'].includes(tableAvailability) ? 'out'
             : value.includes('cancel') || value.includes('expired') || value.includes('deactivated') || value.includes('inactive')
               ? 'out' : value.includes('pending') ? 'low' : value.includes('out') ? 'out' : value.includes('low') || value.includes('short') ? 'low' : value.includes('over') ? 'over' : 'healthy';
     element.classList.remove('status-good', 'status-low', 'status-out', 'status-over', 'healthy', 'low', 'out', 'over');
@@ -6734,6 +7429,13 @@ function render() {
   reportCharts = [];
   reportChartSpecs = [];
   if (!state.user || !state.role) return;
+  if (state.view === 'notifications' && !['Administrator', 'Manager'].includes(state.role)) {
+    document.querySelector('#sidebar').innerHTML = nav();
+    renderShellChrome();
+    document.querySelector('#pageCrumb').textContent = 'Access denied';
+    app.innerHTML = '<section class="notification-center-page"><div class="panel error-state" role="alert"><strong>Access denied.</strong><p>The Notification Center is available to Administrators and Managers only.</p></div></section>';
+    return;
+  }
   if (state.view === 'users' && state.role !== 'Administrator') {
     document.querySelector('#sidebar').innerHTML = nav();
     renderShellChrome();
@@ -6759,31 +7461,24 @@ function render() {
   }
   document.querySelector('#sidebar').innerHTML = nav();
   renderShellChrome();
-  const moduleNames = { dashboard: 'Overview', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', cashier: 'Front of House', shifts: 'Front of House', approvals: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', 'charge-catalog': 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management' };
-  const pageNames = { dashboard: 'Dashboard', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', 'charge-catalog': 'Charge catalog', users: 'User Management', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management', cashier: 'Cashier', shifts: 'Shifts', approvals: 'Approvals' };
+  const moduleNames = { dashboard: 'Overview', notifications: 'System Management', ingredients: 'Inventory Management', receiving: 'Inventory Management', counts: 'Inventory Management', recipes: 'Kitchen Operations', production: 'Kitchen Operations', waste: 'Kitchen Operations', reservations: 'Front of House', calendar: 'Front of House', tables: 'Front of House', cashier: 'Front of House', shifts: 'Front of House', approvals: 'Front of House', revenue: 'Revenue Management', rates: 'Revenue Management', 'charge-catalog': 'Revenue Management', reports: 'Analytics & Reports', users: 'System Management' };
+  const pageNames = { dashboard: 'Dashboard', notifications: 'Notifications', ingredients: 'Ingredients', receiving: 'Receiving', recipes: 'Recipes', production: 'Buffet production', waste: 'Waste logs', counts: 'Physical count', reports: 'Reports & analytics', revenue: 'Revenue Tracking', rates: 'Buffet rates', 'charge-catalog': 'Charge catalog', users: 'User Management', reservations: 'Reservations', calendar: 'Tables / Calendar', tables: 'Table management', cashier: 'Cashier', shifts: 'Shifts', approvals: 'Approvals' };
   const activeGroup = sidebarGroups.find(group => group.items.some(([view]) => view === state.view));
   const crumbLabel = state.view === 'dashboard' ? 'Overview' : (moduleNames[state.view] || 'Workspace');
   const crumbTarget = activeGroup?.items.find(([view]) => canAccess(view))?.[0] || 'dashboard';
   document.querySelector('.breadcrumb').innerHTML = `<a class="crumb-parent" href="#${crumbTarget}" data-view="${crumbTarget}">${esc(crumbLabel)}</a><span aria-hidden="true">›</span><strong id="pageCrumb" tabindex="-1">${esc(pageNames[state.view] || state.view)}</strong>`;
-  const pages = { dashboard: roleDashboard, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), 'charge-catalog': chargeCatalogPage, cashier: cashierPage, shifts: shiftsPage, approvals: approvalsPage, users: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
+  const pages = { dashboard: roleDashboard, notifications: notificationCenterPage, ingredients: ingredientCardsPage, receiving: () => receivingPage(), recipes: recipeCardsPage, production: productionBoardPage, waste: () => logsPage('waste'), counts: () => countsPage(), reports: reportsPage, revenue: revenuePage, rates: () => ratesPage(), 'charge-catalog': chargeCatalogPage, cashier: cashierPage, shifts: shiftsPage, approvals: approvalsPage, users: () => usersPage(), reservations: reservationsPage, calendar: calendarPage, tables: tableManagementPage };
   const renderPage = pages[state.view];
   if (!renderPage) {
     console.error(`No page renderer is registered for "${state.view}".`);
     app.innerHTML = '<div class="panel error-state" role="alert">This module is unavailable. Please return to the dashboard or contact your administrator.</div>';
     return;
   }
-  const revenueScrollLeft = state.view === 'revenue'
-    ? document.querySelector('.revenue-records-panel .table-scroll')?.scrollLeft || 0
-    : null;
   const approvalsScrollLeft = state.view === 'approvals'
     ? document.querySelector('.table-panel .table-scroll')?.scrollLeft || 0
     : null;
   try {
     app.innerHTML = renderPage();
-    if (revenueScrollLeft !== null) {
-      const tableScroll = app.querySelector('.revenue-records-panel .table-scroll');
-      if (tableScroll) tableScroll.scrollLeft = revenueScrollLeft;
-    }
     if (approvalsScrollLeft !== null) {
       const tableScroll = app.querySelector('.table-panel .table-scroll');
       if (tableScroll) tableScroll.scrollLeft = approvalsScrollLeft;
@@ -6793,8 +7488,7 @@ function render() {
     app.innerHTML = `<div class="panel error-state" role="alert">Could not load ${esc(pageNames[state.view] || state.view)}. Please refresh the page. Check the browser console for details.</div>`;
     return;
   }
-  if (state.view === 'dashboard' && canAccessRevenue()) loadRevenueDashboard();
-  if (state.view === 'revenue') loadRevenuePageReport();
+  if (['dashboard', 'revenue'].includes(state.view) && canAccessRevenue()) loadRevenueDashboard();
   if (state.view === 'reservations' && state.unresolvedFocusId) {
     const target = [...app.querySelectorAll('[data-unresolved-reservation]')]
       .find(element => element.dataset.id === state.unresolvedFocusId);
@@ -6806,7 +7500,7 @@ function render() {
     }
   }
   if (state.view === 'calendar') initializeReservationCalendar();
-  if (['reports', 'revenue'].includes(state.view)) initializeReportCharts();
+  if (state.view === 'reports') initializeReportCharts();
   if (state.view === 'reports') loadReportData();
   configureRealtimeSubscriptions().catch(error => {
     console.error('Realtime subscription setup failed.', error);
@@ -6816,8 +7510,6 @@ function render() {
     loadProductionBoard();
   }
   if (state.view === 'users' && state.role === 'Administrator') loadUserInvitations();
-  const revenueRange = document.querySelector('[data-revenue-range]');
-  if (revenueRange) revenueRange.value = state.revenueRange;
   normaliseRenderedStatuses();
   if (state.view === 'ingredients') {
     const toolbar = document.querySelector('.catalog-toolbar');
@@ -6859,7 +7551,7 @@ function actions(type, itemId, item = null) {
   return `<div class="row-actions">${viewable ? `<button type="button" data-action="view-${type}" data-id="${itemId}" aria-label="${labels.view}"><span class="tooltip">${labels.view}</span>${icon('view')}</button>` : ''}${editable ? `<button type="button" data-action="edit-${type}" data-id="${itemId}" aria-label="${labels.edit}"><span class="tooltip">${labels.edit}</span>${icon('edit')}</button>` : ''}${lifecycleAction}</div>`;
 }
 
-async function deleteRecord(type, itemId) {
+async function deleteRecord(type, itemId, button = null) {
   if (type === 'ingredient') return manageProductLifecycle(itemId);
   const mapping = { ingredient: 'ingredients', recipe: 'recipes', reservation: 'reservations', table: 'restaurantTables', transaction: 'inventoryTransactions', production: 'productionLogs', waste: 'wasteLogs', count: 'physicalCounts', user: 'users' };
   const key = mapping[type]; if (!key) return;
@@ -6878,12 +7570,17 @@ async function deleteRecord(type, itemId) {
     title: 'Delete record',
     confirmLabel: 'Delete'
   })) return;
+  const restoreButton = setButtonBusy(button, 'Deleting…');
+  if (button && !restoreButton) return;
   try {
     if (type === 'reservation') await removeRecord(key, itemId);
     else await save(key, all(key).filter(item => item.id !== itemId));
   } catch (error) {
-    if (type === 'reservation') toast(friendlyRpcError(error), 'error');
+    console.error(`Could not delete ${type}.`, error);
+    toast(friendlyRpcError(error), 'error');
     return;
+  } finally {
+    restoreButton?.();
   }
   toast(`${name} deleted`);
   render();
@@ -6940,6 +7637,7 @@ async function loadRevenueDashboard(force = false) {
   const requestId = ++revenueDashboardRequest;
   revenueDashboardLoading = true;
   revenueDashboardError = '';
+  if (force && ['dashboard', 'revenue'].includes(state.view)) render();
   try {
     const data = await window.supabaseRecord.posRevenueReport('dashboard');
     if (requestId === revenueDashboardRequest) revenueDashboardData = data;
@@ -6958,7 +7656,7 @@ async function loadRevenueDashboard(force = false) {
         loadRevenueDashboard(true);
         return;
       }
-      if (state.view === 'dashboard') render();
+      if (['dashboard', 'revenue'].includes(state.view)) render();
     }
   }
 }
@@ -7089,7 +7787,7 @@ function reportsPage() {
     reportRequestKey = '';
   }
   const key = reportDataKey(state.reportTab, start, end); const server = reportServerData[key]; const data = server && !server.error ? server : {};
-  const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; const invalidDateRange = state.dateRange === 'custom' && (!start || !end || start > end); const loading = !server && !invalidDateRange; const error = server?.error; let headers = []; let tableRows = []; let tableFooter = []; let tableEmptyMessage = 'No data in this range.'; let charts = ''; let kpis = '';
+  const rows = data.rows || data.by_ingredient || data.valuation_by_category || []; const invalidDateRange = state.dateRange === 'custom' && (!start || !end || start > end); const loading = !server && !invalidDateRange; const error = server?.error; let headers = []; let tableRows = []; let tableFooter = []; let tableEmptyMessage = 'No data in this range.'; let charts = ''; let kpis = ''; let additionalWasteReport = '';
   if (state.reportTab === 'food_cost') { headers = ['Period', 'Revenue', 'Food cost', 'Food cost %']; tableRows = rows.map(item => `<tr><td>${esc(item.period)}</td><td>${money(item.revenue)}</td><td>${money(item.food_cost)}</td><td class="${item.food_cost_pct > 32 ? 'negative' : 'positive'}">${item.food_cost_pct == null ? '—' : `${Number(item.food_cost_pct).toFixed(1)}%`}</td></tr>`); charts = reportChartPanel('reportFoodCostChart', 'Food cost over time', 'Food cost percentage by reporting period.', rows, 'food_cost_pct', 'period', 'line', '%', !reportHasClosedBills(rows), 'No closed bills in this range.'); kpis = `${metric('Food cost %', rows.some(item => item.revenue) ? `${(rows.reduce((sum, item) => sum + Number(item.food_cost || 0), 0) / Math.max(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0), 1) * 100).toFixed(1)}%` : '—', '♨', 'orange-icon', 'Target 32%')}${metric('Closed-bill revenue', money(rows.reduce((sum, item) => sum + Number(item.revenue || 0), 0)), '₱', 'green-icon', rows.some(item => item.revenue) ? 'Closed bills only' : 'No closed-bill revenue in this range')}`; }
   else if (['daily_revenue', 'revenue_trend'].includes(state.reportTab)) {
     headers = [state.reportTab === 'daily_revenue' ? 'Business date' : 'Period', 'Closed bills', 'Net revenue', 'Discounts', 'Customers', 'Voided bills', 'Voided amount'];
@@ -7123,14 +7821,50 @@ function reportsPage() {
     headers = ['Ingredient', 'Quantity', 'Waste cost'];
     tableRows = (data.by_ingredient || []).map(item => `<tr><td>${esc(item.name)}</td><td>${item.quantity}</td><td>${money(item.waste_cost)}</td></tr>`);
     const monetaryChartsAllowed = canAccessRevenue();
+    const preparedWasteRecords = start && end && start <= end
+      ? all('preparedFoodWasteLogs').filter(item => item.date >= start && item.date <= end)
+      : [];
+    const preparedDishTotals = new Map();
+    const preparedWasteByDay = new Map();
+    preparedWasteRecords.forEach(item => {
+      const dishKey = String(item.dishName || '').trim().toLowerCase();
+      if (dishKey) {
+        const dish = preparedDishTotals.get(dishKey) || { name: String(item.dishName).trim(), portions: 0, entries: 0 };
+        dish.portions += Number(item.quantity || 0);
+        dish.entries += 1;
+        preparedDishTotals.set(dishKey, dish);
+      }
+      if (item.date) {
+        const day = preparedWasteByDay.get(item.date) || { period: item.date, portions: 0 };
+        day.portions += Number(item.quantity || 0);
+        preparedWasteByDay.set(item.date, day);
+      }
+    });
+    const preparedDishRows = [...preparedDishTotals.values()]
+      .sort((a, b) => b.portions - a.portions || a.name.localeCompare(b.name))
+      .map(item => `<tr><td>${esc(item.name)}</td><td>${Number(item.portions.toFixed(4))} portions</td><td>${item.entries}</td></tr>`);
+    const preparedTrendRows = [...preparedWasteByDay.values()].sort((a, b) => a.period.localeCompare(b.period));
+    const combinedWasteByDay = new Map();
+    all('wasteLogs').filter(item => start && end && item.date >= start && item.date <= end)
+      .forEach(item => combinedWasteByDay.set(item.date, (combinedWasteByDay.get(item.date) || 0) + 1));
+    preparedWasteRecords.forEach(item => combinedWasteByDay.set(item.date, (combinedWasteByDay.get(item.date) || 0) + 1));
+    const combinedTrendRows = [...combinedWasteByDay.entries()]
+      .filter(([period]) => Boolean(period))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([period, entries]) => ({ period, entries }));
+    const ingredientEntryCount = Number(data.linked_count || 0) + Number(data.unlinked_count || 0);
+    const preparedPortionTotal = preparedWasteRecords.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    const combinedWasteEntries = ingredientEntryCount + preparedWasteRecords.length;
     charts = monetaryChartsAllowed
-      ? `${reportChartPanel('reportWasteItemChart', 'Waste cost by ingredient', 'Cost comparison for the selected date range.', data.by_ingredient || [], 'waste_cost', 'name', 'bar', 'currency')}${reportChartPanel('reportWasteTrendChart', 'Waste cost over time', 'Daily waste cost for the selected date range.', data.by_day || [], 'waste_cost', 'period', 'line', 'currency')}${reportChartPanel('reportWasteReasonChart', 'Waste cost share by reason', 'Share of waste cost grouped by recorded reason.', data.by_reason || [], 'waste_cost', 'reason', 'doughnut', 'currency')}`
-      : `${reportChartPanel('reportWasteQuantityChart', 'Waste quantity by ingredient', 'Quantities are labelled with each ingredient unit.', data.by_ingredient || [], 'quantity', 'name', 'bar', '')}${reportChartPanel('reportWasteReasonChart', 'Waste quantity share by reason', 'Share of recorded waste quantity by reason.', data.by_reason || [], 'quantity', 'reason', 'doughnut', '')}`;
+      ? `${reportChartPanel('reportWasteItemChart', 'Waste cost by ingredient', 'Cost comparison for the selected date range.', data.by_ingredient || [], 'waste_cost', 'name', 'bar', 'currency')}${reportChartPanel('reportWasteTrendChart', 'Ingredient waste cost over time', 'Daily ingredient waste cost for the selected date range.', data.by_day || [], 'waste_cost', 'period', 'line', 'currency')}${reportChartPanel('reportWasteReasonChart', 'Ingredient waste cost by reason', 'Share of ingredient waste cost grouped by recorded reason.', data.by_reason || [], 'waste_cost', 'reason', 'doughnut', 'currency')}`
+      : `${reportChartPanel('reportWasteQuantityChart', 'Waste quantity by ingredient', 'Quantities are labelled with each ingredient unit.', data.by_ingredient || [], 'quantity', 'name', 'bar', '')}${reportChartPanel('reportWasteReasonChart', 'Ingredient waste quantity by reason', 'Share of recorded ingredient waste quantity by reason.', data.by_reason || [], 'quantity', 'reason', 'doughnut', '')}`;
     if (!monetaryChartsAllowed) {
       const quantitySpec = reportChartSpecs.find(spec => spec.id === 'reportWasteQuantityChart');
       if (quantitySpec) quantitySpec.rows = quantitySpec.rows.map(item => ({ ...item, name: `${item.name} (${item.unit})` }));
     }
-    kpis = `${metric('Waste cost', money((data.by_ingredient || []).reduce((sum, item) => sum + Number(item.waste_cost || 0), 0)), '◌', 'red-icon', `${data.unlinked_count || 0} unlinked entries`)}${metric('Linked to production', data.linked_count || 0, '♨', 'orange-icon', 'Production batches')}`;
+    charts += `${reportChartPanel('reportPreparedWasteTrendChart', 'Prepared food portions wasted', 'Daily portions recorded as prepared-food waste. Portion counts are not added to ingredient stock units.', preparedTrendRows, 'portions', 'period', 'line', 'portions', !preparedTrendRows.length, 'No prepared-food waste in this range.')}${reportChartPanel('reportCombinedWasteTrendChart', 'Combined waste entries', 'Daily count of waste incidents across both categories; quantities remain separate by unit.', combinedTrendRows, 'entries', 'period', 'bar', 'entries', !combinedTrendRows.length, 'No waste entries in this range.')}`;
+    kpis = `${metric('Ingredient waste cost', money((data.by_ingredient || []).reduce((sum, item) => sum + Number(item.waste_cost || 0), 0)), '◌', 'red-icon', `${ingredientEntryCount} ingredient entries`)}${metric('Prepared portions', Number(preparedPortionTotal.toFixed(4)), '♨', 'orange-icon', `${preparedWasteRecords.length} prepared-food entries`)}${metric('Combined waste entries', combinedWasteEntries, '▤', 'purple-icon', 'Incident count; quantities stay separate')}${metric('Linked to production', data.linked_count || 0, '♨', 'orange-icon', 'Ingredient waste context')}`;
+    additionalWasteReport = `<section class="panel report-prepared-waste-panel"><h2>Prepared food / leftovers</h2><p class="panel-subtitle">Dish totals are portions recorded in the selected date range. They are reported separately from ingredient quantities and do not change inventory.</p>${reportTable(['Dish', 'Portions wasted', 'Waste entries'], preparedDishRows, 'No prepared-food waste in this range.')}</section>`;
   }
   else if (state.reportTab === 'inventory') {
     headers = ['Category', 'Ingredients', 'Valuation'];
@@ -7146,12 +7880,27 @@ function reportsPage() {
     charts = reportChartPanel('reportProductionChart', 'Portions produced by dish', 'Recorded portions produced, grouped by dish.', data.rows || [], 'covers_produced', 'recipe', 'bar', 'portions');
     kpis = metric('Batches', (data.rows || []).reduce((sum, item) => sum + Number(item.batches || 0), 0), '♨', 'orange-icon', 'Production logs');
   }
+  const legacyRecords = start && end && start <= end
+    ? revenueRecords().filter(item => item.business_date >= start && item.business_date <= end)
+    : [];
+  const legacyRows = legacyRecords
+    .slice()
+    .sort((left, right) => String(right.business_date || '').localeCompare(String(left.business_date || '')))
+    .slice(0, 30)
+    .map(item => `<tr class="${item.status === 'Voided' ? 'is-voided' : ''}"><td><strong>${esc(item.business_date)}</strong></td><td>${esc(item.meal_period)}</td><td>${Number(item.adult_customers || 0)}</td><td>${Number(item.child_customers || 0)}</td><td>${Number(item.senior_pwd_customers || 0)}</td><td>${Number(item.total_customers || 0)}</td><td class="numeric">${money(item.total_revenue)}</td><td><span class="status">${esc(item.status || 'Archived')}</span></td></tr>`)
+    .join('') || '<tr><td colspan="8" class="empty-table">No archived legacy revenue records in this range.</td></tr>';
+  const legacyArchive = `<details class="panel legacy-revenue-archive"><summary>Legacy revenue archive · excluded from closed-bill totals</summary><p class="panel-subtitle">Historical revenue_records are preserved for reference only. Use this archive only for legacy history; current sales reporting is based on closed POS bills.</p><div class="table-scroll"><table><thead><tr><th>Date</th><th>Meal period</th><th>Adults</th><th>Children</th><th>Senior/PWD</th><th>Customers</th><th>Archived amount</th><th>Legacy status</th></tr></thead><tbody>${legacyRows}</tbody></table></div></details>`;
   const pageCount = Math.max(1, Math.ceil(Number(data.total_rows || 0) / Number(data.page_size || 100)));
   const pagination = state.reportTab === 'closed_bill_summary'
     ? `<div class="toolbar-inline report-pagination"><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.max(1, state.reportPage - 1)}" ${state.reportPage <= 1 ? 'disabled' : ''}>Previous</button><span>Page ${state.reportPage} of ${pageCount} · ${Number(data.total_rows || 0)} bills</span><button class="ghost-btn compact-btn" data-action="report-page" data-page="${Math.min(pageCount, state.reportPage + 1)}" ${state.reportPage >= pageCount ? 'disabled' : ''}>Next</button></div>`
     : '';
   const reportTableClass = state.reportTab === 'waste' ? 'report-table-panel report-waste-table' : 'report-table-panel';
-  return `${pageHeader('Management insight', 'Reports & analytics', 'Revenue and customer counts derive from closed POS bills. Deposits and cash movements are shown separately in operational reports.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs" role="tablist" aria-label="Report categories">${tabs.map(([tab, label]) => `<button type="button" role="tab" aria-selected="${state.reportTab === tab}" class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group ${state.reportTab === 'daily_revenue' ? 'disabled' : ''}><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state" role="status">Loading report…</div>' : error ? `<div class="panel error-state" role="alert">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">${state.reportTab === 'food_cost' ? 'New production logs use cost snapshots. Older logs are estimated from current ingredient costs; waste is valued at current cost.' : 'Net sales exclude voided bills, deposits, and all legacy revenue records.'}</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel ${reportTableClass}">${reportTable(headers, tableRows, tableEmptyMessage, tableFooter)}${pagination}</div>`}`;
+  const disclaimer = state.reportTab === 'waste'
+    ? 'Ingredient waste remains valued at current ingredient cost. Prepared-food waste is tracked in portions, separately from raw-stock units; combined waste totals count entries rather than adding unlike quantities.'
+    : state.reportTab === 'food_cost'
+      ? 'New production logs use cost snapshots. Older logs are estimated from current ingredient costs; waste is valued at current cost.'
+      : 'Net sales exclude voided bills, deposits, and all legacy revenue records.';
+  return `${pageHeader('Management insight', 'Reports & analytics', 'Revenue and customer counts derive from closed POS bills. Deposits and cash movements are shown separately in operational reports.', `<button class="ghost-btn" data-action="print-report">Print / PDF</button> <button class="secondary-btn" data-action="export-report">Export CSV</button>`)}<div class="report-toolbar"><div class="report-tabs" role="tablist" aria-label="Report categories">${tabs.map(([tab, label]) => `<button type="button" role="tab" aria-selected="${state.reportTab === tab}" class="${state.reportTab === tab ? 'active' : ''}" data-report-tab="${tab}">${label}</button>`).join('')}</div>${dateRangeControls()}<label>Group by<select data-report-group ${state.reportTab === 'daily_revenue' ? 'disabled' : ''}><option value="day" ${state.reportGrouping === 'day' ? 'selected' : ''}>Day</option><option value="week" ${state.reportGrouping === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.reportGrouping === 'month' ? 'selected' : ''}>Month</option></select></label>${state.reportTab === 'food_cost' ? `<label class="filter-check"><input type="checkbox" data-report-waste ${state.reportIncludeWaste ? 'checked' : ''}> Include logged waste</label>` : ''}</div>${invalidDateRange ? '<div class="panel error-state" role="alert">Choose a valid custom date range to view this report.</div>' : loading ? '<div class="panel loading-state" role="status">Loading report…</div>' : error ? `<div class="panel error-state" role="alert">${esc(error)} <button class="ghost-btn" data-action="retry-report">Retry</button></div>` : `<div class="report-disclaimer">${disclaimer}</div><div class="metric-grid">${kpis}</div><div class="report-chart-grid">${charts}</div><div class="panel ${reportTableClass}">${state.reportTab === 'waste' ? '<h2>Top wasted ingredients</h2>' : ''}${reportTable(headers, tableRows, tableEmptyMessage, tableFooter)}${pagination}</div>${additionalWasteReport}`}${legacyArchive}`;
 }
 
 let backdropMouseDown = null;
@@ -7206,7 +7955,7 @@ document.addEventListener('keydown', event => {
     first.focus();
   }
 }, true);
-document.addEventListener('click', event => {
+document.addEventListener('click', async event => {
   const confirmButton = event.target.closest('[data-action="confirm-reservation"]');
   if (confirmButton) {
     if (!canAccess('reservations')) return toast('Your role cannot confirm reservations.', 'error');
@@ -7216,9 +7965,17 @@ document.addEventListener('click', event => {
       render();
       return;
     }
-    saveRecord('reservations', { ...reservation, status: 'Confirmed' })
-      .then(() => { toast(`Reservation for ${reservation.name} confirmed.`); render(); })
-      .catch(error => toast(friendlyRpcError(error), 'error'));
+    const restoreButton = setButtonBusy(confirmButton, 'Confirming…');
+    if (!restoreButton) return;
+    try {
+      await saveRecord('reservations', { ...reservation, status: 'Confirmed' });
+      toast(`Reservation for ${reservation.name} confirmed.`);
+      render();
+    } catch (error) {
+      toast(friendlyRpcError(error), 'error');
+    } finally {
+      restoreButton();
+    }
     return;
   }
   const clearReservationFilters = event.target.closest('[data-reservation-clear-filters]');
@@ -7271,6 +8028,11 @@ document.addEventListener('click', event => {
   if (dateFilter) { state.reservationFilter = 'All'; state.reservationDateFilter = dateFilter.dataset.reservationDateFilter; state.reservationFilterHighlightGroup = 'date'; state.calendarDate = today(); persistReservationFilters(); render(); return; }
 });
 document.addEventListener('change', event => {
+  if (event.target.closest('#modalForm[data-type="receiving"]')) {
+    const receivingForm = event.target.closest('#modalForm');
+    updateReceivingTotals(receivingForm);
+    updateReceivingExpiryRequirements(receivingForm);
+  }
   if (event.target.matches('[data-reservation-calendar-filter]')) {
     if (event.target.dataset.reservationCalendarFilter === 'status') state.reservationCalendarStatus = event.target.value;
     if (event.target.dataset.reservationCalendarFilter === 'type') state.reservationCalendarType = event.target.value;
@@ -7302,7 +8064,13 @@ document.addEventListener('input', event => {
     if (reservationCalendar) reservationCalendar.refetchEvents();
   }
   if (event.target.closest('#modalForm[data-type="waste"]')) updateWasteFormPreview(event.target.closest('#modalForm'));
-  if (event.target.closest('#modalForm[data-type="receiving"]')) updateReceivingTotals(event.target.closest('#modalForm'));
+  if (event.target.closest('#modalForm[data-type="receiving"]')) {
+    const receivingForm = event.target.closest('#modalForm');
+    updateReceivingTotals(receivingForm);
+    if (event.target.matches('[data-field="ingredientId"],[name="receivedDate"]')) {
+      updateReceivingExpiryRequirements(receivingForm);
+    }
+  }
   const billFormElement = event.target.closest('#modalForm[data-type="bill"]');
   if (billFormElement && event.target.matches('[name="adultCount"],[name="seniorCount"],[name="kidsCount"]')) {
     updateBillHeadcountWarning(billFormElement);
@@ -7352,13 +8120,21 @@ document.addEventListener('click', event => {
   const reportPageButton = event.target.closest('[data-action="report-page"]');
   if (reportPageButton && !reportPageButton.disabled) { state.reportPage = Number(reportPageButton.dataset.page); reportRequestKey = ''; render(); return; }
   if (event.target.closest('[data-action="retry-report"]')) { const [start, end] = dateRangeBounds(); delete reportServerData[reportDataKey(state.reportTab, start, end)]; reportRequestKey = ''; render(); return; }
-  if (event.target.closest('[data-action="retry-revenue-report"]')) { const [start, end] = dateRangeBounds(); delete reportServerData[reportDataKey('daily_revenue', start, end, 1)]; loadRevenuePageReport(); return; }
   if (event.target.closest('[data-action="print-report"]')) { window.print(); return; }
   if (event.target.closest('[data-action="export-report"]')) {
     const table = document.querySelector('.report-table-panel table');
     if (!table) { toast('This report is not available until the report data loads successfully.', 'error'); return; }
     const rows = [...table.rows].map(row => [...row.cells].map(cell => cell.innerText.trim()));
-    reportExport(rows, state.view === 'revenue' ? 'closed-bill-revenue' : state.reportTab);
+    if (state.reportTab === 'waste') {
+      const preparedTable = document.querySelector('.report-prepared-waste-panel table');
+      const preparedRows = preparedTable
+        ? [...preparedTable.rows].filter(row => !row.querySelector('.empty-state')).map(row => [...row.cells].map(cell => cell.innerText.trim()))
+        : [];
+      rows[0] = ['Waste category', ...rows[0]];
+      for (let index = 1; index < rows.length; index += 1) rows[index] = ['Ingredient waste', ...rows[index]];
+      if (preparedRows.length) rows.push([], ['Waste category', ...preparedRows[0]], ...preparedRows.slice(1).map(row => ['Prepared food / leftovers', ...row]));
+    }
+    reportExport(rows, state.reportTab);
     return;
   }
   const clear = event.target.closest('[data-action="clear-filters"]');
@@ -7487,7 +8263,8 @@ document.addEventListener('click', async event => {
       : Number(start.dataset.portions);
     if (!Number.isInteger(portions) || portions < 1 || portions > 10000) return toast('Enter a whole number of portions between 1 and 10,000.', 'error');
     if (!recipe(recipeId)) return toast('This recipe is no longer available.', 'error');
-    start.disabled = true;
+    const restoreButton = setButtonBusy(start, 'Starting batch…');
+    if (!restoreButton) return;
     if (!start.dataset.requestId) start.dataset.requestId = `BATCH-${window.crypto?.randomUUID?.() || id('QUEUE')}`;
     const batchRequests = [{ id: start.dataset.requestId, portions }];
     try {
@@ -7500,7 +8277,7 @@ document.addEventListener('click', async event => {
       console.error('Production batch start failed.', error);
       toast(friendlyRpcError(error), 'error');
     } finally {
-      if (start.isConnected) start.disabled = false;
+      restoreButton();
     }
     return;
   }
@@ -7509,7 +8286,8 @@ document.addEventListener('click', async event => {
     if (!window.CostTrackLogic.canPerformInventoryAction(state.role, 'production.log')) {
       return toast('You do not have permission to complete production batches.', 'error');
     }
-    ready.disabled = true;
+    const restoreButton = setButtonBusy(ready, 'Marking ready…');
+    if (!restoreButton) return;
     try {
       const completed = await window.supabaseRecord.completeProductionBatch(ready.dataset.readyProduction);
       invalidateReportData();
@@ -7527,7 +8305,7 @@ document.addEventListener('click', async event => {
       console.error('Production batch completion failed.', error);
       toast(friendlyRpcError(error), 'error');
     } finally {
-      if (ready.isConnected) ready.disabled = false;
+      restoreButton();
     }
   }
 });
@@ -7539,16 +8317,18 @@ document.addEventListener('submit', async event => {
   let valid = true;
   const validatedRadioGroups = new Set();
   form.querySelectorAll('[required]').forEach(control => {
+    if (control.disabled) return;
     if (control.type === 'radio') {
       if (validatedRadioGroups.has(control.name)) return;
       validatedRadioGroups.add(control.name);
       const groupControls = [...form.querySelectorAll('input[type="radio"]')]
         .filter(radio => radio.name === control.name);
       if (groupControls.some(radio => radio.checked)) return;
-      const group = control.closest('[data-waste-reason-group]');
+      const group = control.closest('[data-waste-reason-group],[data-prepared-waste-reason-group]');
       if (group) {
         group.classList.add('has-error');
-        group.querySelector('[data-waste-reason-error]').hidden = false;
+        const errorMessage = group.querySelector('[data-waste-reason-error],[data-prepared-waste-reason-error]');
+        if (errorMessage) errorMessage.hidden = false;
         groupControls.forEach(radio => radio.setAttribute('aria-invalid', 'true'));
         toast('Choose a reason for the waste entry.', 'error');
       } else {
@@ -7579,6 +8359,7 @@ document.addEventListener('submit', async event => {
     }
   }
   form.querySelectorAll('input[type="number"]').forEach(control => {
+    if (control.disabled) return;
     if (control.value !== '' && (!Number.isFinite(Number(control.value)) || Number(control.value) < Number(control.min || 0))) { showFieldError(control, `Enter a number of ${control.min && Number(control.min) > 0 ? 'at least ' + control.min : 'zero or more'}.`); valid = false; }
     if (['batchYield', 'prepTarget'].includes(control.name) && control.value !== '' && !Number.isInteger(Number(control.value))) { showFieldError(control, 'Enter a whole number.'); valid = false; }
   });
@@ -7629,6 +8410,13 @@ document.addEventListener('submit', async event => {
       }
     }
   }
+  if (form.dataset.type === 'ingredient' && form.elements.shelfLifeDays?.value) {
+    const shelfLifeDays = Number(form.elements.shelfLifeDays.value);
+    if (!Number.isInteger(shelfLifeDays) || shelfLifeDays < 1 || shelfLifeDays > 3650) {
+      showFieldError(form.elements.shelfLifeDays, 'Enter a whole number from 1 to 3,650 days.');
+      valid = false;
+    }
+  }
   if (form.dataset.type === 'bill') {
     const countNames = ['adultCount', 'seniorCount', 'kidsCount', 'compedCount'];
     const counts = countNames.map(name => Number(form.elements[name]?.value || 0));
@@ -7657,6 +8445,14 @@ document.addEventListener('submit', async event => {
   }
   if (form.dataset.type === 'receiving') {
     const receivedDate = form.elements.receivedDate.value;
+    if (form.elements.invoiceDate.value > today() || receivedDate > today()) {
+      showFieldError(form.elements.receivedDate, 'Invoice and received dates cannot be in the future.');
+      valid = false;
+    }
+    if (form.elements.invoiceDate.value > receivedDate) {
+      showFieldError(form.elements.invoiceDate, 'Invoice date cannot be after the received date.');
+      valid = false;
+    }
     form.querySelectorAll('.receipt-line').forEach(line => {
       const quantity = line.querySelector('[data-field="quantity"]');
       const unitCost = line.querySelector('[data-field="unitCost"]');
@@ -7681,24 +8477,45 @@ document.addEventListener('submit', async event => {
     });
   }
   if (form.dataset.type === 'waste') {
-    const quantity = Number(form.elements.quantity.value);
-    const product = ingredient(form.elements.ingredientId.value);
-    if (form.elements.quantity.value && quantity !== Number(quantity.toFixed(4))) {
-      showFieldError(form.elements.quantity, 'Use up to 4 decimal places to match the inventory unit.');
-      valid = false;
-    }
-    if (quantity > 1000000) {
-      showFieldError(form.elements.quantity, 'Quantity cannot exceed 1,000,000.');
-      valid = false;
-    }
-    if (product && quantity > Number(product.stock)) {
-      showFieldError(form.elements.quantity, `Only ${Number(product.stock)} ${product.unit} is currently in stock.`);
-      valid = false;
-    }
-    if (form.elements.reason.value === 'Other' && !form.elements.notes.value.trim()) {
-      showFieldError(form.elements.notes, 'Add a short explanation for the Other reason.');
-      toast('Add a short explanation for the Other reason.', 'error');
-      valid = false;
+    if (form.elements.wasteType.value === 'ingredient') {
+      const quantity = Number(form.elements.quantity.value);
+      const product = ingredient(form.elements.ingredientId.value);
+      if (form.elements.quantity.value && quantity !== Number(quantity.toFixed(4))) {
+        showFieldError(form.elements.quantity, 'Use up to 4 decimal places to match the inventory unit.');
+        valid = false;
+      }
+      if (quantity > 1000000) {
+        showFieldError(form.elements.quantity, 'Quantity cannot exceed 1,000,000.');
+        valid = false;
+      }
+      if (product && quantity > Number(product.stock)) {
+        showFieldError(form.elements.quantity, `Only ${Number(product.stock)} ${product.unit} is currently in stock.`);
+        valid = false;
+      }
+      if (form.elements.reason.value === 'Other' && !form.elements.notes.value.trim()) {
+        showFieldError(form.elements.notes, 'Add a short explanation for the Other reason.');
+        toast('Add a short explanation for the Other reason.', 'error');
+        valid = false;
+      }
+    } else if (form.elements.wasteType.value === 'prepared') {
+      const quantity = Number(form.elements.preparedQuantity.value);
+      if (form.elements.preparedQuantity.value && quantity !== Number(quantity.toFixed(4))) {
+        showFieldError(form.elements.preparedQuantity, 'Use up to 4 decimal places for portions.');
+        valid = false;
+      }
+      if (quantity > 1000000) {
+        showFieldError(form.elements.preparedQuantity, 'Portions cannot exceed 1,000,000.');
+        valid = false;
+      }
+      if (form.elements.preparedDate.value > manilaBusinessToday()) {
+        showFieldError(form.elements.preparedDate, 'Waste date cannot be in the future.');
+        valid = false;
+      }
+      if (form.elements.preparedReason.value === 'Other' && !form.elements.preparedNotes.value.trim()) {
+        showFieldError(form.elements.preparedNotes, 'Add a short explanation for the Other reason.');
+        toast('Add a short explanation for the Other reason.', 'error');
+        valid = false;
+      }
     }
   }
   if (!valid) { event.stopImmediatePropagation(); form.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus(); return; }
@@ -7718,30 +8535,54 @@ document.addEventListener('submit', async event => {
       })) return;
   }
   if (form.dataset.type === 'waste') {
-    const product = ingredient(form.elements.ingredientId.value);
-    const quantity = Number(form.elements.quantity.value);
-    const costText = ['Administrator', 'Manager'].includes(state.role)
-      ? `\nEstimated cost: ${money(quantity * Number(product?.cost || 0))}`
-      : '';
-    const linkedLog = all('productionLogs').find(log => log.id === form.elements.productionLogId.value);
-    const linkedRecipe = linkedLog ? recipe(linkedLog.recipeId)?.name : '';
-    if (!await confirmInApp(`Record ${quantity} ${product?.unit || ''} of ${product?.name || 'this ingredient'} as ${form.elements.reason.value}?${linkedRecipe ? `\nRelated dish: ${linkedRecipe}` : ''}\nStock will decrease once from ${Number(product?.stock || 0)} to ${Number((Number(product?.stock || 0) - quantity).toFixed(4))} ${product?.unit || ''}.${costText}`, {
-      title: 'Confirm waste entry',
-      confirmLabel: 'Record waste'
-    })) return;
+    if (form.elements.wasteType.value === 'ingredient') {
+      const product = ingredient(form.elements.ingredientId.value);
+      const quantity = Number(form.elements.quantity.value);
+      const costText = ['Administrator', 'Manager'].includes(state.role)
+        ? `\nEstimated cost: ${money(quantity * Number(product?.cost || 0))}`
+        : '';
+      const linkedLog = all('productionLogs').find(log => log.id === form.elements.productionLogId.value);
+      const linkedRecipe = linkedLog ? recipe(linkedLog.recipeId)?.name : '';
+      if (!await confirmInApp(`Record ${quantity} ${product?.unit || ''} of ${product?.name || 'this ingredient'} as ${form.elements.reason.value}?${linkedRecipe ? `\nRelated dish: ${linkedRecipe}` : ''}\nStock will decrease once from ${Number(product?.stock || 0)} to ${Number((Number(product?.stock || 0) - quantity).toFixed(4))} ${product?.unit || ''}.${costText}`, {
+        title: 'Confirm waste entry',
+        confirmLabel: 'Record waste'
+      })) return;
+    } else if (form.elements.wasteType.value === 'prepared') {
+      const quantity = Number(form.elements.preparedQuantity.value);
+      const dishName = form.elements.dishName.value.trim();
+      if (!await confirmInApp(`Record ${quantity} portion${quantity === 1 ? '' : 's'} of ${dishName} as prepared-food waste for ${form.elements.preparedReason.value}?\nIngredient inventory will not be changed.`, {
+        title: 'Confirm prepared-food waste',
+        confirmLabel: 'Record waste'
+      })) return;
+    }
   }
   event.stopImmediatePropagation();
   const submit = event.submitter || form.querySelector('.modal-submit');
   const originalSubmitText = submit?.textContent || '';
   const originalSubmitDisabled = submit?.disabled || false;
+  const loadingLabels = {
+    shift: 'Opening shift…',
+    'shift-close': 'Closing shift…',
+    'cash-movement': 'Recording movement…',
+    'reservation-deposit': 'Recording deposit…',
+    'deposit-decision': 'Updating deposit…',
+    receiving: 'Recording delivery…',
+    ingredient: 'Saving product…',
+    bill: 'Saving bill…',
+    'bill-close': 'Closing bill…'
+  };
   form.dataset.saving = 'true';
+  let slowSubmitTimer;
   if (submit) {
     submit.disabled = true;
     submit.classList.add('is-loading');
     submit.setAttribute('aria-busy', 'true');
     submit.textContent = form.dataset.type === 'walk-in' && submit.dataset.walkInAction === 'seat-and-open'
       ? 'Seating and opening bill…'
-      : 'Saving…';
+      : loadingLabels[form.dataset.type] || 'Saving…';
+    slowSubmitTimer = window.setTimeout(() => {
+      if (form.isConnected && submit.disabled) submit.textContent = 'Still processing…';
+    }, 5000);
   }
   try {
     await handleSubmit(form, event.submitter);
@@ -7749,6 +8590,7 @@ document.addEventListener('submit', async event => {
     console.error('Form save failed.', error);
     toast(friendlyRpcError(error), 'error');
   } finally {
+    if (slowSubmitTimer) window.clearTimeout(slowSubmitTimer);
     delete form.dataset.saving;
     if (form.isConnected && submit) {
       submit.disabled = originalSubmitDisabled;

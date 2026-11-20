@@ -715,8 +715,12 @@
         && Number.isFinite(currentTimeMinutes)
         && start !== null
         && currentTimeMinutes >= start + MAX_TABLE_STAY_MINUTES;
+      const reservationIsActive = date === currentDate
+        && (!Number.isFinite(currentTimeMinutes)
+          || start === null
+          || currentTimeMinutes + MAX_TABLE_STAY_MINUTES > start);
       return {
-        status: 'Reserved',
+        status: reservationIsActive ? 'Reserved Active' : 'Reserved Later',
         bookings,
         primaryBooking: nextBooking,
         stayLimitReached: false,
@@ -726,21 +730,28 @@
     return { status: 'Available', bookings, primaryBooking: null, stayLimitReached: false, bookingWindowEnded: false };
   }
 
-  function tableHasReservationConflict(tableId, date, time, reservations, excludeReservationId = '', currentDate = '') {
-    if (!tableId || !date || !time) return false;
-    if (date === currentDate && reservations.some(item =>
-      item.id !== excludeReservationId
-      && item.table === tableId
-      && item.date < date
-      && item.status === 'Seated'
-    )) return true;
-    return reservations.some(item =>
+  function tableReservationConflict(tableId, date, time, reservations, excludeReservationId = '', currentDate = '') {
+    if (!tableId || !date || !time) return null;
+    if (date === currentDate) {
+      const priorDaySeating = reservations.find(item =>
+        item.id !== excludeReservationId
+        && item.table === tableId
+        && item.date < date
+        && item.status === 'Seated'
+      );
+      if (priorDaySeating) return priorDaySeating;
+    }
+    return reservations.find(item =>
       item.id !== excludeReservationId
       && item.table === tableId
       && item.date === date
       && ['Pending', 'Confirmed', 'Seated'].includes(item.status)
       && reservationTimeOverlaps(time, item.time)
     );
+  }
+
+  function tableHasReservationConflict(tableId, date, time, reservations, excludeReservationId = '', currentDate = '') {
+    return Boolean(tableReservationConflict(tableId, date, time, reservations, excludeReservationId, currentDate));
   }
 
   function buildReservationRecord(existing, formData, newId) {
@@ -924,6 +935,7 @@
     MAX_TABLE_STAY_MINUTES,
     tableAvailability,
     tableHasReservationConflict,
+    tableReservationConflict,
     weightedAverageUnitCost
   };
   root.CostTrackLogic = logic;

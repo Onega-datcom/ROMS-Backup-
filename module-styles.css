@@ -46,14 +46,22 @@
 .reservation-meal-filter select{min-height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-size:11px}
 @media(max-width:760px){.reservation-list-controls{align-items:stretch}.reservation-date-field,.reservation-search-field{flex:1 1 100%;min-width:0}.reservation-date-shortcuts{align-self:flex-start}.reservation-clear-filters{margin-left:0}.reservation-filter-group{align-items:flex-start;flex-direction:column}}
 
-.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}
-.reservation-list-panel .reservation-card{width:100%;max-width:320px;min-width:0;margin:0}
-@media(max-width:1350px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:1050px){.reservation-list-panel .reservation-timeline{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:650px){.reservation-list-panel .reservation-timeline{grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{max-width:none}}
+.reservation-list-panel .reservation-timeline{display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:flex-start;gap:8px}
+.reservation-list-panel .reservation-card{width:280px;height:190px;flex:0 0 280px;max-width:none;min-width:0;margin:0}
+.reservation-list-panel .reservation-card-main{flex:1;min-height:0;overflow:hidden}
+.reservation-card-secondary-details{display:none}
+.reservation-card-primary-summary{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reservation-card-time{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .ingredient-card-grid,.recipe-card-grid{align-items:stretch}
+.catalog-card{display:flex;flex-direction:column;min-height:220px}
+.catalog-card-footer{margin-top:auto}
+.recipe-card h3{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.reservation-list-panel .reservation-actions{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:0 10px 8px}
+.reservation-list-panel .reservation-actions .field-help{flex-basis:100%;margin:2px 0 0;font-size:9px;line-height:1.35}
+@media(max-width:650px){.reservation-list-panel .reservation-timeline{display:grid;grid-template-columns:minmax(0,1fr)}.reservation-list-panel .reservation-card{width:100%;height:auto;min-height:190px;flex-basis:100%;max-width:none}}
 
-.reservation-list-panel .unresolved-booking-card{max-width:none;min-height:100%;padding:16px;gap:14px;border-color:#efcfaa;background:#fffaf4}
-.unresolved-booking-card .reservation-card-main{display:grid;gap:8px;align-content:start;width:100%;text-align:left}
+.reservation-list-panel .unresolved-booking-card{max-width:none;min-height:100%;padding:12px;gap:8px;border-color:#efcfaa;background:#fffaf4}
+.unresolved-booking-card .reservation-card-main{display:grid;gap:5px;align-content:start;width:100%;text-align:left;padding:0}
 .unresolved-booking-card .reservation-card-main small{font-size:12px;line-height:1.45;overflow-wrap:anywhere}
 .unresolved-booking-card .reservation-actions{display:flex;flex-wrap:wrap;gap:8px;width:100%;margin-top:auto}
 .unresolved-booking-card .reservation-actions button,.reservation-filter-bar [data-reservation-filter],.reservation-filter-bar [data-reservation-type-filter],.reservation-list-controls button,.stale-resolution-modal button,[data-action="show-unresolved-booking"],[data-action="refresh-unresolved-bookings"],[data-action="retry-unresolved-bookings"]{min-height:44px}
@@ -67,6 +75,34 @@
 .stale-deposit-resolution select,.stale-deposit-resolution textarea,.stale-resolution-modal textarea{width:100%;min-height:44px}
 .stale-resolution-modal textarea{resize:vertical}
 .unresolved-booking-card:focus{outline:3px solid var(--teal);outline-offset:3px}
+.notification-center-page{display:grid;gap:14px}
+.notification-center-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px}
+.notification-center-toolbar label{display:grid;gap:6px;flex:1;max-width:520px;color:var(--muted);font-size:11px;font-weight:700}
+.notification-center-toolbar input{width:100%;min-height:44px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.notification-center-unread{padding:7px 10px;border-radius:999px;background:var(--mint);color:var(--teal-dark);font-size:11px;font-weight:800}
+.notification-center-filters{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px}
+.notification-center-filters button{min-height:44px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted);font-size:11px;font-weight:700;white-space:nowrap}
+.notification-center-filters button.active{border-color:#cde5dc;background:var(--mint);color:var(--teal-dark)}
+.notification-center-list{display:grid;gap:8px}
+.notification-center-card{overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#fff}
+.notification-center-card.is-unread{border-left:4px solid var(--teal);background:#fbfdfc}
+.notification-center-card.is-read{opacity:.82}
+.notification-center-main{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:5px 10px;width:100%;min-height:78px;padding:12px 14px;border:0;background:transparent;text-align:left;color:var(--ink)}
+.notification-center-main strong{grid-column:2;grid-row:1;font-size:13px}
+.notification-center-main p{grid-column:2;grid-row:2;margin:0;color:var(--muted);font-size:12px}
+.notification-center-main time{grid-column:3;grid-row:1/span 2;color:var(--muted);font-size:10px;white-space:nowrap}
+.notification-center-category{grid-column:1;grid-row:1/span 2;align-self:start;min-width:78px;padding:5px 8px;border-radius:999px;text-align:center;font-size:10px;font-weight:800}
+.category-reservations{background:#e8f4ff;color:#275e89}
+.category-inventory{background:#fff1d8;color:#9b5b13}
+.category-approvals{background:#edeafe;color:#7468bd}
+.category-users{background:#e7f0ff;color:#4c6caa}
+.category-operations{background:#fff1e4;color:#a8682e}
+.category-system{background:#fde5e3;color:#a44c48}
+.notification-center-status{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.notification-center-pagination{display:flex;justify-content:flex-end;gap:6px}
+.notification-center-pagination button{min-width:40px;min-height:40px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted)}
+.notification-center-pagination button.active{border-color:#cde5dc;background:var(--mint);color:var(--teal-dark);font-weight:800}
+@media(max-width:720px){.notification-center-toolbar{align-items:stretch;flex-direction:column}.notification-center-toolbar label{max-width:none}.notification-center-main{grid-template-columns:1fr auto}.notification-center-category{grid-column:1;grid-row:1}.notification-center-main strong{grid-column:1;grid-row:2}.notification-center-main p{grid-column:1;grid-row:3}.notification-center-main time{grid-column:2;grid-row:1/span 3}}
 @media(max-width:650px){.unresolved-booking-card .reservation-actions{display:grid;grid-template-columns:1fr}.unresolved-booking-card .reservation-actions button{width:100%}}
 .recipe-prep-summary{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}.recipe-prep-summary span{display:grid;gap:4px}.recipe-prep-summary small,.recipe-cost-card-primary small,.recipe-cost-highlights small{color:var(--muted);font-size:10px}.recipe-prep-summary strong{font-size:12px}.recipe-cost-card-primary{display:grid;gap:4px;padding:12px;margin:12px 0 16px;border:1px solid #dceee8;border-radius:9px;background:#f5faf8}.recipe-cost-card-primary strong{color:var(--teal-dark);font-size:20px;font-variant-numeric:tabular-nums}.recipe-cost-card-primary>span{color:var(--muted);font-size:11px}.recipe-card-inactive{border-color:#e4c9a7;background:#fffdfa}.recipe-card-status{display:flex;align-items:center;gap:8px}.recipe-card-status .status-low{background:#fff4e5;color:#713d09}.recipe-live-cost-panel{padding:14px;border:1px solid #cfe0da;border-radius:10px;background:#f6faf8}.recipe-cost-panel-heading,.recipe-cost-highlights,.recipe-cost-ingredient{display:flex;align-items:center;justify-content:space-between;gap:12px}.recipe-cost-panel-heading>div,.recipe-cost-ingredient>div{display:grid;gap:3px}.recipe-cost-panel-heading strong{font-size:13px}.recipe-cost-panel-heading small,.recipe-cost-ingredient small{color:#4d5c56;font-size:10px}.recipe-cost-highlights{justify-content:flex-start;gap:24px;padding:12px 0}.recipe-cost-highlights>div{display:grid;gap:3px}.recipe-cost-highlights strong{color:var(--teal-dark);font-size:17px;font-variant-numeric:tabular-nums}.recipe-cost-ingredients{display:grid;gap:6px;border-top:1px solid #dce8e2;padding-top:8px}.recipe-cost-ingredient{min-height:36px;font-size:11px}.recipe-cost-ingredient>strong{text-align:right;font-variant-numeric:tabular-nums}.recipe-cost-ingredient>strong small{display:block;color:#4d5c56}.recipe-stock-hint,.recipe-food-cost-estimate,.recipe-cost-validity,.recipe-preview-error{margin:9px 0 0;color:#35453e;font-size:11px}.recipe-sanity-warnings{margin:10px 0 0;padding:9px 12px 9px 30px;border:1px solid #d69a55;border-radius:7px;background:#fff4e5;color:#713d09;font-size:11px}.recipe-active-switch{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:52px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:#fff}.recipe-active-switch>span{display:grid;gap:3px}.recipe-active-switch strong{font-size:12px}.recipe-active-switch small{color:var(--muted);font-size:10px}.recipe-active-switch input{width:24px;height:24px;min-width:24px;min-height:24px;accent-color:var(--teal)}.recipe-picker label{display:grid;gap:5px}.recipe-picker input,.recipe-picker select,.selected-ingredient input{min-height:44px}.selected-ingredient label{display:grid;gap:4px;min-width:130px;color:#42524b;font-size:10px}.recipe-remove-ingredient{min-width:44px;min-height:44px}.add-ingredient-btn,.recipe-picker .compact-btn{min-height:44px}.recipe-cost-card-primary,.recipe-live-cost-panel{font-variant-numeric:tabular-nums}@media(max-width:720px){.recipe-prep-summary{gap:8px}.recipe-cost-highlights{gap:14px}.selected-ingredient{align-items:flex-start;flex-wrap:wrap}.selected-ingredient label{flex:1 1 100%;min-width:100%}.selected-ingredient .recipe-remove-ingredient{margin-left:auto}}
 
@@ -99,3 +135,5 @@
 @media(max-width:720px){.selected-ingredient{grid-template-columns:minmax(0,1fr) auto;align-items:end}.selected-ingredient>strong{grid-column:1/-1}.selected-ingredient label{grid-column:1;min-width:0;width:100%}.selected-ingredient .recipe-remove-ingredient{grid-column:2;align-self:end;justify-self:end;margin:0}}
 
 .report-waste-table .report-table-scroll th:nth-child(2),.report-waste-table .report-table-scroll td:nth-child(2){text-align:center}
+.report-prepared-waste-panel{margin-top:16px}
+.report-prepared-waste-panel h2{margin:0 0 6px;font-size:15px}

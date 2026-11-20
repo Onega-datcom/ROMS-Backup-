@@ -25,6 +25,8 @@ The list is based on the SQL files in `supabase/`, not a live database inspectio
 
 `recipe_ingredients` is the junction table between `recipes` and `ingredients`. Together, the two relationships form a many-to-many relationship.
 
+`prepared_food_waste_logs` is separate from ingredient-linked `waste_logs` and has no ingredient foreign key. Its quantity is recorded in portions; it does not restore or deduct ingredient stock.
+
 ## 2. Revenue and reservations
 
 | Parent | Child | Relationship |
@@ -70,6 +72,7 @@ A table can be used by reservations at different times. The schema also prevents
 | `dish_recipe_versions` | `legacy_production_mappings` | 1 → many; optional mapping link |
 | `recipes` | `production_batches` | 1 → many |
 | `production_logs` | `production_batches` | 1 → 0..1; optional, unique `production_log_id` |
+| `production_batches` | `prepared_food_waste_logs` | 1 → many; optional `production_batch_id` |
 
 ## 4. POS billing and shifts
 
@@ -114,7 +117,7 @@ A table can be used by reservations at different times. The schema also prevents
 | Parent | Child column(s) |
 | --- | --- |
 | `auth.users` | `profiles.id` — one-to-one profile link |
-| `auth.users` | `reservations.created_by`, `waste_logs.recorded_by`, `audit_logs.actor_id` |
+| `auth.users` | `reservations.created_by`, `waste_logs.recorded_by`, `prepared_food_waste_logs.recorded_by`, `audit_logs.actor_id` |
 | `auth.users` | `product_categories.created_by/updated_by`, `units.created_by/updated_by`, `suppliers.created_by/updated_by` |
 | `auth.users` | `ingredients.created_by/updated_by`, `inventory_batches.created_by/updated_by`, `stock_movements.user_id` |
 | `auth.users` | `inventory_settings.updated_by`, `inventory_migration_issues.resolved_by` |

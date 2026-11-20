@@ -56,6 +56,10 @@ create table if not exists public.ingredients (
   cost numeric not null default 0 check (cost >= 0),
   stock numeric not null default 0 check (stock >= 0),
   minimum numeric not null default 0 check (minimum >= 0),
+  preferred_supplier text not null default '',
+  track_expiry boolean not null default false,
+  shelf_life_days integer check (shelf_life_days is null or shelf_life_days between 1 and 3650),
+  notes text not null default '',
   updated_at timestamptz not null default now()
 );
 
@@ -1138,6 +1142,37 @@ as $$
       and p.account_status = 'Active'
       and p.role = any (allowed_roles)
   )
+$$;
+
+create or replace function public.costtrack_mark_table_clean(p_table_id text)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  updated_table_id text;
+begin
+  if not public.has_app_role(array['Receptionist']) then
+    raise exception 'Only Receptionists can use this table-cleaning action.'
+      using errcode = '42501';
+  end if;
+  if nullif(btrim(p_table_id), '') is null then
+    raise exception 'A table is required.';
+  end if;
+
+  update public.restaurant_tables
+  set status = 'Available'
+  where id = p_table_id
+    and status = 'Needs cleaning'
+  returning id into updated_table_id;
+
+  if updated_table_id is null then
+    raise exception 'This table no longer needs cleaning.'
+      using errcode = '55000';
+  end if;
+  return true;
+end;
 $$;
 
 create or replace function public.apply_inventory_transaction_stock()
@@ -3255,6 +3290,8 @@ grant select on table public.profile_account_status_audit to authenticated;
 grant select on table public.user_invites to authenticated;
 
 revoke all on function public.current_app_role() from public, anon;
+revoke all on function public.costtrack_mark_table_clean(text)
+from public, anon, authenticated;
 revoke all on function public.has_app_role(text[]) from public, anon;
 revoke all on function public.costtrack_set_profile_account_status(uuid, text, uuid, text)
   from public, anon, authenticated;
@@ -3264,6 +3301,8 @@ revoke all on function public.costtrack_cancel_user_invitation(uuid, uuid)
   from public, anon, authenticated;
 grant execute on function public.current_app_role() to authenticated;
 grant execute on function public.has_app_role(text[]) to authenticated;
+grant execute on function public.costtrack_mark_table_clean(text)
+  to authenticated;
 grant execute on function public.costtrack_set_profile_account_status(uuid, text, uuid, text)
   to service_role;
 grant execute on function public.costtrack_accept_user_invitation(uuid, uuid)

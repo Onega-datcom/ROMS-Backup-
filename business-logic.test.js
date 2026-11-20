@@ -548,7 +548,7 @@ test('derives live table availability from bookings and checks overlapping two-h
   ];
 
   const availability = logic.tableAvailability(table, bookings, '2026-11-12', '2026-11-12');
-  assert.equal(availability.status, 'Reserved');
+  assert.equal(availability.status, 'Reserved Active');
   assert.equal(availability.primaryBooking.id, 'r1');
   assert.equal(logic.tableHasReservationConflict('T1', '2026-11-12', '6:00 PM', bookings), true);
   assert.equal(logic.tableHasReservationConflict('T1', '2026-11-12', '6:00 PM', bookings, 'r2'), false);
@@ -582,6 +582,56 @@ test('derives live table availability from bookings and checks overlapping two-h
   );
   assert.equal(staleOccupied.status, 'Available');
   assert.equal(staleOccupied.primaryBooking, null);
+});
+
+test('distinguishes a reservation with safe walk-in time from one that must be protected now', () => {
+  const booking = {
+    id: 'reservation-noon',
+    table: 'T1',
+    date: '2026-11-13',
+    time: '12:00 PM',
+    status: 'Confirmed'
+  };
+  const bookings = [booking];
+  const table = { id: 'T1', status: 'Available' };
+
+  assert.equal(
+    logic.tableAvailability(table, bookings, '2026-11-13', '2026-11-13', 9 * 60).status,
+    'Reserved Later'
+  );
+  assert.equal(
+    logic.tableAvailability(table, bookings, '2026-11-13', '2026-11-13', 10 * 60).status,
+    'Reserved Later'
+  );
+  assert.equal(
+    logic.tableAvailability(table, bookings, '2026-11-13', '2026-11-13', 10 * 60 + 1).status,
+    'Reserved Active'
+  );
+  assert.equal(
+    logic.tableAvailability(table, bookings, '2026-11-13', '2026-11-13', 12 * 60).status,
+    'Reserved Active'
+  );
+  assert.equal(
+    logic.tableAvailability(table, [{ ...booking, date: '2026-11-14' }], '2026-11-14', '2026-11-13', 9 * 60).status,
+    'Reserved Later'
+  );
+
+  assert.equal(
+    logic.tableHasReservationConflict('T1', '2026-11-13', '9:30 AM', bookings),
+    false
+  );
+  assert.equal(
+    logic.tableHasReservationConflict('T1', '2026-11-13', '10:00 AM', bookings),
+    false
+  );
+  assert.equal(
+    logic.tableHasReservationConflict('T1', '2026-11-13', '11:00 AM', bookings),
+    true
+  );
+  assert.equal(
+    logic.tableReservationConflict('T1', '2026-11-13', '11:00 AM', bookings).id,
+    'reservation-noon'
+  );
 });
 
 test('keeps an overdue seated table occupied and marks it for staff attention', () => {
@@ -646,7 +696,7 @@ test('flags unclosed bookings whose two-hour window has passed', () => {
     '2026-11-13',
     12 * 60
   );
-  assert.equal(availability.status, 'Reserved');
+  assert.equal(availability.status, 'Reserved Active');
   assert.equal(availability.bookingWindowEnded, true);
 });
 

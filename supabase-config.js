@@ -30,6 +30,7 @@ const tableForCollection = {
   productionLogs: 'production_logs',
   revenueRecords: 'revenue_records',
   wasteLogs: 'waste_logs',
+  preparedFoodWasteLogs: 'prepared_food_waste_logs',
   physicalCounts: 'physical_counts',
   users: 'profiles',
   reservations: 'reservations',
@@ -133,6 +134,14 @@ function mapDatabaseRecord(collection, row) {
       id: row.id, ingredientId: row.ingredient_id, quantity: Number(row.quantity),
       reason: row.reason, date: row.waste_date, productionLogId: row.production_log_id || null,
       recordedAt: row.recorded_at || null, recordedBy: row.recorded_by || null, notes: row.notes || ''
+    };
+  }
+  if (collection === 'preparedFoodWasteLogs') {
+    return {
+      id: row.id, dishName: row.dish_name, productionBatchId: row.production_batch_id || null,
+      productionBatchLabel: row.production_batch_label || '', quantity: Number(row.quantity),
+      reason: row.reason, date: row.waste_date, recordedAt: row.recorded_at || null,
+      recordedBy: row.recorded_by || null, notes: row.notes || ''
     };
   }
   if (collection === 'physicalCounts') {
@@ -304,7 +313,8 @@ function mapDatabaseRecord(collection, row) {
   return {
     id: row.id, name: row.name, category: row.category, unit: row.unit,
     cost: row.cost == null ? null : Number(row.cost), stock: Number(row.stock), minimum: Number(row.minimum),
-    preferredSupplier: row.preferred_supplier || '', trackExpiry: Boolean(row.track_expiry), notes: row.notes || '',
+    preferredSupplier: row.preferred_supplier || '', trackExpiry: Boolean(row.track_expiry),
+    shelfLifeDays: row.shelf_life_days == null ? null : Number(row.shelf_life_days), notes: row.notes || '',
     isActive: row.is_active !== false, updatedAt: row.updated_at
   };
 }
@@ -314,6 +324,7 @@ function mapApplicationRecord(collection, record) {
     id: record.id, name: record.name, category: record.category, unit: record.unit,
     cost: record.cost, stock: record.stock, minimum: record.minimum,
     preferred_supplier: record.preferredSupplier || '', track_expiry: record.trackExpiry === true,
+    shelf_life_days: record.shelfLifeDays == null ? null : Number(record.shelfLifeDays),
     notes: record.notes || ''
   };
   if (collection === 'recipes') return {
@@ -343,6 +354,12 @@ function mapApplicationRecord(collection, record) {
     id: record.id, ingredient_id: record.ingredientId, quantity: record.quantity,
     reason: record.reason, production_log_id: record.productionLogId || null,
     notes: record.notes || ''
+  };
+  if (collection === 'preparedFoodWasteLogs') return {
+    id: record.id, dish_name: String(record.dishName || '').trim(),
+    production_batch_id: record.productionBatchId || null,
+    quantity: Number(record.quantity), reason: record.reason,
+    waste_date: dateValue(record.date), notes: record.notes || ''
   };
   if (collection === 'physicalCounts') return { id: record.id, ingredient_id: record.ingredientId, expected: record.expected, actual: record.actual, count_date: dateValue(record.date) };
   if (collection === 'revenueRecords') return {
@@ -730,6 +747,23 @@ window.supabaseRecord = {
     }
     return data;
   },
+  async markTableAvailable(tableId) {
+    if (typeof tableId !== 'string' || !tableId.trim()) {
+      throw new TypeError('A table is required.');
+    }
+    const { data, error } = await withSaveTimeout(
+      signal => abortableRequest(
+        window.supabaseClient.rpc('costtrack_mark_table_clean', { p_table_id: tableId }),
+        signal
+      ),
+      'Mark table available'
+    );
+    throwIfError(error);
+    if (data !== true) {
+      throw new Error('The database returned an invalid table-cleaning result.');
+    }
+    return data;
+  },
   async load(collection) {
     const table = tableForCollection[collection];
     if (!table) throw new Error(`Unknown data collection: ${collection}`);
@@ -808,9 +842,17 @@ window.supabaseRecord = {
         ? mapDatabaseRecord(collection, data)
         : { ...record, updatedAt: data?.updated_at || record.updatedAt };
     }
+    if (collection === 'preparedFoodWasteLogs') {
+      const { data, error } = await withSaveTimeout(
+        signal => abortableRequest(window.supabaseClient.rpc('costtrack_log_prepared_food_waste', { payload: row }), signal),
+        'Prepared-food waste save'
+      );
+      throwIfError(error);
+      return data?.id ? mapDatabaseRecord(collection, data) : record;
+    }
     const dateColumn = {
       inventoryTransactions: 'transaction_date', productionLogs: 'production_date',
-      wasteLogs: 'waste_date', physicalCounts: 'count_date',
+      wasteLogs: 'waste_date', preparedFoodWasteLogs: 'waste_date', physicalCounts: 'count_date',
       revenueRecords: 'business_date', reservations: 'reservation_date'
     }[collection];
     if (dateColumn && !row[dateColumn]) throw new Error('Enter a valid date before saving.');

@@ -45,6 +45,12 @@ After it runs:
 
 The new dish/version tables are a migration baseline; recipe edits still use the legacy recipe tables and RPC until those workflows are migrated. The new receiving RPC records each delivery as a batch and stock movement, while the existing inventory transaction trigger updates on-hand stock. Until Phase 9 is applied, production, waste, and physical-count writes remain on their legacy workflows. Phase 9 adds a production status queue but still uses the existing production stock trigger; FIFO/FEFO consumption is not enabled. Do not replay old inventory movements into opening batches or apply both legacy and new writes for the same receipt. The migration is designed to be rerunnable but has no automatic rollback; restore the verified backup if rollback is required.
 
+## Automatic invoice, batch, and shelf-life values
+
+After the existing inventory migrations, apply [`034_inventory_automatic_receipt_dates.sql`](./supabase/034_inventory_automatic_receipt_dates.sql) as the database owner. This additive migration adds `shelf_life_days` to products and replaces the receiving RPC with server-validated automatic behavior.
+
+The browser generates a unique invoice number and lot/batch number for display, while the RPC generates the authoritative fallback lot number and recalculates expiration dates for products with an Administrator-configured shelf life. Invoice and received dates use the Manila business date and cannot be future-dated or earlier than the invoice date. A manual expiration date remains allowed only for tracked products that do not have a configured shelf life.
+
 ## Phase 9 buffet production board
 
 After the Phase 8 inventory migration and any required Phase 8 upgrades above are complete, back up the database and run [`phase9_buffet_production_migration.sql`](./supabase/phase9_buffet_production_migration.sql) once in the Supabase SQL Editor as the database owner. Do not rerun Phase 8 to enable the production board.
@@ -66,6 +72,12 @@ After Phase 10, back up the database and run [`phase11_waste_workflow_migration.
 The waste form has searchable ingredient selection, a required single-choice reason chip group, a server-time display, a stock balance preview, optional notes, and optional production-log context. “Other” requires a note. The Manila-local server timestamp is read-only; the database replaces any client-supplied timestamp and date on both RPC and direct inserts. Before saving, the user confirms the quantity and estimated remaining stock. Waste entries remain append-only, and the database atomically deducts stock once and rejects a deduction that would make stock negative. Waste history can be filtered by date, time, ingredient, reason, and staff (including legacy entries). Estimated costs remain restricted to Administrators and Managers.
 
 After migration 020, apply [`021_waste_server_timestamp.sql`](./supabase/021_waste_server_timestamp.sql) as the database owner before deploying the matching browser files. Migration 021 does not rewrite existing waste rows. It enforces the supported reason list and non-blank “Other” notes, sets timestamps and Manila dates on the server, and aligns direct-insert RLS with the waste RPC/UI roles; Inventory Clerk read access to waste reports is unchanged. Run [`021_waste_server_timestamp_acceptance.sql`](./supabase/021_waste_server_timestamp_acceptance.sql) as the database owner; it requires an existing Manager profile and an ingredient with stock, checks server timestamps, validation, idempotent retry, stock deduction, and existing report aggregation, then rolls back all fixtures. Roll back 021 with [`021_waste_server_timestamp_rollback.sql`](./supabase/021_waste_server_timestamp_rollback.sql) before rolling back migration 020.
+
+## Prepared-food and leftover waste
+
+After Phase 9 has created `production_batches` and migration 021 is installed, back up the project and apply [`035_prepared_food_waste.sql`](./supabase/035_prepared_food_waste.sql) as the database owner before deploying the matching app. This additive migration stores cooked-dish waste in `prepared_food_waste_logs`, separate from `waste_logs`; its append-only RPC validates portions and reasons, captures the staff and time, audits the entry, and never invokes an ingredient-stock trigger. An optional ready production batch is stored as context only. Run [`035_prepared_food_waste_acceptance.sql`](./supabase/035_prepared_food_waste_acceptance.sql) to verify RLS, append-only enforcement, audit fields, idempotent retry, role denial, and unchanged ingredient stock. The acceptance requires Manager and Inventory Clerk profiles plus an ingredient with positive stock, and rolls back its fixture. The rollback script refuses to drop the feature if any prepared-food waste records exist.
+
+The Waste Logs page asks staff to choose Ingredient Waste or Prepared Food / Leftovers before entering details. Ingredient waste retains its existing stock preview, confirmation, and deduction. Prepared-food entries record dish, portions, reason, date, and optional batch without returning or deducting recipe ingredients. Reports show ingredient units and prepared portions separately; combined totals represent waste-entry counts, not a sum of unlike units or a new waste-cost calculation.
 
 ## Phase 12 buffet recipe costs and production snapshots
 
@@ -248,6 +260,12 @@ All User Management actions show a success or server-error toast and end their l
 No new secret is required for 032. Supabase Edge Functions provide `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` as server-managed runtime secrets. Keep `INVITE_REDIRECT_URL` configured as described above; never copy the service-role key into `supabase-config.js`, browser variables, or HTML. Configure a production SMTP provider in **Authentication → SMTP Settings** (host, port, username, password, sender name/address) and ensure its sending limits accommodate the invitation workflow. Supabase Auth remains responsible for sending mail and applying its email rate limits.
 
 The 032 rollback is deliberately data-preserving: run `supabase/032_user_management_safety_rollback.sql` only after redeploying the previous Edge Function. It removes the new resend/sent-event RPCs but retains stricter profile-write and reason checks, append-only protections, and invitation audit data; it does not delete rows or reopen direct profile insertion.
+
+## Receptionist table cleaning (migration 033)
+
+For an existing database, run [`supabase/033_receptionist_table_cleaning.sql`](./supabase/033_receptionist_table_cleaning.sql) as the database owner before deploying the updated app. Run [`supabase/033_receptionist_table_cleaning_acceptance.sql`](./supabase/033_receptionist_table_cleaning_acceptance.sql) afterward; it requires active Receptionist and Chef / Kitchen Staff profiles and ends with `ROLLBACK`. Fresh installations using the updated `supabase-schema.sql` already include the RPC.
+
+Receptionists can mark a table in **Needs cleaning** as **Available** from Table Management. The RPC only permits that single status transition and does not grant direct table-edit access; existing Manager and Administrator table-management permissions remain unchanged. The migration can be reversed with [`supabase/033_receptionist_table_cleaning_rollback.sql`](./supabase/033_receptionist_table_cleaning_rollback.sql).
 
 ## Reservation calendar
 
