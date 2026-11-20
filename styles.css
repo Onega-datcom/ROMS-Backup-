@@ -369,6 +369,261 @@ th:first-child {
   white-space: normal;
 }
 
+table th,
+.table-panel th,
+.waste-history-panel th,
+.report-table-scroll th {
+  height: 44px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+table td,
+.table-panel td,
+.waste-history-panel td,
+.report-table-scroll td {
+  height: 52px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.table-panel tbody tr,
+.waste-history-panel tbody tr,
+.report-table-scroll tbody tr {
+  border-bottom: 1px solid #edf1ef;
+}
+
+.table-panel tbody tr:last-child,
+.waste-history-panel tbody tr:last-child,
+.report-table-scroll tbody tr:last-child {
+  border-bottom: 0;
+}
+
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border-top: 1px solid #edf1ef;
+}
+
+.table-page-numbers {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.table-page-numbers button {
+  min-width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.table-page-numbers button.active {
+  border-color: var(--teal);
+  background: var(--teal);
+  color: #fff;
+}
+
+.table-page-summary {
+  margin: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .table-panel table,
+  .report-table-scroll table,
+  .waste-history-panel table,
+  .charge-catalog-panel table,
+  .legacy-revenue-archive table {
+    display: block;
+    min-width: 0;
+  }
+
+  .table-panel thead,
+  .report-table-scroll thead,
+  .waste-history-panel thead,
+  .charge-catalog-panel thead,
+  .legacy-revenue-archive thead {
+    display: none;
+  }
+
+  .table-panel tbody,
+  .report-table-scroll tbody,
+  .waste-history-panel tbody,
+  .charge-catalog-panel tbody,
+  .legacy-revenue-archive tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  .table-panel tbody tr,
+  .report-table-scroll tbody tr,
+  .waste-history-panel tbody tr,
+  .charge-catalog-panel tbody tr,
+  .legacy-revenue-archive tbody tr {
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fff;
+  }
+
+  .table-panel td,
+  .report-table-scroll td,
+  .waste-history-panel td,
+  .charge-catalog-panel td,
+  .legacy-revenue-archive td {
+    display: flex;
+    width: 100%;
+    min-height: 42px;
+    height: auto;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .table-panel td::before,
+  .report-table-scroll td::before,
+  .waste-history-panel td::before,
+  .charge-catalog-panel td::before,
+  .legacy-revenue-archive td::before {
+    content: attr(data-label);
+    flex: 0 0 96px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1.35;
+    text-transform: uppercase;
+  }
+
+  .table-panel td[data-mobile-hidden="true"],
+  .table-panel th.mobile-hidden-cell,
+  .waste-history-panel th:nth-child(6),
+  .waste-history-panel td:nth-child(6),
+  .waste-history-panel th:last-child,
+  .waste-history-panel td:last-child,
+  .report-table-scroll th[data-column="Senior/PWD"],
+  .report-table-scroll td[data-label="Senior/PWD"],
+  .report-table-scroll th[data-column="Kids"],
+  .report-table-scroll td[data-label="Kids"],
+  .report-table-scroll th[data-column="Comped"],
+  .report-table-scroll td[data-label="Comped"],
+  .report-table-scroll th[data-column="Deposit applied"],
+  .report-table-scroll td[data-label="Deposit applied"],
+  .report-table-scroll th[data-column="Deposit receipts"],
+  .report-table-scroll td[data-label="Deposit receipts"],
+  .report-table-scroll th[data-column="Cash payments"],
+  .report-table-scroll td[data-label="Cash payments"],
+  .report-table-scroll th[data-column="Cash refunds"],
+  .report-table-scroll td[data-label="Cash refunds"] {
+    display: none;
+  }
+
+  .charge-catalog-panel .charge-items-table td:nth-child(1)::before { content: "Code"; }
+  .charge-catalog-panel .charge-items-table td:nth-child(2)::before { content: "Name"; }
+  .charge-catalog-panel .charge-items-table td:nth-child(3)::before { content: "Type"; }
+  .charge-catalog-panel .charge-items-table td:nth-child(4)::before { content: "Revenue"; }
+  .charge-catalog-panel .charge-items-table td:nth-child(5)::before { content: "Price"; }
+  .charge-catalog-panel .charge-items-table td:nth-child(6)::before { content: "Actions"; }
+  .charge-catalog-panel .package-tiers-table td:nth-child(1)::before { content: "Code"; }
+  .charge-catalog-panel .package-tiers-table td:nth-child(2)::before { content: "Name"; }
+  .charge-catalog-panel .package-tiers-table td:nth-child(3)::before { content: "Meal"; }
+  .charge-catalog-panel .package-tiers-table td:nth-child(4)::before { content: "Base"; }
+  .charge-catalog-panel .package-tiers-table td:nth-child(5)::before { content: "Status"; }
+  .charge-catalog-panel .discount-presets-table td:nth-child(1)::before { content: "Code"; }
+  .charge-catalog-panel .discount-presets-table td:nth-child(2)::before { content: "Name"; }
+  .charge-catalog-panel .discount-presets-table td:nth-child(3)::before { content: "Type"; }
+  .charge-catalog-panel .discount-presets-table td:nth-child(4)::before { content: "Applies"; }
+  .charge-catalog-panel .discount-presets-table td:nth-child(5)::before { content: "Value"; }
+  .charge-catalog-panel .pos-settings-table td:nth-child(1)::before { content: "Setting"; }
+  .charge-catalog-panel .pos-settings-table td:nth-child(2)::before { content: "Value"; }
+  .charge-catalog-panel .pos-settings-table td:nth-child(3)::before { content: "Actions"; }
+
+  .legacy-revenue-archive td:nth-child(1)::before { content: "Date"; }
+  .legacy-revenue-archive td:nth-child(2)::before { content: "Meal"; }
+  .legacy-revenue-archive td:nth-child(3)::before { content: "Adults"; }
+  .legacy-revenue-archive td:nth-child(4)::before { content: "Children"; }
+  .legacy-revenue-archive td:nth-child(5)::before { content: "Senior/PWD"; }
+  .legacy-revenue-archive td:nth-child(6)::before { content: "Customers"; }
+  .legacy-revenue-archive td:nth-child(7)::before { content: "Amount"; }
+  .legacy-revenue-archive td:nth-child(8)::before { content: "Status"; }
+  .legacy-revenue-archive td:nth-child(3),
+  .legacy-revenue-archive td:nth-child(4),
+  .legacy-revenue-archive td:nth-child(5) {
+    display: none;
+  }
+
+  .table-panel td:last-child,
+  .report-table-scroll td:last-child,
+  .waste-history-panel td:last-child {
+    align-items: center;
+  }
+
+  .table-panel td:last-child .row-actions,
+  .table-panel td[data-label="Actions"] .row-actions {
+    justify-content: flex-end;
+  }
+
+  .table-panel .empty-state,
+  .report-table-scroll .empty-state,
+  .waste-history-panel .empty-state {
+    display: block;
+  }
+
+  .table-panel .empty-state::before,
+  .report-table-scroll .empty-state::before,
+  .waste-history-panel .empty-state::before {
+    content: none;
+  }
+
+  .table-scroll {
+    overflow-x: visible;
+  }
+
+  .report-table-scroll {
+    max-height: none;
+  }
+
+  .report-table-scroll tfoot {
+    display: none;
+  }
+
+  .table-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 6px 4px;
+  }
+
+  .table-page-numbers {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: center;
+  }
+
+  .table-page-summary {
+    flex-basis: 100%;
+    order: 2;
+    text-align: center;
+  }
+}
+
 .empty-table small {
   margin-top: 6px;
 }

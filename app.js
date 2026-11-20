@@ -82,6 +82,8 @@ state.reportTab = state.reportTab || 'food_cost';
 state.reportGrouping = state.reportGrouping || 'day';
 state.reportIncludeWaste = state.reportIncludeWaste !== false;
 state.reportPage = 1;
+state.tablePages = {};
+state.tablePageSize = 10;
 state.userInviteHistory = { rows: [], loading: false, loaded: false, error: '' };
 state.userManagementPane = 'home';
 state.userManagementTab = 'staff';
@@ -141,6 +143,19 @@ const today = () => { const date = new Date(); return `${date.getFullYear()}-${S
 const manilaBusinessToday = () => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit'
 }).format(new Date());
+function formatOperationalDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-PH', {
+    timeZone: 'Asia/Manila',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  }).format(date);
+}
 
 function localDateStr(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -192,6 +207,13 @@ function liveTableAvailability(table, date = today(), reservations = all('reserv
 const read = key => collectionState[key] || [];
 function currentUserName() {
   return state.user?.full_name?.trim() || state.user?.email || 'Signed-in user';
+}
+function staffDisplayName(userId, fallback = 'Staff member') {
+  if (!userId) return fallback;
+  if (String(userId) === String(state.user?.id)) return 'You';
+  const user = all('users').find(item => String(item.id) === String(userId));
+  const name = user?.name || user?.full_name;
+  return typeof name === 'string' && name.trim() ? name.trim() : fallback;
 }
 function currentUserInitials() {
   return currentUserName().split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0].toUpperCase()).join('') || 'U';
@@ -1105,8 +1127,8 @@ function activeNotifications() {
         detail: item.type === 'pending_approval'
           ? `${item.message}${bill?.billNumber ? ` · ${bill.billNumber}` : ''}`
           : item.type === 'open_bill_shift_close'
-            ? `Open bill ${bill?.billNumber || item.sourceId} needs review.`
-            : `${shift?.code || 'Cashier shift'} · ${item.message}`,
+            ? `${bill?.billNumber ? `Open bill ${bill.billNumber}` : 'An open bill'} needs review.`
+            : `Cashier shift · ${item.message}`,
         severity: approval ? 'warning' : 'critical',
         icon: approval ? 'shield' : 'alert',
         createdAt: item.createdAt,
@@ -1510,7 +1532,38 @@ function tablePage(config) {
   const rows = config.rows || [];
   const emptyMessage = config.emptyMessage || 'No records found. Add your first record to get started.';
   const tableClass = config.tableClass ? ` ${esc(config.tableClass)}` : '';
-  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel${tableClass}"><div class="table-scroll"><table><thead><tr>${config.headers.map(item => `<th>${item}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div></div>`;
+  const tableId = config.tableId || String(config.title || 'records').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const pageSize = Number(config.pageSize || state.tablePageSize || 10);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(Math.max(1, Number(state.tablePages[tableId] || 1)), pageCount);
+  state.tablePages[tableId] = currentPage;
+  const pagedRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const mobileLabels = config.mobileLabels || config.headers;
+  const mobileHidden = new Set(config.mobileHidden || []);
+  const mobileRows = pagedRows.map(row => {
+    let index = 0;
+    return row.replace(/<td([^>]*)>/g, (cell, attributes) => {
+      const label = mobileLabels[index];
+      const hidden = mobileHidden.has(config.headers[index]) ? ' data-mobile-hidden="true"' : '';
+      index += 1;
+      return label
+        ? `<td${attributes} data-label="${esc(label)}"${hidden}>`
+        : cell;
+    });
+  });
+  const headerMarkup = config.headers.map(item =>
+    `<th${mobileHidden.has(item) ? ' class="mobile-hidden-cell"' : ''}>${item}</th>`
+  ).join('');
+  const startPage = Math.max(1, Math.min(currentPage - 2, pageCount - 4));
+  const endPage = Math.min(pageCount, startPage + 4);
+  const pageButtons = Array.from({ length: endPage - startPage + 1 }, (_, offset) => {
+    const page = startPage + offset;
+    return `<button type="button" class="${page === currentPage ? 'active' : ''}" data-table-page="${page}" data-table-id="${esc(tableId)}" ${page === currentPage ? 'aria-current="page"' : ''}>${page}</button>`;
+  }).join('');
+  const pagination = rows.length
+    ? `<div class="table-pagination" aria-label="${esc(config.title || 'Table')} pagination"><button type="button" class="ghost-btn compact-btn" data-table-page="${currentPage - 1}" data-table-id="${esc(tableId)}" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button><div class="table-page-numbers">${pageButtons}</div><span class="table-page-summary">${((currentPage - 1) * pageSize) + 1}–${Math.min(currentPage * pageSize, rows.length)} of ${rows.length}</span><button type="button" class="ghost-btn compact-btn" data-table-page="${currentPage + 1}" data-table-id="${esc(tableId)}" ${currentPage >= pageCount ? 'disabled' : ''}>Next</button></div>`
+    : '';
+  return `${pageHeader(config.eyebrow, config.title, config.subtitle, config.action)}${config.beforeTable || ''}<div class="toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search ${config.search || 'records'}..." value="${esc(state.query)}"></div>${config.filters || ''}<span class="record-count">${rows.length} records</span></div><div class="panel table-panel${tableClass}"><div class="table-scroll"><table data-table="${esc(tableId)}"><thead><tr>${headerMarkup}</tr></thead><tbody>${mobileRows.length ? mobileRows.join('') : `<tr><td colspan="${config.headers.length}" class="empty-state">${esc(emptyMessage)}</td></tr>`}</tbody></table></div>${pagination}</div>`;
 }
 function stockStatus(item) { return item.stock <= 0 ? 'Out of Stock' : item.stock <= item.minimum ? 'Low Stock' : 'Healthy'; }
 function formatStockQuantity(value) {
@@ -1527,7 +1580,8 @@ function roleDashboard() {
   const recipes = all('recipes');
   const activeRecipes = recipes.filter(window.CostTrackLogic.isRecipeActive);
   const canSeeRecipeCosts = ['Administrator', 'Manager'].includes(state.role);
-  const todayDate = today();
+  const businessDate = manilaBusinessToday();
+  const todayDate = businessDate;
   const productionToday = all('productionLogs').filter(item => item.date === todayDate).length;
   const wasteToday = all('wasteLogs').filter(item => item.date === todayDate).length;
   const counts = all('physicalCounts');
@@ -1541,11 +1595,46 @@ function roleDashboard() {
   };
   const [eyebrow, subtitle] = roleCopy[state.role];
   const reservations = all('reservations');
-  const pendingReservations = reservations.filter(item => item.status === 'Pending').length;
+  const pendingReservations = reservations.filter(item =>
+    item.status === 'Pending' && (!item.date || item.date >= businessDate)
+  );
   const checkedInReservations = reservations.filter(item => item.status === 'Seated').length;
   const todayReservations = reservations.filter(item => item.date === todayDate);
   const todayWalkIns = todayReservations.filter(item => item.type === 'Walk-in').length;
   const seatedCovers = todayReservations.filter(item => item.status === 'Seated').reduce((sum, item) => sum + Number(item.actualCovers || item.guests || 0), 0);
+  const now = new Date();
+  const [currentHour, currentMinute] = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Manila',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).format(now).split(':').map(Number);
+  const currentMinutes = currentHour * 60 + currentMinute;
+  const isArrivingSoon = item => {
+    if (item.date !== todayDate || item.status !== 'Confirmed') return false;
+    const time = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(item.time || '');
+    if (!time) return false;
+    const arrivalMinutes = Number(time[1]) * 60 + Number(time[2]);
+    return arrivalMinutes >= currentMinutes && arrivalMinutes <= currentMinutes + 120;
+  };
+  const unassignedToday = todayReservations.filter(item =>
+    ['Pending', 'Confirmed'].includes(item.status) && !item.table
+  ).length;
+  const arrivingSoon = todayReservations.filter(isArrivingSoon).length;
+  const prioritizedReservations = todayReservations.slice().sort((left, right) => {
+    const priority = item => item.status === 'Pending' ? 0
+      : !item.table && item.status === 'Confirmed' ? 1
+      : isArrivingSoon(item) ? 2
+      : 3;
+    return priority(left) - priority(right) || (left.time || '').localeCompare(right.time || '');
+  }).slice(0, 4);
+  const businessDateLabel = new Intl.DateTimeFormat('en-PH', {
+    timeZone: 'Asia/Manila',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  }).format(now);
   const revenueData = revenueDashboardData || {};
   const revenueLoadingLabel = revenueDashboardError ? 'Unavailable' : revenueDashboardLoading || !revenueDashboardData ? 'Loading…' : null;
   const revenueDashboardCards = [
@@ -1558,7 +1647,7 @@ function roleDashboard() {
     metric('Voided Bill Amount', revenueLoadingLabel || money(revenueData.voided_bill_amount), '₱', 'red-icon', 'Shown separately · excluded from revenue')
   ];
   const cards = state.role === 'Receptionist'
-    ? [metric("Today's reservations", reservations.filter(item => item.date === today()).length, '▤', 'orange-icon', `${pendingReservations} awaiting confirmation`), metric('Guests expected', reservations.filter(item => item.date === today()).reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => liveTableAvailability(table, today(), reservations).status === 'Available').length, '⌂', 'orange-icon', 'Ready for assignment')]
+    ? [metric("Today's reservations", todayReservations.length, '▤', 'orange-icon', `${pendingReservations.length} awaiting confirmation`), metric('Guests expected', todayReservations.reduce((sum, item) => sum + Number(item.guests), 0), '♙', 'green-icon', 'Across today’s bookings'), metric('Checked in', checkedInReservations, '✓', 'purple-icon', 'Guests currently seated'), metric('Open tables', all('restaurantTables').filter(table => liveTableAvailability(table, todayDate, reservations).status === 'Available').length, '⌂', 'orange-icon', 'Ready for assignment')]
     : state.role === 'Chef / Kitchen Staff'
     ? [metric('Recipes created', recipes.length, '◇', 'purple-icon', `${new Set(recipes.map(item => item.category)).size} categories`), metric('Production logs today', productionToday, '♨', 'green-icon', 'Batches recorded today'), metric('Waste logs today', wasteToday, '◌', 'red-icon', money(wasteCost()) + ' total waste cost'), metric('Active recipes', activeRecipes.length, '↗', 'orange-icon', 'Available to produce')]
     : state.role === 'Inventory Clerk'
@@ -1568,14 +1657,18 @@ function roleDashboard() {
         : [metric('Low stock items', low + out, '!', 'red-icon', 'Needs attention')];
   const recipeCategories = [...new Set(activeRecipes.map(item => item.category))];
   const kitchenPanel = `<div class="panel"><div class="panel-header"><div><div class="panel-title">Kitchen activity</div><div class="panel-subtitle">Active recipes and production by category</div></div><button class="text-btn" data-view="production">Open production board →</button></div><div class="dashboard-list">${activeRecipes.slice(0, 5).map(item => `<div class="dashboard-list-row"><span class="recipe-icon">◇</span><div><strong>${esc(item.name)}</strong><small>${esc(item.category)} · ${item.ingredients.length} ingredients</small></div>${canSeeRecipeCosts ? `<span class="tag">${money(recipePortionCost(item))} / portion</span>` : ''}</div>`).join('') || '<p class="panel-subtitle">No active recipes are available.</p>'}</div><div class="category-chips">${recipeCategories.map(item => `<span>${esc(item)}</span>`).join('')}</div></div>`;
-  const inventoryPanel = `<div class="panel inventory-health-panel"><div class="panel-header"><div><div class="panel-title">Inventory health</div><div class="panel-subtitle">Filter stock levels for quick action</div></div><button class="text-btn" data-view="ingredients">Manage inventory</button></div><div class="quick-filters">${['All', 'Out of Stock', 'Low Stock', 'Healthy'].map(item => `<button class="${state.ingredientStatus === item ? 'active' : ''}" data-dashboard-status="${item}">${item}<b>${item === 'All' ? ingredients.length : ingredients.filter(x => stockStatus(x) === item).length}</b></button>`).join('')}</div><div class="dashboard-list">${ingredients.filter(item => state.ingredientStatus === 'All' || stockStatus(item) === state.ingredientStatus).slice(0, 6).map(item => `<div class="dashboard-list-row" data-view="ingredients"><span class="ingredient-dot">${item.name[0]}</span><div><strong>${esc(item.name)}</strong><small>${item.stock} ${item.unit} · minimum ${item.minimum}</small></div><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></div>`).join('')}</div></div>`;
-  const charts = `<div class="panel empty-state"><div class="panel-title">Cost analytics</div><p>Authoritative trend charts are available in Reports.</p><button class="text-btn" data-view="reports">Open Reports</button></div>`;
-  const reservationPanel = `<div class="panel reservation-summary-panel"><div class="panel-header"><div><div class="panel-title">Reservation service</div><div class="panel-subtitle">${pendingReservations} bookings need attention · ${todayReservations.length} today</div></div><button class="text-btn" data-view="reservations">Manage reservations</button></div><div class="dashboard-list">${todayReservations.slice(0, 4).map(item => `<div class="dashboard-list-row"><span class="ingredient-dot">${esc(item.name.charAt(0))}</span><div><strong>${esc(item.name)}</strong><small>${esc(item.time)} · ${item.guests} guests · ${esc(item.table || 'Unassigned')}</small></div><span class="status">${esc(item.status)}</span></div>`).join('') || '<p class="panel-subtitle">No reservations scheduled for today.</p>'}</div></div>`;
+  const inventoryPanel = `<div class="panel inventory-health-panel"><div class="panel-header"><div><div class="panel-title">Inventory health</div><div class="panel-subtitle">Filter stock levels for quick action</div></div><button class="text-btn" data-view="ingredients">Manage inventory</button></div><div class="quick-filters">${['All', 'Out of Stock', 'Low Stock', 'Healthy'].map(item => `<button class="${state.ingredientStatus === item ? 'active' : ''}" data-dashboard-status="${item}">${item}<b>${item === 'All' ? ingredients.length : ingredients.filter(x => stockStatus(x) === item).length}</b></button>`).join('')}</div><div class="dashboard-list">${ingredients.filter(item => state.ingredientStatus === 'All' || stockStatus(item) === state.ingredientStatus).slice(0, 6).map(item => `<div class="dashboard-list-row" data-view="ingredients"><span class="ingredient-dot">${item.name[0]}</span><div><strong>${esc(item.name)}</strong><small>${formatStockQuantity(item.stock)} ${esc(item.unit)} · minimum ${formatStockQuantity(item.minimum)} ${esc(item.unit)}</small></div><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></div>`).join('')}</div></div>`;
+  const costAnalytics = ['Administrator', 'Manager'].includes(state.role)
+    ? `<div class="panel dashboard-cost-analytics"><div class="panel-header"><div><div class="panel-title">Cost analytics</div><div class="panel-subtitle">Current inventory and costs recorded today</div></div><button class="text-btn" data-view="reports">Open Reports</button></div><div class="analytics-stack"><div><span>Inventory value</span><strong>${money(inventoryValue())}</strong></div><div><span>Logged production cost <small> · ${productionToday} batches</small></span><strong>${money(productionCost(todayDate))}</strong></div><div><span>Logged waste cost <small> · ${wasteToday} entries</small></span><strong>${money(wasteCost(todayDate))}</strong></div></div></div>`
+    : state.role === 'Inventory Clerk'
+      ? `<div class="panel dashboard-cost-analytics"><div class="panel-header"><div><div class="panel-title">Inventory valuation</div><div class="panel-subtitle">Current stock multiplied by unit cost</div></div><button class="text-btn" data-view="reports">Open Reports</button></div><div class="analytics-stack"><div><span>Inventory value</span><strong>${money(inventoryValue())}</strong></div></div></div>`
+    : '';
+  const reservationPanel = `<div class="panel reservation-summary-panel"><div class="panel-header"><div><div class="panel-title">Reservation service</div><div class="reservation-attention-summary" role="group" aria-label="Reservation attention summary"><span><strong>${todayReservations.length}</strong> today</span><span><strong>${pendingReservations.length}</strong> pending approval</span><span><strong>${unassignedToday}</strong> unassigned today</span><span><strong>${arrivingSoon}</strong> arriving in 2 hours</span></div></div><button class="text-btn" data-view="reservations">Manage reservations</button></div><div class="dashboard-list">${prioritizedReservations.map(item => `<div class="dashboard-list-row"><span class="ingredient-dot">${esc(item.name.charAt(0))}</span><div><strong>${esc(item.name)}</strong><small>${esc(item.time)} · ${item.guests} guests · ${esc(item.table || 'Unassigned')}</small></div><span class="status">${esc(item.status)}</span></div>`).join('') || '<p class="panel-subtitle">No reservations scheduled for today.</p>'}</div></div>`;
   const revenueDashboardErrorPanel = canAccessRevenue() && revenueDashboardError
     ? `<div class="panel error-state" role="alert">${esc(revenueDashboardError)} <button class="ghost-btn" data-action="retry-revenue-dashboard">Retry dashboard</button></div>`
     : '';
   const fohMetrics = canAccess('reservations') ? `<div class="panel"><div class="panel-title">Front-of-house today</div><div class="metric-grid compact-metric-grid">${metric('Reservations', todayReservations.length, '▤', 'orange-icon', 'Scheduled today')}${metric('Walk-ins', todayWalkIns, '⌂', 'purple-icon', 'Recorded today')}${metric('Seated covers', seatedCovers, '✓', 'green-icon', 'Currently seated')}</div></div>` : '';
-  return `<div class="welcome-row"><div><div class="eyebrow">${eyebrow}</div><h1>${dashboardGreeting()}</h1><p>${subtitle}</p></div>${state.role === 'Receptionist' ? '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>' : state.role === 'Inventory Clerk' || state.role === 'Administrator' || state.role === 'Manager' ? '<button class="primary-btn" data-action="open-receiving">+ Receive inventory</button>' : '<button class="primary-btn" data-view="production">Open production board</button>'}</div>${revenueDashboardErrorPanel}<div class="metric-grid role-metric-grid">${cards.join('')}</div>${fohMetrics}${state.role === 'Receptionist' ? `<div class="dashboard-grid">${reservationPanel}<div class="panel"><div class="panel-title">Front-of-house checklist</div><div class="checklist"><span>✓ Confirm pending bookings</span><span>○ Check in arriving guests</span><span>○ Review table assignments</span></div></div></div>` : state.role === 'Chef / Kitchen Staff' ? `<div class="dashboard-grid">${kitchenPanel}<div class="panel"><div class="panel-title">Today’s kitchen checklist</div><div class="checklist"><span>✓ Review today’s prep targets</span><span>○ Start a batch from the production board</span><span>○ Mark each cooked batch ready</span></div></div></div>` : state.role === 'Inventory Clerk' ? inventoryPanel : state.role === 'Manager' ? `<div class="dashboard-grid">${inventoryPanel}${reservationPanel}</div>` : `<div class="dashboard-grid">${reservationPanel}${inventoryPanel}</div>`}${state.role === 'Chef / Kitchen Staff' ? '' : charts}`;
+  return `<div class="welcome-row"><div><div class="eyebrow">${eyebrow}</div><h1>${dashboardGreeting()}</h1><p>${subtitle}</p><p class="dashboard-date">Business date · <time datetime="${businessDate}">${esc(businessDateLabel)}</time></p></div>${state.role === 'Receptionist' ? '<button class="primary-btn" data-action="open-reservation">+ New reservation</button>' : state.role === 'Inventory Clerk' || state.role === 'Administrator' || state.role === 'Manager' ? '<button class="primary-btn" data-action="open-receiving">+ Receive inventory</button>' : '<button class="primary-btn" data-view="production">Open production board</button>'}</div>${revenueDashboardErrorPanel}<div class="metric-grid role-metric-grid">${cards.join('')}</div>${fohMetrics}${state.role === 'Receptionist' ? `<div class="dashboard-grid">${reservationPanel}<div class="panel"><div class="panel-title">Front-of-house checklist</div><div class="checklist"><span>✓ Confirm pending bookings</span><span>○ Check in arriving guests</span><span>○ Review table assignments</span></div></div></div>` : state.role === 'Chef / Kitchen Staff' ? `<div class="dashboard-grid">${kitchenPanel}<div class="panel"><div class="panel-title">Today’s kitchen checklist</div><div class="checklist"><span>✓ Review today’s prep targets</span><span>○ Start a batch from the production board</span><span>○ Mark each cooked batch ready</span></div></div></div>` : state.role === 'Inventory Clerk' ? inventoryPanel : state.role === 'Manager' ? `<div class="dashboard-grid">${inventoryPanel}${reservationPanel}</div>` : `<div class="dashboard-grid">${reservationPanel}${inventoryPanel}</div>`}${state.role === 'Chef / Kitchen Staff' ? '' : costAnalytics}`;
 }
 function ingredientCardsPage() {
   const ingredients = all('ingredients');
@@ -1590,7 +1683,7 @@ function ingredientCardsPage() {
   const sorted = filtered.slice().sort((a, b) => { const key = state.ingredientSort === 'stock' ? Number(a.stock) - Number(b.stock) : state.ingredientSort === 'cost' ? Number(a.cost) - Number(b.cost) : state.ingredientSort === 'status' ? stockStatus(a).localeCompare(stockStatus(b)) : a.name.localeCompare(b.name); return state.ingredientSortDirection === 'asc' ? key : -key; });
   const toggle = `<button class="ghost-btn compact-btn" data-action="toggle-ingredient-view">${state.ingredientView === 'cards' ? 'Table view' : 'Card view'}</button>`;
   const cardMarkup = sorted.length ? sorted.map(item => `<article class="catalog-card"><div class="catalog-card-top"><span class="ingredient-dot large-dot">${item.name[0]}</span><div class="product-status-group"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span><span class="product-active-status ${item.isActive === false ? 'is-inactive' : ''}">${item.isActive === false ? 'Inactive' : 'Active'}</span></div></div><h3>${esc(item.name)}</h3><span class="tag">${esc(item.category)}</span><div class="catalog-stat"><div><small>Current stock</small><strong>${formatStockQuantity(item.stock)} <em>${item.unit}</em></strong></div>${canSeeCost ? `<div><small>Cost / unit</small><strong>${money(item.cost)}</strong></div>` : ''}</div><div class="catalog-card-footer"><span>Minimum ${item.minimum} ${item.unit}</span><div class="card-actions">${actions('ingredient', item.id, item)}</div></div></article>`).join('') : `<div class="panel empty-state">No ingredients match these filters.${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">Add product</button>' : ''}</div>`;
-  const tableMarkup = `<div class="panel table-panel"><div class="table-scroll"><table><thead><tr>${[['name','Ingredient'],['stock','Stock'],...(canSeeCost ? [['cost','Cost / unit']] : []),['status','Status'],['','']].map(([key, label]) => key ? `<th><button class="sort-header" data-sort-ingredient="${key}">${label} ↕</button></th>` : '<th></th>').join('')}</tr></thead><tbody>${sorted.length ? sorted.map(item => `<tr><td><strong>${esc(item.name)}</strong><small class="sub-cell">${esc(item.category)} · ${esc(item.unit)} · ${item.isActive === false ? 'Inactive' : 'Active'}</small></td><td>${formatStockQuantity(item.stock)} ${esc(item.unit)}</td>${canSeeCost ? `<td>${money(item.cost)}</td>` : ''}<td><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></td><td>${actions('ingredient', item.id, item)}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No ingredients match these filters.</td></tr>`}</tbody></table></div></div>`;
+  const tableMarkup = `<div class="panel table-panel"><div class="table-scroll"><table data-table="inventory"><thead><tr>${[['name','Ingredient'],['stock','Stock'],...(canSeeCost ? [['cost','Cost / unit']] : []),['status','Status'],['','']].map(([key, label]) => key ? `<th${key === 'cost' ? ' class="mobile-hidden-cell"' : ''}><button class="sort-header" data-sort-ingredient="${key}">${label} ↕</button></th>` : '<th></th>').join('')}</tr></thead><tbody>${sorted.length ? sorted.map(item => `<tr><td data-label="Ingredient"><strong>${esc(item.name)}</strong><small class="sub-cell">${esc(item.category)} · ${esc(item.unit)} · ${item.isActive === false ? 'Inactive' : 'Active'}</small></td><td data-label="Stock">${formatStockQuantity(item.stock)} ${esc(item.unit)}</td>${canSeeCost ? `<td data-label="Cost / unit" data-mobile-hidden="true">${money(item.cost)}</td>` : ''}<td data-label="Status"><span class="status ${stockStatus(item) === 'Healthy' ? 'status-good' : 'status-low'}">${stockStatus(item)}</span></td><td data-label="Actions">${actions('ingredient', item.id, item)}</td></tr>`).join('') : `<tr><td colspan="${canSeeCost ? 5 : 4}" class="empty-state">No ingredients match these filters.</td></tr>`}</tbody></table></div></div>`;
   return `${pageHeader('Inventory', 'Products', 'Review product stock and reorder thresholds.', `${toggle} ${canManageProducts ? '<button class="primary-btn" data-action="open-ingredient">+ Add product</button>' : ''}`)}<div class="catalog-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search products or categories..." value="${esc(state.query)}"></div><select data-filter="ingredientCategory"><option>All categories</option>${categories.map(item => `<option ${state.ingredientCategory === item ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select><label class="filter-check"><input type="checkbox" data-low-stock-filter ${state.ingredientStatus === 'Low Stock' ? 'checked' : ''}> Low stock only</label><span class="record-count">${filtered.length} products</span></div>${state.ingredientView === 'cards' ? `<div class="ingredient-card-grid">${cardMarkup}</div>` : tableMarkup}`;
 }
 function recipeCardsPage() {
@@ -1637,7 +1730,10 @@ function receivingPage() {
     subtitle: 'Record supplier invoices, received quantities, lot numbers, and expiry dates.',
     action: canReceive ? '<button class="primary-btn" data-action="open-receiving">+ Record delivery</button>' : '',
     search: 'supplier, invoice, or product',
+    tableId: 'receiving',
     headers: ['Product / invoice', 'Movement', 'Quantity', 'Unit cost', 'Lot / expiry', 'Date received', ''],
+    mobileLabels: ['Product / invoice', 'Movement', 'Quantity', 'Unit cost', 'Lot / expiry', 'Date received', 'Actions'],
+    mobileHidden: ['Movement', 'Unit cost', 'Lot / expiry'],
     rows
   });
 }
@@ -1679,6 +1775,20 @@ function logsPage(type) {
       const staffLabel = !item.recordedBy ? 'Not recorded' : item.recordedBy === state.user?.id ? 'You' : 'Other staff';
       return `<tr><td><strong>${esc(product?.name || 'Unknown ingredient')}</strong></td><td>${Number(item.quantity)} ${esc(product?.unit || '')}</td><td><span class="tag">${esc(item.reason || 'Unspecified')}</span></td><td>${esc(linkedLog ? recipe(linkedLog.recipeId)?.name || 'Unknown dish' : '—')}</td><td>${esc(item.date || '')}<small class="sub-cell">${esc(activityTime)}</small></td><td>${staffLabel}</td>${canSeeCosts ? `<td>${money(Number(item.quantity || 0) * Number(product?.cost || 0))}</td>` : ''}<td>${esc(item.notes || '—')}</td></tr>`;
     });
+    const pageSize = state.tablePageSize || 10;
+    const wastePageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    const wastePage = Math.min(Math.max(1, Number(state.tablePages.waste || 1)), wastePageCount);
+    state.tablePages.waste = wastePage;
+    const pagedWasteRows = rows.slice((wastePage - 1) * pageSize, wastePage * pageSize);
+    const wasteStart = Math.max(1, Math.min(wastePage - 2, wastePageCount - 4));
+    const wasteEnd = Math.min(wastePageCount, wasteStart + 4);
+    const wastePageButtons = Array.from({ length: wasteEnd - wasteStart + 1 }, (_, offset) => {
+      const page = wasteStart + offset;
+      return `<button type="button" class="${page === wastePage ? 'active' : ''}" data-table-page="${page}" data-table-id="waste" ${page === wastePage ? 'aria-current="page"' : ''}>${page}</button>`;
+    }).join('');
+    const wastePagination = rows.length
+      ? `<div class="table-pagination" aria-label="Waste log pagination"><button type="button" class="ghost-btn compact-btn" data-table-page="${wastePage - 1}" data-table-id="waste" ${wastePage <= 1 ? 'disabled' : ''}>Previous</button><div class="table-page-numbers">${wastePageButtons}</div><span class="table-page-summary">${((wastePage - 1) * pageSize) + 1}–${Math.min(wastePage * pageSize, rows.length)} of ${rows.length}</span><button type="button" class="ghost-btn compact-btn" data-table-page="${wastePage + 1}" data-table-id="waste" ${wastePage >= wastePageCount ? 'disabled' : ''}>Next</button></div>`
+      : '';
     const reasonOptions = [...new Set([...wasteReasons, ...records.map(item => item.reason).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
     const filterMarkup = `<div class="waste-filters">
       <label>From date<input data-waste-filter="from" type="date" value="${esc(filters.from)}"></label>
@@ -1691,7 +1801,7 @@ function logsPage(type) {
       <span class="waste-filter-actions"><button class="primary-btn compact-btn" data-action="apply-waste-filters">Apply</button><button class="ghost-btn compact-btn" data-action="clear-waste-filters">Clear</button></span>
     </div>`;
     const summaries = `<div class="waste-summary"><div><small>Entries shown</small><strong>${matches.length}</strong></div>${selectedIngredient ? `<div><small>Quantity shown</small><strong>${Number(totalQuantity.toFixed(4))} ${esc(ingredient(filters.ingredient)?.unit || '')}</strong></div>` : ''}${canSeeCosts ? `<div><small>Estimated discarded cost</small><strong>${money(totalCost)}</strong></div>` : ''}</div>`;
-    return `${pageHeader('Kitchen operations', 'Waste logs', 'Quickly record discarded ingredients, see the stock impact before saving, and trace waste to a service batch. Only discarded items reduce inventory.', '<button class="primary-btn" data-action="open-waste">+ Log waste</button>')}<div class="panel waste-history-panel"><div class="waste-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search waste, reason, dish, or notes..." value="${esc(state.query)}"></div><span class="record-count">${matches.length} entries</span></div>${filterMarkup}${summaries}<div class="table-scroll"><table><thead><tr><th>Ingredient</th><th>Quantity</th><th>Reason</th><th>Dish / batch</th><th>Date / time</th><th>Logged by</th>${canSeeCosts ? '<th>Estimated cost</th>' : ''}<th>Notes</th></tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${canSeeCosts ? 8 : 7}" class="empty-state">No waste entries match these filters.</td></tr>`}</tbody></table></div></div>`;
+    return `${pageHeader('Kitchen operations', 'Waste logs', 'Quickly record discarded ingredients, see the stock impact before saving, and trace waste to a service batch. Only discarded items reduce inventory.', '<button class="primary-btn" data-action="open-waste">+ Log waste</button>')}<div class="panel waste-history-panel"><div class="waste-toolbar"><div class="search-box">⌕<input id="tableSearch" placeholder="Search waste, reason, dish, or notes..." value="${esc(state.query)}"></div><span class="record-count">${matches.length} entries</span></div>${filterMarkup}${summaries}<div class="table-scroll"><table><thead><tr><th>Ingredient</th><th>Quantity</th><th>Reason</th><th>Dish / batch</th><th>Date / time</th><th>Logged by</th>${canSeeCosts ? '<th>Estimated cost</th>' : ''}<th>Notes</th></tr></thead><tbody>${pagedWasteRows.length ? pagedWasteRows.join('') : `<tr><td colspan="${canSeeCosts ? 8 : 7}" class="empty-state">No waste entries match these filters.</td></tr>`}</tbody></table></div>${wastePagination}</div>`;
   }
   const records = all('productionLogs');
   const rows = records.slice().reverse()
@@ -1703,6 +1813,7 @@ function logsPage(type) {
     subtitle: 'Track batch production and recipe usage in the kitchen.',
     action: '',
     search: 'logs',
+    tableId: 'production',
     headers: ['Recipe', 'Output', 'Mode', 'Date'],
     rows
   });
@@ -1889,6 +2000,7 @@ function countsPage() {
     action: canSubmitCount ? '<button class="primary-btn" data-action="open-count">+ Record count</button>' : '',
     search: 'counts',
     tableClass: 'physical-count-table',
+    tableId: 'physical-count',
     headers: ['Ingredient', 'Expected', 'Actual count', 'Variance', 'Result', 'Count date', ''],
     rows
   });
@@ -1903,6 +2015,7 @@ function ratesPage() {
     subtitle: 'Manage effective adult, child, and senior/PWD rates by meal period and day type.',
     action: '<button class="primary-btn" data-action="open-rate">+ Add rate</button>',
     search: 'rates',
+    tableId: 'buffet-rates',
     headers: ['Meal period', 'Day type', 'Adult', 'Child', 'Senior/PWD', 'Effective dates', 'Status', ''],
     rows
   });
@@ -1912,10 +2025,26 @@ function chargeCatalogPage() {
   const packageTiers = all('packageTiers');
   const discounts = all('discounts');
   const settings = all('posSettings');
-  const rows = chargeItems.length ? chargeItems.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td><span class="tag">${esc(item.type)}</span></td><td>${item.isFoodRevenue ? 'Food' : 'Non-food'}</td><td>${money(item.unitPrice || 0)}</td><td><button class="ghost-btn compact-btn" data-action="edit-charge-item" data-id="${esc(item.id)}">Edit</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty-state">No catalog entries yet. Use the migration seed data or add a charge item from the catalog editor.</td></tr>';
-  const packageRows = packageTiers.length ? packageTiers.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.defaultMealPeriod || 'All Day')}</td><td>${money(item.basePrice || 0)}</td><td><span class="status ${item.isActive ? 'status-good' : 'status-low'}">${item.isActive ? 'Active' : 'Inactive'}</span></td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No package tiers defined.</td></tr>';
-  const discountRows = discounts.length ? discounts.map(item => `<tr><td><strong>${esc(item.code || item.id)}</strong></td><td>${esc(item.name)}</td><td>${esc(item.discountType)}</td><td>${esc(item.appliesTo || 'bill')}</td><td>${item.discountType === 'percent' ? `${Number(item.value || 0).toFixed(2)}%` : money(item.value || 0)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No discount presets defined.</td></tr>';
-  const settingsRows = settings.length ? settings.map(item => `<tr><td>${esc(item.key)}</td><td>${esc(item.type)}</td><td>${esc(String(item.value || ''))}</td><td>${state.role === 'Administrator' && ['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(item.key) ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-pos-setting" data-id="${esc(item.id)}">Edit</button>` : ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty-state">No operating settings saved yet.</td></tr>';
+  const displayCode = value => {
+    const code = String(value || '').trim();
+    return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(code) ? '—' : code || '—';
+  };
+  const rows = chargeItems.length ? chargeItems.map(item => `<tr><td><strong>${esc(displayCode(item.code))}</strong></td><td>${esc(item.name)}</td><td><span class="tag">${esc(item.type)}</span></td><td>${item.isFoodRevenue ? 'Food' : 'Non-food'}</td><td>${money(item.unitPrice || 0)}</td><td><button class="ghost-btn compact-btn" data-action="edit-charge-item" data-id="${esc(item.id)}">Edit</button></td></tr>`).join('') : '<tr><td colspan="6" class="empty-state">No catalog entries yet. Use the migration seed data or add a charge item from the catalog editor.</td></tr>';
+  const packageRows = packageTiers.length ? packageTiers.map(item => `<tr><td><strong>${esc(displayCode(item.code))}</strong></td><td>${esc(item.name)}</td><td>${esc(item.defaultMealPeriod || 'All Day')}</td><td>${money(item.basePrice || 0)}</td><td><span class="status ${item.isActive ? 'status-good' : 'status-low'}">${item.isActive ? 'Active' : 'Inactive'}</span></td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No package tiers defined.</td></tr>';
+  const discountRows = discounts.length ? discounts.map(item => `<tr><td><strong>${esc(displayCode(item.code))}</strong></td><td>${esc(item.name)}</td><td>${esc(item.discountType)}</td><td>${esc(item.appliesTo || 'bill')}</td><td>${item.discountType === 'percent' ? `${Number(item.value || 0).toFixed(2)}%` : money(item.value || 0)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-state">No discount presets defined.</td></tr>';
+  const settingLabels = {
+    pos_max_shift_hours: 'Maximum shift duration',
+    pos_extra_pax_rate: 'Additional guest rate'
+  };
+  const settingsRows = settings.length ? settings.map(item => {
+    const label = settingLabels[item.key] || 'Additional POS setting';
+    const value = item.key === 'pos_max_shift_hours'
+      ? `${esc(String(item.value || ''))} hours`
+      : item.key === 'pos_extra_pax_rate'
+        ? money(item.value)
+        : esc(String(item.value || ''));
+    return `<tr><td>${esc(label)}</td><td>${value}</td><td>${state.role === 'Administrator' && ['pos_max_shift_hours', 'pos_extra_pax_rate'].includes(item.key) ? `<button type="button" class="ghost-btn compact-btn" data-action="edit-pos-setting" data-id="${esc(item.id)}">Edit</button>` : ''}</td></tr>`;
+  }).join('') : '<tr><td colspan="3" class="empty-state">No operating settings saved yet.</td></tr>';
   return `
     <section class="panel charge-catalog-panel">
       <div class="panel-header">
@@ -1928,21 +2057,21 @@ function chargeCatalogPage() {
       <div class="two-column-grid">
         <div class="panel">
           <div class="sub-panel-header"><strong>Charge items</strong></div>
-          <div class="table-scroll"><table class="charge-items-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+          <div class="table-scroll"><table class="charge-items-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Revenue</th><th>Price</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>
         </div>
         <div class="panel">
           <div class="sub-panel-header"><strong>Package tiers</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Code</th><th>Name</th><th>Meal</th><th>Base</th><th>Status</th></tr></thead><tbody>${packageRows}</tbody></table></div>
+          <div class="table-scroll"><table class="package-tiers-table"><thead><tr><th>Code</th><th>Name</th><th>Meal</th><th>Base</th><th>Status</th></tr></thead><tbody>${packageRows}</tbody></table></div>
         </div>
       </div>
       <div class="two-column-grid">
         <div class="panel">
           <div class="sub-panel-header"><strong>Discount presets</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Applies</th><th>Value</th></tr></thead><tbody>${discountRows}</tbody></table></div>
+          <div class="table-scroll"><table class="discount-presets-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Applies</th><th>Value</th></tr></thead><tbody>${discountRows}</tbody></table></div>
         </div>
         <div class="panel">
           <div class="sub-panel-header"><strong>POS settings</strong></div>
-          <div class="table-scroll"><table><thead><tr><th>Key</th><th>Type</th><th>Value</th><th></th></tr></thead><tbody>${settingsRows}</tbody></table></div>
+          <div class="table-scroll"><table class="pos-settings-table"><thead><tr><th>Setting</th><th>Value</th><th>Actions</th></tr></thead><tbody>${settingsRows}</tbody></table></div>
         </div>
       </div>
     </section>
@@ -1957,15 +2086,18 @@ function cashierPage() {
   const rows = bills.map(item => {
     const canEdit = item.status === 'Open'
       && (state.role !== 'Receptionist' || item.createdBy === state.user?.id);
-    return `<tr><td><strong>${esc(item.billNumber || item.id)}</strong></td><td>${esc(item.customerName || 'Walk-in')}</td><td>${Number(item.customersServed || 0)} served</td><td><span class="status ${item.status === 'Closed' ? 'status-good' : item.status === 'Voided' ? 'status-out' : 'status-low'}">${esc(item.status)}</span></td><td>${money(item.balanceDue || 0)}</td><td>${money(item.paidTotal || 0)}</td><td><div class="row-actions"><button class="ghost-btn compact-btn" data-action="open-bill" data-id="${esc(item.id)}">${canEdit ? 'Edit' : 'View'}</button><button class="ghost-btn compact-btn" data-action="print-bill" data-id="${esc(item.id)}">Print</button></div></td></tr>`;
+    return `<tr><td><strong>${esc(item.billNumber || 'Bill number unavailable')}</strong></td><td>${esc(item.customerName || 'Walk-in')}</td><td>${Number(item.customersServed || 0)} served</td><td><span class="status ${item.status === 'Closed' ? 'status-good' : item.status === 'Voided' ? 'status-out' : 'status-low'}">${esc(item.status)}</span></td><td>${money(item.balanceDue || 0)}</td><td>${money(item.paidTotal || 0)}</td><td><div class="row-actions"><button class="ghost-btn compact-btn" data-action="open-bill" data-id="${esc(item.id)}">${canEdit ? 'Edit' : 'View'}</button><button class="ghost-btn compact-btn" data-action="print-bill" data-id="${esc(item.id)}">Print</button></div></td></tr>`;
   });
   return tablePage({
     eyebrow: 'Front of House',
     title: 'Cashier',
     subtitle: 'Create and settle bills without changing stock. Deposits are payments, never discounts.',
-    action: `${activeShift ? `<span class="pos-shift-chip">Shift open · ${esc(activeShift.code)}</span>` : '<button class="ghost-btn" data-action="new-shift">Open shift</button>'} <button class="primary-btn" data-action="new-bill" ${activeShift ? '' : 'disabled'}>+ New bill</button>`,
+    action: `${activeShift ? '<span class="pos-shift-chip">Shift open</span>' : '<button class="ghost-btn" data-action="new-shift">Open shift</button>'} <button class="primary-btn" data-action="new-bill" ${activeShift ? '' : 'disabled'}>+ New bill</button>`,
     search: 'cashier',
+    tableId: 'cashier',
     headers: ['Bill #', 'Customer', 'Served', 'Status', 'Balance', 'Paid', ''],
+    mobileLabels: ['Bill', 'Customer', 'Served', 'Status', 'Balance', 'Paid', 'Actions'],
+    mobileHidden: ['Served', 'Paid'],
     rows,
     emptyMessage: 'No bills yet. Create a bill to begin.'
   });
@@ -1979,15 +2111,18 @@ function shiftsPage() {
     const canMove = item.status === 'Open' && own;
     const canClose = item.status === 'Open' && (own || canCloseAny);
     const variance = item.cashVariance == null ? '—' : `${item.cashVariance > 0 ? '+' : ''}${money(item.cashVariance)}`;
-    return `<tr><td><strong>${esc(item.code || item.id)}</strong><small>${own ? 'Your shift' : `Cashier ${esc(item.openedBy || '—')}`}</small></td><td><span class="status ${item.status === 'Closed' ? 'status-good' : item.status === 'Needs review' ? 'status-out' : 'status-low'}">${esc(item.status)}</span></td><td>${esc(item.openedAt || '')}</td><td>${money(item.openingFloat || 0)}</td><td>${item.expectedCash == null ? '—' : money(item.expectedCash)}</td><td>${variance}</td><td><div class="row-actions"><button class="ghost-btn compact-btn" data-action="open-shift" data-id="${esc(item.id)}">View</button>${canMove ? `<button class="ghost-btn compact-btn" data-action="cash-movement" data-id="${esc(item.id)}">Paid in/out</button>` : ''}${canClose ? `<button class="primary-btn compact-btn" data-action="close-shift" data-id="${esc(item.id)}">Close</button>` : ''}<button class="ghost-btn compact-btn" data-action="print-shift" data-id="${esc(item.id)}">Print</button></div></td></tr>`;
+    return `<tr><td><strong>${own ? 'Your shift' : 'Cashier shift'}</strong><small>${esc(own ? 'Opened by you' : staffDisplayName(item.openedBy, 'Cashier'))}</small></td><td><span class="status ${item.status === 'Closed' ? 'status-good' : item.status === 'Needs review' ? 'status-out' : 'status-low'}">${esc(item.status)}</span></td><td>${esc(formatOperationalDateTime(item.openedAt))}</td><td>${money(item.openingFloat || 0)}</td><td>${item.expectedCash == null ? '—' : money(item.expectedCash)}</td><td>${variance}</td><td><div class="row-actions"><button class="ghost-btn compact-btn" data-action="open-shift" data-id="${esc(item.id)}">View</button>${canMove ? `<button class="ghost-btn compact-btn" data-action="cash-movement" data-id="${esc(item.id)}">Paid in/out</button>` : ''}${canClose ? `<button class="primary-btn compact-btn" data-action="close-shift" data-id="${esc(item.id)}">Close</button>` : ''}<button class="ghost-btn compact-btn" data-action="print-shift" data-id="${esc(item.id)}">Print</button></div></td></tr>`;
   });
   return tablePage({
     eyebrow: 'Front of House',
     title: 'Shifts',
     subtitle: 'Track cashier float, cash movement, and end-of-shift reconciliation.',
-    action: `${ownOpenShift ? `<span class="pos-shift-chip">Open · ${esc(ownOpenShift.code)}</span>` : '<button class="primary-btn" data-action="new-shift">+ Open shift</button>'}`,
+    action: `${ownOpenShift ? '<span class="pos-shift-chip">Shift open</span>' : '<button class="primary-btn" data-action="new-shift">+ Open shift</button>'}`,
     search: 'shifts',
+    tableId: 'shifts',
     headers: ['Shift / cashier', 'Status', 'Opened', 'Starting cash', 'Expected cash', 'Variance', ''],
+    mobileLabels: ['Shift / cashier', 'Status', 'Opened', 'Starting cash', 'Expected cash', 'Variance', 'Actions'],
+    mobileHidden: ['Starting cash', 'Expected cash'],
     rows,
     emptyMessage: 'No shifts recorded yet.'
   });
@@ -1995,28 +2130,17 @@ function shiftsPage() {
 function approvalsPage() {
   const approvals = all('billApprovals').slice().sort((a, b) => String(b.requestedAt || '').localeCompare(String(a.requestedAt || '')));
   const canDecide = ['Administrator', 'Manager'].includes(state.role);
-  const shortId = value => {
-    const id = String(value || '');
-    return id.length > 12 ? `${id.slice(0, 8)}…` : id || '—';
-  };
-  const shortDate = value => {
-    if (!value) return '';
-    const date = new Date(value);
-    return Number.isNaN(date.getTime())
-      ? String(value).slice(0, 16)
-      : date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' });
-  };
   const rows = approvals.map(item => {
     const bill = all('posBills').find(record => record.id === item.billId);
     const label = item.requestType === 'void' ? 'Void bill' : '100% discount';
     const canReview = canDecide && item.status === 'Pending' && item.requestedBy !== state.user?.id;
     const decision = item.decidedBy
-      ? `<small title="${esc(`Decision by ${item.decidedBy} · ${item.decidedAt || ''}${item.decisionReason ? ` · ${item.decisionReason}` : ''}`)}">By ${esc(shortId(item.decidedBy))} · ${esc(shortDate(item.decidedAt))}${item.decisionReason ? ` · ${esc(item.decisionReason)}` : ''}</small>`
+      ? `<small>Decision by ${esc(staffDisplayName(item.decidedBy))} · ${esc(formatOperationalDateTime(item.decidedAt))}${item.decisionReason ? ` · ${esc(item.decisionReason)}` : ''}</small>`
       : '';
     const actions = canReview
       ? `<button class="ghost-btn compact-btn" data-action="approve-approval" data-id="${esc(item.id)}">Approve</button><button class="ghost-btn compact-btn" data-action="reject-approval" data-id="${esc(item.id)}">Reject</button>`
       : '';
-    return `<tr><td><strong>${esc(bill?.billNumber || shortId(item.billId))}</strong><small>${esc(label)}</small></td><td><span class="status ${item.status === 'Approved' ? 'status-good' : item.status === 'Pending' ? 'status-low' : 'status-out'}">${esc(item.status)}</span>${decision}</td><td>${esc(item.requestReason)}<small title="${esc(`Requested by ${item.requestedBy} · ${item.requestedAt || ''}`)}">By ${esc(shortId(item.requestedBy))} · ${esc(shortDate(item.requestedAt))}</small></td><td>${actions}</td></tr>`;
+    return `<tr><td><strong>${esc(bill?.billNumber || 'Bill number unavailable')}</strong><small>${esc(label)}</small></td><td><span class="status ${item.status === 'Approved' ? 'status-good' : item.status === 'Pending' ? 'status-low' : 'status-out'}">${esc(item.status)}</span>${decision}</td><td>${esc(item.requestReason)}<small>Requested by ${esc(staffDisplayName(item.requestedBy))} · ${esc(formatOperationalDateTime(item.requestedAt))}</small></td><td>${actions}</td></tr>`;
   });
   return tablePage({
     eyebrow: 'Front of House',
@@ -2025,6 +2149,7 @@ function approvalsPage() {
       ? 'Review and decide full-discount and bill-void requests. You cannot decide your own request.'
       : 'Track the status and decision history of your approval requests.',
     search: 'approvals',
+    tableId: 'approvals',
     headers: ['Bill / Request', 'Status / Decision', 'Reason / Requested by', 'Action'],
     rows,
     emptyMessage: 'No approval requests.'
@@ -5267,7 +5392,7 @@ function billForm(item = {}) {
       ? `Package line: ${esc(selectedPackageItem.name)} · ${esc(selectedPackageTier.name)} × ${Number(selectedReservation.packagePaxCount || 0)} pax · ${money(Number(selectedPackageTier.basePrice || 0) * Number(selectedReservation.packagePaxCount || 0))} (server adds this on save).`
       : 'No package is booked.'}</div><div>Held deposit: ${money(heldReservationDepositTotal)}${heldReservationDepositTotal ? ' (a payment, applied at close; not a discount)' : ''}</div><div>Table: ${esc(selectedReservation.table || 'None assigned')}</div></section>`
     : '';
-  const content = `<p class="field-help">${editing ? `Bill ${esc(item.billNumber)} · ${esc(item.status)}${item.createdAt ? ` · Created ${esc(item.createdAt)}` : ''}` : 'Cash-only billing. Sales do not deduct inventory. Comped guests count as served at zero.'}</p>
+  const content = `<p class="field-help">${editing ? `Bill ${esc(item.billNumber)} · ${esc(item.status)}${item.createdAt ? ` · Created ${esc(formatOperationalDateTime(item.createdAt))}` : ''}` : 'Cash-only billing. Sales do not deduct inventory. Comped guests count as served at zero.'}</p>
     ${reservationPrefill}
     <div class="pos-headcount-warning is-hidden" data-bill-headcount-warning role="status" aria-live="polite"></div>
     <div class="form-grid pos-bill-customer-grid">
@@ -5363,7 +5488,7 @@ function printBillingStatement(billId) {
     .notice{text-align:center;margin-top:30px;font-size:12px;color:#444}@media print{body{margin:0 auto;padding:0 10mm}}
   </style></head><body><h1>${title}</h1><p class="subtitle">This statement is not an official receipt.</p>
     <div class="meta"><div><strong>Bill:</strong> ${esc(bill.billNumber)}</div><div><strong>Status:</strong> ${esc(bill.status)}</div>
-    <div><strong>Customer:</strong> ${esc(bill.customerName)}</div><div><strong>Date:</strong> ${esc(bill.closedAt || bill.createdAt || '')}</div>
+    <div><strong>Customer:</strong> ${esc(bill.customerName)}</div><div><strong>Date:</strong> ${esc(formatOperationalDateTime(bill.closedAt || bill.createdAt))}</div>
     <div><strong>Customers served:</strong> ${Number(bill.customersServed || 0)}</div><div><strong>Reservation:</strong> ${esc(bill.reservationId || 'Walk-in')}</div></div>
     <table><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Amount</th></tr></thead><tbody>${mealLines.concat(extraLines).join('') || '<tr><td colspan="4">No bill lines</td></tr>'}</tbody></table>
     <div class="totals"><div><span>Subtotal</span><strong>${money(bill.subtotal)}</strong></div>
@@ -5480,7 +5605,7 @@ async function printShiftReport(shiftId) {
     const movements = all('cashMovements').filter(item => item.shiftId === shiftId);
     const variance = shift.declared_cash == null ? null : Number(shift.declared_cash) - Number(summary.expected_cash);
     const amounts = [['Starting cash',shift.opening_float],['Cash bill payments',summary.cash_payments],['Cash deposits received',summary.deposit_receipts],['Paid in',summary.paid_in],['Paid out',summary.paid_out],['Cash refunds',summary.cash_refunds],['Expected cash',summary.expected_cash],['Counted cash',shift.declared_cash]];
-    const doc = `<!doctype html><html><head><meta charset="utf-8"><title>Shift report ${esc(shift.shift_code)}</title><style>body{font:14px Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 20px}h1{font-size:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row{display:flex;justify-content:space-between;border-bottom:1px solid #ddd;padding:8px 0}@media print{body{margin:0 auto}}</style></head><body><h1>Cashier shift report · ${esc(shift.shift_code)}</h1><p>${esc(shift.status)} · Opened ${esc(shift.opened_at || '')} · Closed ${esc(shift.closed_at || 'Open')}</p><section class="grid">${amounts.filter(([,value])=>value!=null).map(([label,value])=>`<div class="row"><span>${label}</span><strong>${money(value)}</strong></div>`).join('')}</section>${variance == null ? '' : `<p>Variance: <strong>${variance > 0 ? '+' : ''}${money(variance)}</strong></p>`}<h2>Cash movements</h2><ul>${movements.map(item=>`<li>${esc(item.movementType)} · ${money(item.amount)} · ${esc(item.reason)}</li>`).join('') || '<li>None</li>'}</ul><script>window.onload=()=>window.print();</script></body></html>`;
+    const doc = `<!doctype html><html><head><meta charset="utf-8"><title>Shift report ${esc(shift.shift_code)}</title><style>body{font:14px Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 20px}h1{font-size:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.row{display:flex;justify-content:space-between;border-bottom:1px solid #ddd;padding:8px 0}@media print{body{margin:0 auto}}</style></head><body><h1>Cashier shift report · ${esc(shift.shift_code)}</h1><p>${esc(shift.status)} · Opened ${esc(formatOperationalDateTime(shift.opened_at))} · Closed ${esc(shift.closed_at ? formatOperationalDateTime(shift.closed_at) : 'Open')}</p><section class="grid">${amounts.filter(([,value])=>value!=null).map(([label,value])=>`<div class="row"><span>${label}</span><strong>${money(value)}</strong></div>`).join('')}</section>${variance == null ? '' : `<p>Variance: <strong>${variance > 0 ? '+' : ''}${money(variance)}</strong></p>`}<h2>Cash movements</h2><ul>${movements.map(item=>`<li>${esc(item.movementType)} · ${money(item.amount)} · ${esc(item.reason)}</li>`).join('') || '<li>None</li>'}</ul><script>window.onload=()=>window.print();</script></body></html>`;
     const printWindow = window.open('', '_blank');
     if (!printWindow) return toast('Allow pop-ups to print the shift report.', 'error');
     printWindow.document.open();
@@ -5864,6 +5989,7 @@ document.addEventListener('input', event => {
   }
   if (searchInput.id !== 'tableSearch') return;
   state.query = searchInput.value;
+  Object.keys(state.tablePages).forEach(key => { state.tablePages[key] = 1; });
   const selectionStart = searchInput.selectionStart ?? searchInput.value.length;
   const selectionEnd = searchInput.selectionEnd ?? selectionStart;
   render();
@@ -6911,18 +7037,20 @@ function reportTable(headers, rows, empty = 'No data in this range.', footer = [
     let index = 0;
     return row.replace(/<td([^>]*)>/g, (cell, attributes) => {
       const numeric = isNumericHeader(headers[index++]);
-      if (!numeric) return cell;
+      const label = headers[index - 1];
+      const baseAttributes = `${attributes} data-label="${esc(label)}"`;
+      if (!numeric) return `<td${baseAttributes}>`;
       const existingClass = attributes.match(/\bclass="([^"]*)"/);
       const nextAttributes = existingClass
         ? attributes.replace(existingClass[0], `class="${existingClass[1]} numeric"`)
         : `${attributes} class="numeric"`;
-      return `<td${nextAttributes}>`;
+      return `<td${nextAttributes} data-label="${esc(label)}">`;
     });
   };
   const footerHtml = footer.length
     ? `<tfoot><tr>${footer.map((item, index) => `<td${isNumericHeader(headers[index]) ? ' class="numeric"' : ''}>${esc(item)}</td>`).join('')}</tr></tfoot>`
     : '';
-  return `<div class="table-scroll report-table-scroll"><table><thead><tr>${headers.map(item => `<th${isNumericHeader(item) ? ' class="numeric"' : ''}>${esc(item)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(alignCells).join('') : `<tr><td colspan="${headers.length}" class="empty-state">${esc(empty)}</td></tr>`}</tbody>${footerHtml}</table></div>`;
+  return `<div class="table-scroll report-table-scroll"><table data-table="report"><thead><tr>${headers.map(item => `<th${isNumericHeader(item) ? ' class="numeric"' : ''} data-column="${esc(item)}">${esc(item)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(alignCells).join('') : `<tr><td colspan="${headers.length}" class="empty-state">${esc(empty)}</td></tr>`}</tbody>${footerHtml}</table></div>`;
 }
 function reportExport(rows, name) { const output = rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); const blob = new Blob([output], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `costtrack-${name}.csv`; link.click(); URL.revokeObjectURL(link.href); }
 async function loadReportData() {
@@ -6988,7 +7116,7 @@ function reportsPage() {
   }
   else if (state.reportTab === 'closed_bill_summary') {
     headers = ['Bill #', 'Business date', 'Closed at', 'Shift', 'Subtotal', 'Service charge', 'Discount', 'Net revenue', 'Adults', 'Senior/PWD', 'Kids', 'Comped', 'Served', 'Deposit applied'];
-    tableRows = rows.map(item => `<tr><td>${esc(item.bill_number)}</td><td>${esc(item.business_date)}</td><td>${esc(item.closed_at)}</td><td>${esc(item.shift_code || '—')}</td><td>${money(item.subtotal)}</td><td>${money(item.service_charge)}</td><td>${money(item.discount_total)}</td><td>${money(item.net_revenue)}</td><td>${Number(item.adult_count || 0)}</td><td>${Number(item.senior_count || 0)}</td><td>${Number(item.kids_count || 0)}</td><td>${Number(item.comped_count || 0)}</td><td>${Number(item.customers_served || 0)}</td><td>${money(item.deposit_applied)}</td></tr>`);
+    tableRows = rows.map(item => `<tr><td>${esc(item.bill_number)}</td><td>${esc(item.business_date)}</td><td>${esc(formatOperationalDateTime(item.closed_at))}</td><td>${esc(item.shift_code || '—')}</td><td>${money(item.subtotal)}</td><td>${money(item.service_charge)}</td><td>${money(item.discount_total)}</td><td>${money(item.net_revenue)}</td><td>${Number(item.adult_count || 0)}</td><td>${Number(item.senior_count || 0)}</td><td>${Number(item.kids_count || 0)}</td><td>${Number(item.comped_count || 0)}</td><td>${Number(item.customers_served || 0)}</td><td>${money(item.deposit_applied)}</td></tr>`);
     kpis = `${metric('Bills in range', Number(data.total_rows || 0), '▤', 'purple-icon', 'Closed status only')}${metric('Page revenue', money(rows.reduce((sum, item) => sum + Number(item.net_revenue || 0), 0)), '₱', 'green-icon', `Page ${data.page || state.reportPage}`)}`;
   }
   else if (state.reportTab === 'waste') {
@@ -7151,6 +7279,7 @@ document.addEventListener('change', event => {
   }
   if (event.target.id === 'tableSearch') {
     state.query = event.target.value;
+    Object.keys(state.tablePages).forEach(key => { state.tablePages[key] = 1; });
     if (state.view !== 'users') render();
   }
   if (event.target.id === 'userManagementRoleFilter') {
@@ -7207,6 +7336,16 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('click', event => {
+  const tablePageButton = event.target.closest('[data-table-page]');
+  if (tablePageButton && !tablePageButton.disabled) {
+    const page = Number(tablePageButton.dataset.tablePage);
+    const tableId = tablePageButton.dataset.tableId;
+    if (page >= 1 && tableId) {
+      state.tablePages[tableId] = page;
+      render();
+      return;
+    }
+  }
   const reportTab = event.target.closest('[data-report-tab]');
   if (reportTab) { state.reportTab = reportTab.dataset.reportTab; state.reportPage = 1; reportRequestKey = ''; render(); return; }
   if (event.target.closest('[data-action="retry-revenue-dashboard"]')) { loadRevenueDashboard(true); return; }

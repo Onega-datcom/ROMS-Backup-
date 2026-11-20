@@ -2757,3 +2757,121 @@ a:focus-visible {
     padding-left: 10px;
   }
 }
+
+.welcome-row .dashboard-date {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dashboard-date time {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.reservation-attention-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.reservation-attention-summary > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.reservation-attention-summary strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dashboard-cost-analytics .analytics-stack {
+  gap: 0;
+  margin-top: 0;
+}
+
+.dashboard-cost-analytics .analytics-stack > div {
+  gap: var(--space-3);
+  padding: 11px 0;
+  line-height: 1.4;
+}
+
+.dashboard-cost-analytics .analytics-stack > div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.dashboard-cost-analytics .analytics-stack small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.content .panel:not(.table-panel):not(.full-calendar-panel) {
+  padding: 18px;
+}
+
+.content .metric-card,
+.content .catalog-card,
+.content .report-card {
+  padding: var(--space-4);
+}
+
+.content .metric-grid:not(.compact-metric-grid) {
+  gap: var(--space-3);
+}
+
+.content > .panel + .dashboard-grid {
+  margin-top: var(--space-4);
+}
+
+.table-panel td > small {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.content .dashboard-grid,
+.content .bottom-grid,
+.content .pos-layout,
+.content .pos-lower,
+.content .admin-grid,
+.content .detail-grid,
+.content .floor-layout,
+.content .reservation-workspace,
+.content .report-grid,
+.content .card-grid,
+.content .ingredient-card-grid,
+.content .recipe-card-grid,
+.content .kanban,
+.content .form-grid {
+  gap: var(--space-4);
+}
+
+@media (min-width: 1025px) {
+  .content {
+    padding: 24px clamp(24px, 2.4vw, 36px) 38px;
+  }
+}
+
+@media (max-width: 720px) {
+  .content .panel:not(.table-panel):not(.full-calendar-panel) {
+    padding: var(--space-4);
+  }
+
+  .content .metric-card {
+    padding: 13px;
+  }
+
+}
